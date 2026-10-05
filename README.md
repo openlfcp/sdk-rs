@@ -13,10 +13,13 @@ Repository scaffold only. The Rust SDK bootstrap is LFCP-040.
 ## Build from a clean checkout
 
 ```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-Requires a stable Rust toolchain.
+These are the same commands CI runs. `rust-toolchain.toml` selects the
+stable channel with rustfmt and clippy, so rustup installs what is needed.
 
 ## License
 

@@ -1,0 +1,5 @@
+# Keep local builds and CI on the same channel and components.
+# Not pinned to an exact version yet.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
