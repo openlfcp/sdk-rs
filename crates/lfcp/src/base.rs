@@ -141,6 +141,21 @@ pub enum Error {
     /// A Key Package opened, but its plaintext is not a 32-byte DEK matching
     /// the commitment of its epoch. Client-local (§25.2, N5).
     DekCommitmentMismatch,
+    /// A message is larger than the receiver's maximum (§31).
+    MessageTooLarge {
+        /// The message size in bytes.
+        size: usize,
+        /// The enforced maximum.
+        limit: usize,
+    },
+    /// A message envelope or body does not have the shape its CDDL gives
+    /// (§32, §34–§61), or a body does not match its message type.
+    MessageMalformed,
+    /// An envelope carries an unknown key from 0 to 15 (§32).
+    MessageReservedEnvelopeKey(u64),
+    /// A message type that is unassigned in the core range, or an
+    /// extension type that was not negotiated (§33).
+    UnsupportedMessageType(u64),
 }
 
 /// The Control Chain rule a record breaks (LFCP-WIRE-01 §13.1, §15).
@@ -237,6 +252,10 @@ impl Error {
             Error::KeyPackageMalformed => "KEY_PACKAGE_MALFORMED",
             Error::KeyPackageRecipientMismatch => "KEY_PACKAGE_RECIPIENT_MISMATCH",
             Error::DekCommitmentMismatch => "DEK_COMMITMENT_MISMATCH",
+            Error::MessageTooLarge { .. } => "MESSAGE_TOO_LARGE",
+            Error::MessageMalformed => "MESSAGE_MALFORMED",
+            Error::MessageReservedEnvelopeKey(_) => "MESSAGE_RESERVED_ENVELOPE_KEY",
+            Error::UnsupportedMessageType(_) => "UNSUPPORTED_MESSAGE_TYPE",
         }
     }
 
@@ -282,7 +301,13 @@ impl Error {
             | Error::FrontierNotCanonical(_)
             | Error::SnapshotMalformed
             | Error::ControlRecordMalformed
-            | Error::KeyPackageMalformed => Some(WireCode::MalformedMessage),
+            | Error::KeyPackageMalformed
+            | Error::MessageMalformed
+            | Error::MessageReservedEnvelopeKey(_) => Some(WireCode::MalformedMessage),
+            Error::MessageTooLarge { .. } => Some(WireCode::MessageTooLarge),
+            // Provisional: §33 names no code for an unknown or un-negotiated
+            // message type; an open question for the project owner.
+            Error::UnsupportedMessageType(_) => Some(WireCode::ProtocolUnsupported),
             // Provisional: whether an unknown core type is MALFORMED_MESSAGE
             // or INVALID_CONTROL_CHAIN is an open question for the project
             // owner (§14 names no code).
@@ -380,6 +405,14 @@ impl fmt::Display for Error {
                 f.write_str("Key Package names another recipient")
             }
             Error::DekCommitmentMismatch => f.write_str("DEK does not match its commitment"),
+            Error::MessageTooLarge { size, limit } => {
+                write!(f, "message of {size} bytes exceeds the {limit}-byte limit")
+            }
+            Error::MessageMalformed => f.write_str("malformed LFCP message"),
+            Error::MessageReservedEnvelopeKey(key) => {
+                write!(f, "unknown envelope key {key} in the reserved range 0-15")
+            }
+            Error::UnsupportedMessageType(code) => write!(f, "unsupported message type {code}"),
         }
     }
 }
