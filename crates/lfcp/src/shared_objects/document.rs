@@ -191,6 +191,13 @@ fn seqs_of(doc: &mut AutoCommit) -> HashMap<ActorId, u64> {
     seqs
 }
 
+/// Changes admitted earlier in an [`SharedObjects::apply_changes`] batch.
+#[derive(Default)]
+struct Batch {
+    hashes: std::collections::HashSet<ChangeHash>,
+    seqs: HashMap<ActorId, u64>,
+}
+
 /// What the §14.1 check decides for one received change.
 enum Admission {
     /// Every dependency is here and the sequence is the actor's next one.
@@ -246,44 +253,123 @@ impl SharedObjects {
     /// fails the §14.1 sequence check stops the call with its error;
     /// changes applied before it stay applied.
     pub fn apply_changes(&mut self, changes: Vec<Change>) -> Result<Vec<Change>, ProfileError> {
-        let mut waiting = changes;
-        loop {
-            let mut progress = false;
-            let mut still = Vec::new();
-            for change in waiting {
-                match self.admit(&change) {
-                    Ok(Admission::Duplicate) => progress = true,
-                    Ok(Admission::Apply) => {
-                        self.engine_apply(change)?;
-                        progress = true;
-                    }
-                    Err(ProfileError::MissingDependencies(_)) => still.push(change),
-                    Err(err) => return Err(err),
+        // Admit the whole batch first (§14.1), counting the changes admitted
+        // before as present, then hand them to the engine in one call:
+        // Automerge applies a batch in near-linear time, while one change at
+        // a time is quadratic (10 000 changes: about 40 ms against 6 s).
+        //
+        // The batch may come in any order: a change is considered once its
+        // dependencies inside the batch are admitted (Kahn's order), so a
+        // reversed history costs no more than an ordered one.
+        let mut seen = std::collections::HashSet::new();
+        let changes: Vec<Change> = changes
+            .into_iter()
+            .filter(|c| seen.insert(c.hash()))
+            .collect();
+        let mut batch = Batch::default();
+        let mut admitted = Vec::new();
+        let mut refused = None;
+        let in_batch: HashMap<ChangeHash, usize> = changes
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (c.hash(), i))
+            .collect();
+        let mut blocking = vec![0usize; changes.len()];
+        let mut unreachable = vec![false; changes.len()];
+        let mut children: HashMap<ChangeHash, Vec<usize>> = HashMap::new();
+        for (i, change) in changes.iter().enumerate() {
+            for dep in change.deps() {
+                if self.doc.get_change_by_hash(dep).is_some() {
+                    continue;
+                }
+                if in_batch.contains_key(dep) {
+                    blocking[i] += 1;
+                    children.entry(*dep).or_default().push(i);
+                } else {
+                    unreachable[i] = true;
                 }
             }
-            if !progress || still.is_empty() {
-                return Ok(still);
+        }
+        let mut ready: std::collections::VecDeque<usize> = (0..changes.len())
+            .filter(|&i| blocking[i] == 0 && !unreachable[i])
+            .collect();
+        let mut done = vec![false; changes.len()];
+        while let Some(i) = ready.pop_front() {
+            if done[i] {
+                continue;
             }
-            waiting = still;
+            done[i] = true;
+            let change = &changes[i];
+            match self.admit_in(change, &batch) {
+                Ok(Admission::Duplicate) => {}
+                Ok(Admission::Apply) => {
+                    batch.seqs.insert(change.actor_id().clone(), change.seq());
+                    batch.hashes.insert(change.hash());
+                    admitted.push(change.clone());
+                }
+                Err(ProfileError::MissingDependencies(_)) => {
+                    done[i] = false;
+                    continue;
+                }
+                Err(err) => {
+                    refused = Some(err);
+                    break;
+                }
+            }
+            for &child in children
+                .get(&change.hash())
+                .map(Vec::as_slice)
+                .unwrap_or(&[])
+            {
+                blocking[child] -= 1;
+                if blocking[child] == 0 && !unreachable[child] {
+                    ready.push_back(child);
+                }
+            }
+        }
+        let waiting: Vec<Change> = changes
+            .into_iter()
+            .zip(done)
+            .filter(|(c, d)| !d && !batch.hashes.contains(&c.hash()))
+            .map(|(c, _)| c)
+            .collect();
+        // Changes admitted before a refusal stay applied, as documented.
+        if !admitted.is_empty() {
+            self.engine_apply_all(admitted)?;
+        }
+        match refused {
+            Some(err) => Err(err),
+            None => Ok(waiting),
         }
     }
 
     /// §14.1: whether `change` may enter the engine now.
     fn admit(&mut self, change: &Change) -> Result<Admission, ProfileError> {
+        self.admit_in(change, &Batch::default())
+    }
+
+    /// [`Self::admit`], with the changes of `batch` counted as if they were
+    /// already in the document.
+    fn admit_in(&mut self, change: &Change, batch: &Batch) -> Result<Admission, ProfileError> {
         let hash = change.hash();
-        if self.doc.get_change_by_hash(&hash).is_some() {
+        if batch.hashes.contains(&hash) || self.doc.get_change_by_hash(&hash).is_some() {
             return Ok(Admission::Duplicate);
         }
         let missing: Vec<ChangeHash> = change
             .deps()
             .iter()
-            .filter(|d| self.doc.get_change_by_hash(d).is_none())
+            .filter(|d| !batch.hashes.contains(*d) && self.doc.get_change_by_hash(d).is_none())
             .copied()
             .collect();
         if !missing.is_empty() {
             return Err(ProfileError::MissingDependencies(missing));
         }
-        let latest = self.seqs.get(change.actor_id()).copied().unwrap_or(0);
+        let latest = batch
+            .seqs
+            .get(change.actor_id())
+            .or_else(|| self.seqs.get(change.actor_id()))
+            .copied()
+            .unwrap_or(0);
         if change.seq() <= latest {
             // Another change already holds this actor sequence: equivocation
             // (LFCP-WIRE-01 §26.2) or a reused sequence (§9).
@@ -298,6 +384,31 @@ impl SharedObjects {
             return Err(ProfileError::Invalid(Diagnostic::InvalidAutomergeBytes));
         }
         Ok(Admission::Apply)
+    }
+
+    /// Hand admitted changes to the engine in one call, with one backup. If
+    /// the engine fails anyway, the document is restored and the changes
+    /// are applied one at a time, so the failing one is isolated and those
+    /// before it stay applied.
+    fn engine_apply_all(&mut self, changes: Vec<Change>) -> Result<(), ProfileError> {
+        let backup = self.doc.clone();
+        let doc = &mut self.doc;
+        let batch = changes.clone();
+        match catch_unwind(AssertUnwindSafe(|| doc.apply_changes(batch))) {
+            Ok(Ok(())) => {
+                for c in &changes {
+                    self.seqs.insert(c.actor_id().clone(), c.seq());
+                }
+                Ok(())
+            }
+            Ok(Err(_)) | Err(_) => {
+                self.doc = backup;
+                for change in changes {
+                    self.engine_apply(change)?;
+                }
+                Ok(())
+            }
+        }
     }
 
     /// Apply one admitted change; a duplicate changes nothing.
@@ -1052,6 +1163,50 @@ mod admission_tests {
             stale.apply_changes(vec![again]),
             Err(ProfileError::SequenceTaken { seq: 2, latest: 2 })
         ));
+    }
+
+    #[test]
+    fn a_batch_in_any_order_with_duplicates_converges() {
+        let mut writer = SharedObjects::new(actor(1));
+        writer.initialize().unwrap();
+        let mut history = vec![];
+        for i in 0..20 {
+            history.push(put_root(&mut writer, "n", &format!("v{i}")));
+        }
+        let mut all = writer.changes();
+        all.reverse();
+        all.extend(all.clone()); // every change twice
+        let mut receiver = SharedObjects::new(actor(2));
+        assert!(receiver.apply_changes(all).unwrap().is_empty());
+        assert_eq!(receiver.heads(), writer.heads());
+        // A batch missing its root waits whole, outside the engine.
+        let mut late = SharedObjects::new(actor(3));
+        let tail: Vec<Change> = writer.changes().into_iter().skip(1).collect();
+        assert_eq!(late.apply_changes(tail.clone()).unwrap().len(), tail.len());
+        assert!(late.changes().is_empty());
+    }
+
+    #[test]
+    fn a_batch_stops_at_a_refused_change_and_keeps_what_came_before() {
+        let (first, second, gapped) = crafted();
+        let mut receiver = SharedObjects::new(actor(2));
+        // The gap is refused before the engine; the first change, admitted
+        // before it, is applied; the document stays usable.
+        assert_eq!(
+            receiver.apply_changes(vec![first.clone(), gapped]),
+            Err(ProfileError::Invalid(Diagnostic::InvalidAutomergeBytes))
+        );
+        assert_eq!(receiver.heads(), vec![first.hash()]);
+        assert!(receiver.apply_changes(vec![second]).unwrap().is_empty());
+        SharedObjects::load(&receiver.save(), actor(2)).unwrap();
+        // Two changes for one actor sequence in one batch: equivocation.
+        let mut twin = SharedObjects::new(actor(1));
+        twin.apply_changes(vec![first.clone()]).unwrap();
+        let other = put_root(&mut twin, "note", "other");
+        let (_, second, _) = crafted();
+        let mut fresh = SharedObjects::new(actor(4));
+        let err = fresh.apply_changes(vec![first, second, other]).unwrap_err();
+        assert_eq!(err.code(), Some("ACTOR_EQUIVOCATION"));
     }
 
     #[test]
