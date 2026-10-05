@@ -16,10 +16,12 @@ Implemented and checked against the official vectors:
   keys, Data Units, canonical frontiers and Snapshots;
 - Control Plane structure (LFCP-042b1): typed Control Records, Control
   Chain validation and fork detection;
-- HPKE Key Packages (LFCP-042c).
+- HPKE Key Packages (LFCP-042c);
+- wire messages and the session handshake (LFCP-043a): the envelope, every
+  typed message body and HELLO / CHALLENGE / AUTH / READY, without I/O.
 
 Next: capabilities and Control transitions (LFCP-042b2), epoch rotation
-and cutoff (LFCP-042b3) and the wire session (LFCP-043).
+and cutoff (LFCP-042b3) and Have Vector anti-entropy (LFCP-043b).
 
 ## Independence rule
 
@@ -41,7 +43,7 @@ uses the modules listed above it.
 | `cbor` | Hand-written deterministic CBOR codec (WIRE §5.2) |
 | `principal` | Principal IDs, descriptors and keys (WIRE §7) |
 | `cose` | Canonical untagged COSE_Sign1: sign, parse, verify (WIRE §10) |
-| `wire` | LFCP Wire structures: Data Epoch keys, Data Units, frontiers, Snapshots, Control Records, the Control Chain and Key Packages so far |
+| `wire` | LFCP Wire structures: Data Epoch keys, Data Units, frontiers, Snapshots, Control Records, the Control Chain, Key Packages, messages and the handshake so far |
 
 The crate has no application or editor dependency, and it forbids `unsafe`
 code. Its runtime dependencies are `sha2`, `hkdf`, `chacha20poly1305`,
