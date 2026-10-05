@@ -22,9 +22,13 @@ Implemented and checked against the official vectors:
 - anti-entropy (LFCP-043b): Have Vectors, their difference, Control sync
   decisions and the §63–§65 state machines;
 - capabilities (LFCP-042b2): the capability engine, ownership transfer
-  verification and the coordinator's Control transition check.
+  verification and the coordinator's Control transition check;
+- Data Epochs (LFCP-042b3): epoch rotation and the strict previous-epoch
+  cutoff, with quarantine and `STALE_DATA_EPOCH`.
 
-Next: epoch rotation and strict cutoff (LFCP-042b3).
+The LFCP protocol layer of this SDK (LFCP-041 to LFCP-043) is complete
+for MVP 0.1: every LFCP-TEST-VECTORS-01 case is decided in scope. Next:
+the Shared Objects profile (LFCP-069).
 
 ## Independence rule
 
@@ -46,7 +50,7 @@ uses the modules listed above it.
 | `cbor` | Hand-written deterministic CBOR codec (WIRE §5.2) |
 | `principal` | Principal IDs, descriptors and keys (WIRE §7) |
 | `cose` | Canonical untagged COSE_Sign1: sign, parse, verify (WIRE §10) |
-| `wire` | LFCP Wire structures: Data Epoch keys, Data Units, frontiers, Snapshots, Control Records, the Control Chain, Key Packages, messages, the handshake, Have Vectors, state machines and the capability engine so far |
+| `wire` | LFCP Wire structures: Data Epoch keys, Data Units, frontiers, Snapshots, Control Records, the Control Chain, Key Packages, messages, the handshake, Have Vectors, state machines, the capability engine and Data Epochs |
 
 The crate has no application or editor dependency, and it forbids `unsafe`
 code. Its runtime dependencies are `sha2`, `hkdf`, `chacha20poly1305`,
