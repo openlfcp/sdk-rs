@@ -1,0 +1,11 @@
+# Build output
+/target/
+
+# Local environment and secrets
+.env
+.env.*
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
