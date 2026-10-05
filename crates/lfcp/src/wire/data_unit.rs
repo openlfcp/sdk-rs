@@ -42,7 +42,11 @@ pub struct DataUnitHeader {
     pub actor: PrincipalId,
     /// Field 3: the actor sequence, starting at 1.
     pub sequence: u64,
-    /// Field 4: the actor's previous unit, `None` at sequence 1.
+    /// Field 4: the writer's latest own unit for the Resource that it
+    /// still holds as accepted, `None` before its first (§26.2). Normally
+    /// sequence − 1; after an abandoned sequence, or once a unit of its
+    /// own is quarantined (stale, §19.1, or equivocating), an earlier one.
+    /// [`DataUnit::seal`] takes it as given: the caller keeps the chain.
     pub previous: Option<DataUnitId>,
     /// Field 5: the Control Head the actor observed.
     pub control_head: Hash32,
@@ -255,49 +259,163 @@ impl DataUnit {
 /// (§26.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChainStatus {
-    /// The unit starts the chain (sequence 1, previous `null`) or links to
-    /// the given previous unit.
+    /// The unit links: its previous unit is the receiver's latest accepted
+    /// unit of the actor, or `null` while the receiver has accepted none,
+    /// even across a sequence gap (a hole, which never blocks).
     Linked,
-    /// A gap or mismatch, which must be reported to the sync engine. This
-    /// is a report, not a rejection.
+    /// The unit does not link. It must be reported to the sync engine and
+    /// held, not merged. This is a report, not a rejection.
     Report(ChainReport),
 }
 
-/// Why a unit does not link into its actor's hash chain.
+/// Why a unit does not link into its actor's hash chain (§26.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChainReport {
-    /// Sequence 1 with a non-null previous unit (§26.2: "For sequence 1, it
-    /// MUST be null").
+    /// Sequence 1 with a non-null previous unit (§26.2: "For sequence 1,
+    /// `previous` MUST be `null`").
     PreviousAtSequenceOne,
-    /// Sequence above 1 and the receiver holds no unit at sequence − 1.
-    Gap,
-    /// The previous-unit field does not name the actor's unit at sequence
-    /// − 1.
-    Mismatch,
+    /// The previous unit is `null` but the receiver has already accepted a
+    /// unit of the actor.
+    PreviousNullAfterAccepted,
+    /// The previous unit is not the receiver's latest accepted unit of the
+    /// actor: one it has not accepted (yet), or an older one. A unit of the
+    /// first kind links once the named unit is accepted and is the latest.
+    PreviousNotLatest,
 }
 
-/// Check `unit` against its actor's hash chain. `previous` is the
-/// receiver's unit for the same Resource and actor at sequence − 1, if it
-/// has one; it is ignored at sequence 1.
-pub fn check_chain(unit: &DataUnit, previous: Option<&DataUnit>) -> ChainStatus {
-    let header = unit.header();
-    if header.sequence == 1 {
-        return match header.previous {
-            None => ChainStatus::Linked,
-            Some(_) => ChainStatus::Report(ChainReport::PreviousAtSequenceOne),
-        };
+/// Check `unit` against its actor's hash chain. `latest` is the receiver's
+/// latest accepted unit for the same Resource and actor (the accepted unit
+/// with the highest sequence), if it has accepted any.
+///
+/// The sequences between `latest` and `unit` do not matter: an abandoned
+/// sequence leaves a hole, and the unit after it names the writer's last
+/// published unit (§26.2, G-DP1-GAP).
+pub fn check_chain(unit: &DataUnit, latest: Option<&DataUnit>) -> ChainStatus {
+    check_link(
+        unit.header(),
+        latest.map(|before| (before.header(), before.id())),
+    )
+}
+
+fn check_link(
+    header: &DataUnitHeader,
+    latest: Option<(&DataUnitHeader, DataUnitId)>,
+) -> ChainStatus {
+    match (header.previous, latest) {
+        (Some(_), _) if header.sequence == 1 => {
+            ChainStatus::Report(ChainReport::PreviousAtSequenceOne)
+        }
+        (None, None) => ChainStatus::Linked,
+        (None, Some(_)) => ChainStatus::Report(ChainReport::PreviousNullAfterAccepted),
+        (Some(previous), Some((before, id)))
+            if previous == id
+                && before.resource_id == header.resource_id
+                && before.actor == header.actor
+                && before.sequence < header.sequence =>
+        {
+            ChainStatus::Linked
+        }
+        (Some(_), _) => ChainStatus::Report(ChainReport::PreviousNotLatest),
     }
-    let Some(previous) = previous else {
-        return ChainStatus::Report(ChainReport::Gap);
-    };
-    let before = previous.header();
-    let is_predecessor = before.resource_id == header.resource_id
-        && before.actor == header.actor
-        && before.sequence.checked_add(1) == Some(header.sequence);
-    if is_predecessor && header.previous == Some(previous.id()) {
-        ChainStatus::Linked
-    } else {
-        ChainStatus::Report(ChainReport::Mismatch)
+}
+
+/// A receiver's view of one actor's chain in one Resource (§26.2): the
+/// latest accepted unit and the units held until they link.
+///
+/// [`ActorChain::receive`] takes verified, authorized units in any order
+/// and returns those that are accepted now, in chain order: the unit if it
+/// links, followed by every held unit it releases. A unit that does not
+/// link stays held; [`ActorChain::held`] lists them for the sync engine.
+/// Equivocation (two units in one slot) is checked separately with
+/// [`check_equivocation`]; this type does not resolve it.
+#[derive(Clone, Debug, Default)]
+pub struct ActorChain {
+    latest: Option<(DataUnitHeader, DataUnitId)>,
+    held: Vec<DataUnit>,
+}
+
+impl ActorChain {
+    /// A chain with no accepted unit.
+    pub fn new() -> ActorChain {
+        ActorChain::default()
+    }
+
+    /// A chain whose latest accepted unit is `latest`: restored from a
+    /// store, or the actor's latest unit a loaded Snapshot covers (the
+    /// Snapshot attests to the units it covers, §29.3).
+    pub fn from_latest(latest: &DataUnit) -> ActorChain {
+        ActorChain {
+            latest: Some((latest.header().clone(), latest.id())),
+            held: Vec::new(),
+        }
+    }
+
+    /// The sequence and ID of the latest accepted unit.
+    pub fn latest(&self) -> Option<(u64, DataUnitId)> {
+        self.latest
+            .as_ref()
+            .map(|(header, id)| (header.sequence, *id))
+    }
+
+    /// Where `unit` stands against the latest accepted unit.
+    pub fn check(&self, unit: &DataUnit) -> ChainStatus {
+        check_link(
+            unit.header(),
+            self.latest.as_ref().map(|(header, id)| (header, *id)),
+        )
+    }
+
+    /// Receive `unit` and return the units accepted now, in chain order.
+    /// A unit that is already held or accepted is ignored.
+    pub fn receive(&mut self, unit: DataUnit) -> Vec<DataUnit> {
+        let id = unit.id();
+        if self
+            .latest
+            .as_ref()
+            .is_some_and(|(_, latest)| *latest == id)
+            || self.held.iter().any(|held| held.id() == id)
+        {
+            return Vec::new();
+        }
+        if self.check(&unit) != ChainStatus::Linked {
+            self.held.push(unit);
+            return Vec::new();
+        }
+        self.latest = Some((unit.header().clone(), unit.id()));
+        let mut accepted = vec![unit];
+        accepted.extend(self.release());
+        accepted
+    }
+
+    /// Set the latest accepted unit back to `latest` (`None`: no unit)
+    /// after the receiver stopped accepting later units, for example
+    /// units a newly known Key Epoch Record places beyond the cutoff
+    /// (§19.1, §29.3). The writer's next unit names its latest unit still
+    /// accepted, so held units may link now: they are returned, in chain
+    /// order, as for [`ActorChain::receive`].
+    pub fn rewind(&mut self, latest: Option<&DataUnit>) -> Vec<DataUnit> {
+        self.latest = latest.map(|unit| (unit.header().clone(), unit.id()));
+        self.release()
+    }
+
+    /// Accept every held unit that links, in chain order.
+    fn release(&mut self) -> Vec<DataUnit> {
+        let mut accepted = Vec::new();
+        while let Some(next) = self
+            .held
+            .iter()
+            .position(|held| self.check(held) == ChainStatus::Linked)
+        {
+            let unit = self.held.remove(next);
+            self.latest = Some((unit.header().clone(), unit.id()));
+            accepted.push(unit);
+        }
+        accepted
+    }
+
+    /// The units held because they do not link (yet).
+    pub fn held(&self) -> &[DataUnit] {
+        &self.held
     }
 }
 
@@ -406,19 +524,125 @@ mod tests {
             check_chain(&wrong_start, None),
             ChainStatus::Report(ChainReport::PreviousAtSequenceOne)
         );
+        // The previous unit has not been accepted.
         assert_eq!(
             check_chain(&second, None),
-            ChainStatus::Report(ChainReport::Gap)
+            ChainStatus::Report(ChainReport::PreviousNotLatest)
         );
         assert_eq!(
             check_chain(&unlinked, Some(&first)),
-            ChainStatus::Report(ChainReport::Mismatch)
+            ChainStatus::Report(ChainReport::PreviousNullAfterAccepted)
         );
-        // The previous unit must be the actor's sequence − 1.
+        // The latest accepted unit must come before the unit.
         assert_eq!(
             check_chain(&second, Some(&second)),
-            ChainStatus::Report(ChainReport::Mismatch)
+            ChainStatus::Report(ChainReport::PreviousNotLatest)
         );
+    }
+
+    #[test]
+    fn a_unit_links_across_a_hole() {
+        // Sequence 3 was reserved and abandoned: 4 names 2 (G-DP1-GAP).
+        let first = seal(1, None, b"1");
+        let second = seal(2, Some(first.id()), b"2");
+        let fourth = seal(4, Some(second.id()), b"4");
+        assert_eq!(check_chain(&fourth, Some(&second)), ChainStatus::Linked);
+        // Naming 2 is not enough once a later unit is accepted.
+        let third = seal(3, Some(second.id()), b"3");
+        let other_fourth = seal(4, Some(second.id()), b"4'");
+        assert_eq!(
+            check_chain(&other_fourth, Some(&third)),
+            ChainStatus::Report(ChainReport::PreviousNotLatest)
+        );
+        // A null previous after an accepted unit is held, at any sequence.
+        assert_eq!(
+            check_chain(&seal(1, None, b"1'"), Some(&first)),
+            ChainStatus::Report(ChainReport::PreviousNullAfterAccepted)
+        );
+    }
+
+    #[test]
+    fn actor_chain_holds_and_releases() {
+        let first = seal(1, None, b"1");
+        let second = seal(2, Some(first.id()), b"2");
+        let third = seal(3, Some(second.id()), b"3");
+        let fourth = seal(4, Some(third.id()), b"4");
+        let ids = |units: Vec<DataUnit>| units.iter().map(DataUnit::id).collect::<Vec<_>>();
+
+        let mut chain = ActorChain::new();
+        assert_eq!(ids(chain.receive(first.clone())), [first.id()]);
+        // 4 before 3: 4 names 3, which is not accepted, so 4 is held.
+        assert!(chain.receive(fourth.clone()).is_empty());
+        assert!(chain.receive(third.clone()).is_empty());
+        assert_eq!(ids(chain.held().to_vec()), [fourth.id(), third.id()]);
+        // A held unit received again changes nothing.
+        assert!(chain.receive(fourth.clone()).is_empty());
+        assert_eq!(chain.held().len(), 2);
+        // 2 links and releases 3, then 4.
+        assert_eq!(
+            ids(chain.receive(second.clone())),
+            [second.id(), third.id(), fourth.id()]
+        );
+        assert!(chain.held().is_empty());
+        assert_eq!(chain.latest(), Some((4, fourth.id())));
+        // The latest unit received again changes nothing.
+        assert!(chain.receive(fourth).is_empty());
+        assert!(chain.held().is_empty());
+    }
+
+    #[test]
+    fn actor_chain_keeps_the_held_cases_held() {
+        let first = seal(1, None, b"1");
+        let mut chain = ActorChain::new();
+        // A non-null previous at sequence 1.
+        assert!(chain.receive(seal(1, Some(first.id()), b"x")).is_empty());
+        assert_eq!(chain.receive(first.clone()).len(), 1);
+        // A null previous after an accepted unit.
+        assert!(chain.receive(seal(3, None, b"y")).is_empty());
+        // A previous the receiver never accepts.
+        let unknown = seal(2, Some(first.id()), b"never received");
+        assert!(chain.receive(seal(3, Some(unknown.id()), b"z")).is_empty());
+        assert_eq!(chain.held().len(), 3);
+        assert_eq!(chain.latest(), Some((1, first.id())));
+    }
+
+    #[test]
+    fn actor_chain_rewinds_past_an_excluded_unit() {
+        // The receiver accepted 3 before learning that a Key Epoch Record
+        // places it beyond the cutoff. The writer quarantined 3 and links
+        // 4 to 2: held until the receiver rebuilds without 3.
+        let first = seal(1, None, b"1");
+        let second = seal(2, Some(first.id()), b"2");
+        let stale = seal(3, Some(second.id()), b"3");
+        let fourth = seal(4, Some(second.id()), b"4");
+        let mut chain = ActorChain::new();
+        for unit in [&first, &second, &stale] {
+            assert_eq!(chain.receive(unit.clone()).len(), 1);
+        }
+        assert!(chain.receive(fourth.clone()).is_empty());
+        assert_eq!(
+            chain.check(&fourth),
+            ChainStatus::Report(ChainReport::PreviousNotLatest)
+        );
+        assert_eq!(chain.rewind(Some(&second)), std::slice::from_ref(&fourth));
+        assert_eq!(chain.latest(), Some((4, fourth.id())));
+        assert!(chain.held().is_empty());
+        // Rewinding to no unit lets a new sequence 1 link.
+        let mut chain = ActorChain::from_latest(&first);
+        assert!(chain.receive(seal(1, None, b"again")).is_empty());
+        assert_eq!(chain.rewind(None).len(), 1);
+    }
+
+    #[test]
+    fn actor_chain_resumes_from_its_latest_unit() {
+        // Restored from a store, or the latest unit a Snapshot covers.
+        let first = seal(1, None, b"1");
+        let second = seal(2, Some(first.id()), b"2");
+        let fifth = seal(5, Some(second.id()), b"5");
+        let mut chain = ActorChain::from_latest(&second);
+        assert_eq!(chain.latest(), Some((2, second.id())));
+        assert_eq!(chain.receive(fifth.clone()).len(), 1);
+        assert_eq!(chain.latest(), Some((5, fifth.id())));
     }
 
     #[test]
