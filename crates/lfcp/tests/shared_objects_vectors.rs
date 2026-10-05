@@ -10,7 +10,7 @@
 //!   the corpus' logical state and conflicts.
 //!
 //! The vectors and the corpus are read at the `spec.lock` pin
-//! (mvp-0.1-baseline.6).
+//! (mvp-0.1-baseline.7).
 
 mod support;
 
@@ -19,12 +19,12 @@ use std::collections::BTreeMap;
 use automerge::Change;
 use lfcp::base::{self, ObjectId, PrincipalId, ResourceId};
 use lfcp::shared_objects::document::{NewTask, SharedObjects};
-use lfcp::shared_objects::framing;
 use lfcp::shared_objects::identity::{
     actor_id, actor_id_bytes, parse_principal_ref, principal_ref,
 };
 use lfcp::shared_objects::validate::ObjectStatus;
 use lfcp::shared_objects::values::Plain;
+use lfcp::shared_objects::{expansion, framing};
 use lfcp::shared_objects::{Diagnostic, ProfileError};
 use serde_json::Value as Json;
 use support::spec::Spec;
@@ -828,8 +828,9 @@ fn every_corpus_change_applies_and_every_save_loads() {
 #[test]
 fn the_corpus_validations_report_their_problems() {
     // SO-STRINGS (baseline.6): Automerge save images with Text in places
-    // the profile writes scalar strings; each loads and reports exactly
-    // the expected per-value problems (§30, §74.1).
+    // the profile writes scalar strings; SO-DEPTH (baseline.7): an
+    // extension nested 64 levels deep (valid) and 65 (§30). Each loads and
+    // reports exactly the expected per-value problems (§30, §74.1).
     let corpus = corpus();
     let validations = corpus["validations"].as_array().unwrap();
     let ids: Vec<&str> = validations
@@ -841,7 +842,9 @@ fn the_corpus_validations_report_their_problems() {
         [
             "SO-STRINGS-text-anywhere",
             "SO-STRINGS-text-tag-member",
-            "SO-STRINGS-text-root-profile"
+            "SO-STRINGS-text-root-profile",
+            "SO-DEPTH-64",
+            "SO-DEPTH-65"
         ]
     );
     let suite = suite();
@@ -1047,7 +1050,8 @@ fn the_corpus_negatives_are_not_merged() {
     // SO-SEC1-change-actor-mismatch carries pavel's change (§8, §11);
     // SO-BYTES-change-checksum andrey's own change with a corrupted
     // checksum, and SO-BYTES-document-chunk S01's full save instead of a
-    // change (§11, §13, §74.1).
+    // change (§11, §13, §74.1); SO-UNKNOWN-ACTOR andrey's next change
+    // naming an actor S01 does not know (§11.1).
     let corpus = corpus();
     let negatives = corpus["negatives"].as_array().unwrap();
     let ids: Vec<&str> = negatives
@@ -1059,7 +1063,8 @@ fn the_corpus_negatives_are_not_merged() {
         [
             "SO-SEC1-change-actor-mismatch",
             "SO-BYTES-change-checksum",
-            "SO-BYTES-document-chunk"
+            "SO-BYTES-document-chunk",
+            "SO-UNKNOWN-ACTOR"
         ]
     );
     let suite = suite();
@@ -1164,7 +1169,86 @@ fn the_corpus_negatives_are_not_merged() {
                     SharedObjects::load(&save, actor_id(&f.resource, &signer_id)).unwrap();
                 assert_eq!(loaded.heads(), heads, "{id}: S01's save");
             }
+            "SO-UNKNOWN-ACTOR" => {
+                // Within the expansion limits and a well-formed change: only
+                // the apply-time rule refuses it (automerge 0.12 would
+                // panic on it).
+                let framed = framing::snapshot_payload(&plaintext).unwrap();
+                assert!(expansion::check_change(&framed).is_ok(), "{id}");
+                let change = framing::decode_change(&plaintext).unwrap();
+                assert!(!change.other_actor_ids().is_empty(), "{id}");
+            }
             _ => unreachable!(),
+        }
+    }
+}
+
+#[test]
+fn the_expansion_vectors_are_checked_before_the_engine() {
+    // §11.1, §13.1 (baseline.7): each case with the expansion check alone,
+    // a change against the exact limits, a Snapshot against the floor.
+    let corpus = corpus();
+    let expansion_set = &corpus["expansion"];
+    let limits = &expansion_set["limits"];
+    let change = &limits["change"];
+    assert_eq!(change["max_rows"], expansion::CHANGE_LIMITS.max_rows);
+    assert_eq!(
+        change["max_group_sum"],
+        expansion::CHANGE_LIMITS.max_group_sum
+    );
+    assert_eq!(
+        change["max_string_bytes"],
+        expansion::CHANGE_LIMITS.max_string_bytes
+    );
+    assert_eq!(change["max_deps"], expansion::CHANGE_LIMITS.max_deps);
+    assert_eq!(change["max_actors"], expansion::CHANGE_LIMITS.max_actors);
+    let floor = &limits["snapshot_floor"];
+    let f = expansion::SNAPSHOT_LIMITS_FLOOR;
+    assert_eq!(floor["max_rows"], f.max_rows);
+    assert_eq!(floor["max_group_sum"], f.max_group_sum);
+    assert_eq!(floor["max_string_bytes"], f.max_string_bytes);
+    assert_eq!(floor["max_inflated_bytes"], f.max_inflated_bytes);
+    assert_eq!(floor["max_actors"], f.max_actors);
+    assert_eq!(floor["max_heads"], f.max_deps);
+
+    let cases = expansion_set["cases"].as_array().unwrap();
+    assert_eq!(cases.len(), 16);
+    for case in cases {
+        let id = case["id"].as_str().unwrap();
+        let bytes = base::from_hex(case["bytes_hex"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            base::to_hex(&<sha2::Sha256 as sha2::Digest>::digest(&bytes)),
+            case["sha256"].as_str().unwrap(),
+            "{id}: bytes"
+        );
+        let result = match case["kind"].as_str().unwrap() {
+            "change" => expansion::check_change(&bytes).map(|_| ()),
+            "snapshot" => expansion::check_snapshot(&bytes, &f).map(|_| ()),
+            other => panic!("{id}: kind {other}"),
+        };
+        let expected = &case["expected"];
+        if expected["within_limits"].as_bool().unwrap() {
+            assert_eq!(result, Ok(()), "{id}");
+        } else {
+            let err = result.unwrap_err();
+            assert_eq!(err.code(), expected["error"]["code"].as_str(), "{id}");
+            assert_eq!(
+                err.diagnostic().map(Diagnostic::name),
+                expected["error"]["diagnostic"].as_str(),
+                "{id}"
+            );
+            // A received change is refused in decoding, before Automerge.
+            if case["kind"] == "change" {
+                let plaintext = framing::encode_change(&bytes);
+                assert_eq!(framing::decode_change(&plaintext).unwrap_err(), err, "{id}");
+            } else {
+                let plaintext = framing::encode_snapshot(&bytes);
+                assert_eq!(
+                    framing::decode_snapshot(&plaintext).unwrap_err(),
+                    err,
+                    "{id}"
+                );
+            }
         }
     }
 }
