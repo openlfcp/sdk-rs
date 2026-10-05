@@ -146,11 +146,12 @@ pub fn check_fork(a: &ControlRecord, b: &ControlRecord) -> Result<(), Error> {
 
 /// The coordinator's compare-and-swap check for `CONTROL_PUT` (§47): the
 /// expected head must equal the current head, or the put is rejected with
-/// `NACK(CONTROL_HEAD_MISMATCH)` carrying the current head. Committing the
-/// record atomically with this check is the coordinator's job.
+/// `NACK(CONTROL_HEAD_MISMATCH)` carrying the current head. A `CONTROL_PUT`
+/// always names an expected head; Genesis uses `RESOURCE_HOST`. Committing
+/// the record atomically with this check is the coordinator's job.
 pub fn check_expected_head(
-    expected: Option<ControlRecordId>,
-    current: Option<ControlRecordId>,
+    expected: ControlRecordId,
+    current: ControlRecordId,
 ) -> Result<(), Error> {
     if expected == current {
         Ok(())
@@ -398,13 +399,12 @@ mod tests {
 
     #[test]
     fn expected_head_must_be_current() {
-        let a = Some(ControlRecordId::from_bytes([1; 32]));
-        let b = Some(ControlRecordId::from_bytes([2; 32]));
+        let a = ControlRecordId::from_bytes([1; 32]);
+        let b = ControlRecordId::from_bytes([2; 32]);
         assert_eq!(check_expected_head(a, a), Ok(()));
         let err = check_expected_head(a, b).unwrap_err();
         assert_eq!(err, Error::ControlHeadMismatch { current: b });
         assert_eq!(err.wire_code().unwrap().name(), "CONTROL_HEAD_MISMATCH");
-        assert!(check_expected_head(None, b).is_err());
     }
 
     #[test]

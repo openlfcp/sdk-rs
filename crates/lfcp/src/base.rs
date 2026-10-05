@@ -170,11 +170,14 @@ pub enum Error {
     AuthFailed(AuthFailure),
     /// No wire profile is supported by both peers (§34, §35).
     NoCommonWireProfile,
+    /// A text WebSocket message (§31).
+    TextFrame,
     /// A `CONTROL_PUT` expected another Control Head than the coordinator's
     /// current one (§47).
     ControlHeadMismatch {
-        /// The coordinator's current head, which the `NACK` reports.
-        current: Option<ControlRecordId>,
+        /// The coordinator's current head, which the `NACK` carries as its
+        /// details (§47).
+        current: ControlRecordId,
     },
     /// An event that the §63–§65 state machine does not allow in the
     /// current state. A local logic error with no wire code.
@@ -383,6 +386,7 @@ impl Error {
             Error::UnsupportedMessageType(_) => "UNSUPPORTED_MESSAGE_TYPE",
             Error::AuthFailed(_) => "AUTH_FAILED",
             Error::NoCommonWireProfile => "NO_COMMON_WIRE_PROFILE",
+            Error::TextFrame => "TEXT_FRAME",
             Error::ControlHeadMismatch { .. } => "CONTROL_HEAD_MISMATCH",
             Error::IllegalTransition { .. } => "ILLEGAL_TRANSITION",
             Error::SessionNotReady(_) => "SESSION_NOT_READY",
@@ -439,7 +443,8 @@ impl Error {
             | Error::ControlRecordMalformed
             | Error::KeyPackageMalformed
             | Error::MessageMalformed
-            | Error::MessageReservedEnvelopeKey(_) => Some(WireCode::MalformedMessage),
+            | Error::MessageReservedEnvelopeKey(_)
+            | Error::TextFrame => Some(WireCode::MalformedMessage),
             Error::MessageTooLarge { .. } => Some(WireCode::MessageTooLarge),
             // §33 (G-MSG1).
             Error::UnsupportedMessageType(_) => Some(WireCode::ProtocolUnsupported),
@@ -475,6 +480,16 @@ impl Error {
 }
 
 impl Error {
+    /// Whether the receiver sends `ERROR` with this error's code and then
+    /// closes the connection: a text WebSocket message (§31), no common
+    /// wire profile (§34) and a failed `AUTH` (§64 `WAIT_AUTH → CLOSED`).
+    pub fn closes_connection(&self) -> bool {
+        matches!(
+            self,
+            Error::TextFrame | Error::NoCommonWireProfile | Error::AuthFailed(_)
+        )
+    }
+
     /// Whether this rejection is client-local: the receiver must not merge
     /// the object and should surface it to the application, but it has no
     /// wire code because the server cannot detect it (N3, N5).
@@ -576,6 +591,7 @@ impl fmt::Display for Error {
             Error::UnsupportedMessageType(code) => write!(f, "unsupported message type {code}"),
             Error::AuthFailed(reason) => write!(f, "authentication failed: {reason:?}"),
             Error::NoCommonWireProfile => f.write_str("no common wire profile"),
+            Error::TextFrame => f.write_str("text WebSocket message"),
             Error::ControlHeadMismatch { current } => {
                 write!(
                     f,

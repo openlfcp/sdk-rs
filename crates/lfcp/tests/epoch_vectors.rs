@@ -306,7 +306,7 @@ mod synthetic {
     }
 
     fn propose(state: &ControlState, bytes: &[u8]) -> Result<ControlState, Error> {
-        propose_transition(state, Some(state.head.id), bytes)
+        propose_transition(state, state.head.id, bytes)
     }
 
     #[test]

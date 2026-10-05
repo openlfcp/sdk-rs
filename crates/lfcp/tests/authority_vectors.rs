@@ -262,7 +262,7 @@ mod synthetic {
     }
 
     fn propose(state: &ControlState, bytes: &[u8]) -> Result<ControlState, Error> {
-        propose_transition(state, Some(state.head.id), bytes)
+        propose_transition(state, state.head.id, bytes)
     }
 
     fn denied(result: Result<ControlState, Error>, rule: AuthorityRule, label: &str) {
@@ -566,9 +566,9 @@ mod synthetic {
         let after_first = propose(c2, &first).unwrap();
         // The second was made at C2; the coordinator's head has moved.
         assert_eq!(
-            propose_transition(&after_first, Some(c2.head.id), &second),
+            propose_transition(&after_first, c2.head.id, &second),
             Err(Error::ControlHeadMismatch {
-                current: Some(after_first.head.id)
+                current: after_first.head.id
             }),
             "second claim at a stale head"
         );

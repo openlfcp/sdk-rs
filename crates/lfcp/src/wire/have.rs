@@ -3,7 +3,7 @@
 //! | Function | Purpose | § |
 //! | --- | --- | --- |
 //! | [`HaveVector::insert`] | record one held Data Unit | §28, §68 step 9 |
-//! | [`HaveVector::from_wire`] | accept a live Have (normalizing it) | §28, §41, §48 (G-MSG6) |
+//! | [`HaveVector::from_wire`] | accept a live Have (normalizing it) | §28, §41, §48 |
 //! | [`HaveVector::to_wire`] | emit a normalized live Have | §28, §48 |
 //! | [`HaveVector::from_frontier`], [`HaveVector::to_frontier`] | canonical frontier, strict | §28.1, §28.2 |
 //! | [`difference`] | ranges to request and to offer | §49, §68 |
@@ -134,14 +134,12 @@ impl HaveVector {
     /// Accept a live Have Vector from `DATA_HAVE`, `RESOURCE_OPEN`,
     /// `RESOURCE_OPENED` or a snapshot summary.
     ///
-    /// PROVISIONAL (G-MSG6): live entries need not be normalized. Ranges
-    /// may overlap, touch each other or touch `contiguous`, be unsorted, and
-    /// one actor may appear more than once; all of it is merged without
-    /// losing a sequence. A range with start > end, or one that includes
-    /// the non-existent sequence 0, is not a set of sequences and is
-    /// rejected as `MALFORMED_MESSAGE`.
+    /// §48: live entries are not persistent objects, so §28.1 does not
+    /// apply. Ranges may overlap, touch each other or touch `contiguous`,
+    /// be unsorted, and one actor may appear more than once; all of it is
+    /// normalized without losing a sequence. A range with start > end, or
+    /// one that includes sequence 0, is `MALFORMED_MESSAGE`.
     pub fn from_wire(entries: &[WireActorHave]) -> Result<HaveVector, Error> {
-        // PROVISIONAL (G-MSG6): accept unnormalized live Haves and merge them.
         let mut vector = HaveVector::new();
         for entry in entries {
             let mut ranges = Vec::new();
@@ -297,9 +295,12 @@ pub enum ControlSync {
 /// Decide what to request given our head (`None` before Genesis is known)
 /// and the heads a peer advertises in `CONTROL_HAVE` or
 /// `RESOURCE_OPENED`.
+/// An empty list means the peer has no Control Records for the Resource
+/// (§44): up to date when we have none either, otherwise behind.
 pub fn control_sync(ours: Option<ControlHead>, theirs: &[ControlHead]) -> ControlSync {
     match (ours, theirs) {
-        (_, []) => ControlSync::PeerBehind,
+        (None, []) => ControlSync::UpToDate,
+        (Some(_), []) => ControlSync::PeerBehind,
         (_, [_, _, ..]) => ControlSync::Fork(theirs.to_vec()),
         (None, [head]) => ControlSync::Fetch {
             start: 0,
@@ -481,6 +482,8 @@ mod tests {
             ControlSync::PeerBehind
         );
         assert_eq!(control_sync(Some(head(6, 2)), &[]), ControlSync::PeerBehind);
+        // §44 (G-HV2): an empty list means the peer has no records.
+        assert_eq!(control_sync(None, &[]), ControlSync::UpToDate);
         assert_eq!(
             control_sync(Some(head(6, 2)), &[head(6, 3)]),
             ControlSync::Fork(vec![head(6, 2), head(6, 3)])

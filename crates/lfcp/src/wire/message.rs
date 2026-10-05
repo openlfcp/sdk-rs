@@ -27,7 +27,7 @@
 //! | 20 | CONTROL_HAVE | resource, control heads | §44 |
 //! | 21 | CONTROL_GET | resource, start, end | §45 |
 //! | 22 | CONTROL_BATCH | resource, Control Record COSE bytes [*] | §46 |
-//! | 23 | CONTROL_PUT | resource, expected head / null, Control Record COSE bytes | §47 |
+//! | 23 | CONTROL_PUT | resource, expected head (never null), Control Record COSE bytes | §47 |
 //! | 30 | DATA_HAVE | resource, actor-haves | §48 |
 //! | 31 | DATA_GET | resource, data ranges [1*] | §49 |
 //! | 32 | DATA_BATCH | resource, Data Unit COSE bytes [*] | §50 |
@@ -67,6 +67,15 @@ pub const DEFAULT_MAX_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
 pub const FIRST_EXTENSION_TYPE: u64 = 128;
 
 const MALFORMED: Error = Error::MessageMalformed;
+
+/// The kind of a received WebSocket data message (§31).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameKind {
+    /// A binary message: the only kind that carries LFCP.
+    Binary,
+    /// A text message: a protocol error.
+    Text,
+}
 
 /// What a receiver accepts beyond the core message types.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -268,6 +277,26 @@ pub struct ErrorBody {
 }
 
 impl ErrorBody {
+    /// The `NACK` or `ERROR` body for `error`, if it has a wire code (see
+    /// [`Error::wire_code`]): the code, no diagnostic, and the details §47
+    /// defines for `CONTROL_HEAD_MISMATCH`, the current head's Control
+    /// Record ID. Use [`Error::session_wire_code`] instead for `HELLO` and
+    /// `AUTH`.
+    pub fn for_error(error: &Error) -> Option<ErrorBody> {
+        let code = error.wire_code()?;
+        let details = match error {
+            Error::ControlHeadMismatch { current } => {
+                Some(Value::bytes(current.as_bytes().to_vec()))
+            }
+            _ => None,
+        };
+        Some(ErrorBody {
+            code: code.number(),
+            diagnostic: None,
+            details,
+        })
+    }
+
     /// The registered code, if the number is in the §62 registry.
     pub fn wire_code(&self) -> Option<crate::base::WireCode> {
         crate::base::WireCode::from_number(self.code)
@@ -339,7 +368,7 @@ pub enum Body {
     },
     ControlPut {
         resource_id: ResourceId,
-        expected_head: Option<ControlRecordId>,
+        expected_head: ControlRecordId,
         record: Vec<u8>,
     },
     DataHave {
@@ -612,12 +641,10 @@ impl Body {
             }
             23 => {
                 closed(b, &[0, 1, 2], &[])?;
+                // §47: the expected head is a hash32; null is invalid.
                 Body::ControlPut {
                     resource_id: resource(0)?,
-                    expected_head: match field(b, 1)? {
-                        Value::Null => None,
-                        _ => Some(ControlRecordId::from_bytes(bytes_n(b, 1)?)),
-                    },
+                    expected_head: ControlRecordId::from_bytes(bytes_n(b, 1)?),
                     record: bytes(b, 2)?,
                 }
             }
@@ -852,10 +879,7 @@ impl Body {
                 record,
             } => vec![
                 (0, id(resource_id)),
-                (
-                    1,
-                    Some(expected_head.map_or(Value::Null, |h| bytes32(h.as_bytes()))),
-                ),
+                (1, Some(bytes32(expected_head.as_bytes()))),
                 (2, bytes(record)),
             ],
             Body::DataHave { resource_id, have } => {
@@ -982,6 +1006,20 @@ impl Message {
             flags: None,
             body,
             ignored_envelope_keys: Vec::new(),
+        }
+    }
+
+    /// Decode one received WebSocket data message. A text message is
+    /// [`Error::TextFrame`]: the receiver sends `ERROR(MALFORMED_MESSAGE)`
+    /// and closes the connection (§31; see [`Error::closes_connection`]).
+    pub fn decode_frame(
+        kind: FrameKind,
+        bytes: &[u8],
+        options: &DecodeOptions,
+    ) -> Result<Message, Error> {
+        match kind {
+            FrameKind::Binary => Message::decode(bytes, options),
+            FrameKind::Text => Err(Error::TextFrame),
         }
     }
 
@@ -1194,6 +1232,65 @@ mod tests {
 
     fn decode(bytes: &[u8]) -> Result<Message, Error> {
         Message::decode(bytes, &DecodeOptions::default())
+    }
+
+    fn control_put(expected_head: Value) -> Vec<u8> {
+        envelope(vec![
+            (0, Value::Unsigned(23)),
+            (1, Value::bytes(vec![1; 16])),
+            (
+                4,
+                Value::Map(vec![
+                    (Value::Unsigned(0), Value::bytes(vec![7; 32])),
+                    (Value::Unsigned(1), expected_head),
+                    (Value::Unsigned(2), Value::bytes(vec![0x80])),
+                ]),
+            ),
+        ])
+    }
+
+    #[test]
+    fn control_put_needs_an_expected_head() {
+        // §47 (G-MSG5): null is invalid; Genesis uses RESOURCE_HOST.
+        let put = decode(&control_put(Value::bytes(vec![3; 32]))).unwrap();
+        assert!(matches!(
+            put.body,
+            Body::ControlPut { expected_head, .. } if expected_head == ControlRecordId::from_bytes([3; 32])
+        ));
+        let err = decode(&control_put(Value::Null)).unwrap_err();
+        assert_eq!(err, Error::MessageMalformed);
+        assert_eq!(err.wire_code().unwrap().name(), "MALFORMED_MESSAGE");
+    }
+
+    #[test]
+    fn head_mismatch_nack_carries_the_current_head() {
+        let current = ControlRecordId::from_bytes([4; 32]);
+        let body = ErrorBody::for_error(&Error::ControlHeadMismatch { current }).unwrap();
+        assert_eq!(body.code, 10);
+        assert_eq!(body.diagnostic, None);
+        assert_eq!(body.details, Some(Value::bytes(vec![4; 32])));
+        let other = ErrorBody::for_error(&Error::MessageMalformed).unwrap();
+        assert_eq!((other.code, other.details), (2, None));
+        assert_eq!(
+            ErrorBody::for_error(&Error::AeadFailure),
+            None,
+            "client-local"
+        );
+    }
+
+    #[test]
+    fn text_frames_are_malformed_and_close() {
+        // §31 (G-MSG7): ERROR(MALFORMED_MESSAGE), then close.
+        let ping = envelope(ping_entries());
+        let options = DecodeOptions::default();
+        assert!(Message::decode_frame(FrameKind::Binary, &ping, &options).is_ok());
+        let err = Message::decode_frame(FrameKind::Text, &ping, &options).unwrap_err();
+        assert_eq!(err, Error::TextFrame);
+        assert_eq!(err.wire_code().unwrap().name(), "MALFORMED_MESSAGE");
+        assert!(err.closes_connection());
+        // §34: no common profile is ERROR(PROTOCOL_UNSUPPORTED), then close.
+        assert!(Error::NoCommonWireProfile.closes_connection());
+        assert!(!Error::MessageMalformed.closes_connection());
     }
 
     #[test]

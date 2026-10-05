@@ -227,21 +227,11 @@ fn stale_control_head_put_is_a_head_mismatch() {
 
     // The published CONTROL_PUT expects C5 and passes the check.
     let fresh = put(&bytes_of(&suite, "CONTROL_PUT"), "CONTROL_PUT");
-    assert_eq!(
-        check_expected_head(fresh, Some(current)),
-        Ok(()),
-        "CONTROL_PUT"
-    );
+    assert_eq!(check_expected_head(fresh, current), Ok(()), "CONTROL_PUT");
 
     let stale = put(&hex(case_id, &case["inputs"]["message_cbor"]), case_id);
-    let err = check_expected_head(stale, Some(current)).expect_err("stale head accepted");
-    assert_eq!(
-        err,
-        Error::ControlHeadMismatch {
-            current: Some(current)
-        },
-        "{case_id}"
-    );
+    let err = check_expected_head(stale, current).expect_err("stale head accepted");
+    assert_eq!(err, Error::ControlHeadMismatch { current }, "{case_id}");
     assert_eq!(
         err.wire_code().map(|c| c.name()),
         case["expected"]["error"]["code"].as_str(),

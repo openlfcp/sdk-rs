@@ -698,10 +698,10 @@ pub fn snapshot_policy(
 /// function is what makes one-time claims one-time (§18.1 rule 6).
 pub fn propose_transition(
     current: &ControlState,
-    expected_head: Option<ControlRecordId>,
+    expected_head: ControlRecordId,
     record: &[u8],
 ) -> Result<ControlState, Error> {
-    check_expected_head(expected_head, Some(current.head.id))?;
+    check_expected_head(expected_head, current.head.id)?;
     let (outcome, history) =
         validate_authorized(&[record], Some(current.clone())).map_err(|failure| failure.error)?;
     match (outcome, history.into_iter().next()) {
@@ -709,7 +709,7 @@ pub fn propose_transition(
         // A single record continuing the current head cannot fork, and a
         // repeat of the head itself is no transition.
         _ => Err(Error::ControlHeadMismatch {
-            current: Some(current.head.id),
+            current: current.head.id,
         }),
     }
 }
