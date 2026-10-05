@@ -10,7 +10,7 @@
 //!   the corpus' logical state and conflicts.
 //!
 //! The vectors and the corpus are read at the `spec.lock` pin
-//! (mvp-0.1-baseline.5).
+//! (mvp-0.1-baseline.6).
 
 mod support;
 
@@ -717,7 +717,7 @@ fn behavioral_scenarios_converge_to_the_expected_state() {
         );
         checked += 1;
     }
-    assert_eq!(checked, 14, "S01-S14");
+    assert_eq!(checked, 16, "S01-S16");
 }
 
 #[test]
@@ -822,7 +822,57 @@ fn every_corpus_change_applies_and_every_save_loads() {
             );
         }
     }
-    assert_eq!(changes_applied, 52, "corpus changes");
+    assert_eq!(changes_applied, 61, "corpus changes");
+}
+
+#[test]
+fn the_corpus_validations_report_their_problems() {
+    // SO-STRINGS (baseline.6): Automerge save images with Text in places
+    // the profile writes scalar strings; each loads and reports exactly
+    // the expected per-value problems (§30, §74.1).
+    let corpus = corpus();
+    let validations = corpus["validations"].as_array().unwrap();
+    let ids: Vec<&str> = validations
+        .iter()
+        .map(|v| v["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            "SO-STRINGS-text-anywhere",
+            "SO-STRINGS-text-tag-member",
+            "SO-STRINGS-text-root-profile"
+        ]
+    );
+    let suite = suite();
+    let f = Fixtures::load(&suite);
+    for v in validations {
+        let id = v["id"].as_str().unwrap();
+        let save = base::from_hex(v["save_hex"].as_str().unwrap()).unwrap();
+        let doc = SharedObjects::load(&save, f.actor("masha")).unwrap();
+        let got: Vec<(String, &str)> = doc
+            .problems()
+            .unwrap()
+            .into_iter()
+            .map(|p| (p.pointer, p.diagnostic.name()))
+            .collect();
+        let mut want: Vec<(String, &str)> = v["expected_problems"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| {
+                assert_eq!(p["code"], "PROFILE_INVALID", "{id}");
+                (
+                    p["pointer"].as_str().unwrap().to_owned(),
+                    p["diagnostic"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        want.sort();
+        let mut got = got;
+        got.sort();
+        assert_eq!(got, want, "{id}");
+    }
 }
 
 fn snapshot_contains(image: &[u8], change: &Change) -> bool {

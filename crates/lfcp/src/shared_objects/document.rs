@@ -1026,6 +1026,36 @@ mod admission_tests {
     }
 
     #[test]
+    fn after_a_rebuild_without_its_own_change_a_writer_reuses_the_sequence() {
+        // §9 (baseline.6): the rebuilt document is the same history; the
+        // writer's next change takes the actor's next sequence there, which
+        // equals that of the removed change.
+        let (first, second, _) = crafted();
+        let mut rebuilt = SharedObjects::new(actor(1));
+        assert!(rebuilt
+            .apply_changes(vec![first.clone()])
+            .unwrap()
+            .is_empty());
+        let again = put_root(&mut rebuilt, "note", "rewritten");
+        assert_eq!(again.seq(), second.seq());
+        assert_ne!(again.hash(), second.hash());
+        // A receiver that also excluded the removed change takes it.
+        let mut receiver = SharedObjects::new(actor(2));
+        receiver.apply_changes(vec![first]).unwrap();
+        assert!(receiver
+            .apply_changes(vec![again.clone()])
+            .unwrap()
+            .is_empty());
+        // One that still holds it sees the sequence taken, before the engine.
+        let mut stale = SharedObjects::new(actor(3));
+        stale.apply_changes(vec![crafted().0, second]).unwrap();
+        assert!(matches!(
+            stale.apply_changes(vec![again]),
+            Err(ProfileError::SequenceTaken { seq: 2, latest: 2 })
+        ));
+    }
+
+    #[test]
     fn a_save_that_aborts_the_engine_is_invalid_bytes() {
         // Loading is guarded the same way (a Snapshot carries a save image).
         assert_eq!(
