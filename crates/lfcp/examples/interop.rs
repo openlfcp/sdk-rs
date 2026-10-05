@@ -650,6 +650,11 @@ fn produce_shared_objects(p: &Producer) -> Json {
         .create_task(&NewTask::new(t3, p.id("owner"), "Long notes ".repeat(300)))
         .unwrap();
     let mut bob = owner.fork(actor("bob"));
+    // Another first change by bob on the same state: equivocation (§26.2).
+    let mut bob_twin = owner.fork(actor("bob"));
+    let twin = bob_twin
+        .set_title(t1.as_str(), "Plan the release (bob, twin)")
+        .unwrap();
     let mut carol = owner.fork(actor("carol"));
     bob.set_title(t1.as_str(), "Plan the release (bob)")
         .unwrap();
@@ -748,6 +753,8 @@ fn produce_shared_objects(p: &Producer) -> Json {
               "expect": "INVALID_AUTOMERGE_BYTES" },
             { "name": "snapshot_change_chunk", "kind": "snapshot", "plaintext": hex(&framing::encode_snapshot(&raw)),
               "expect": "INVALID_AUTOMERGE_BYTES" },
+            { "name": "change_equivocation", "kind": "change", "plaintext": hex(&framing::encode_change(twin.clone().bytes().as_ref())), "signer": "bob",
+              "expect": "ACTOR_EQUIVOCATION" },
             { "name": "state_problems", "kind": "state", "changes": invalid_changes,
               "expect": [ { "pointer": format!("{t1p}/status"), "diagnostic": "INVALID_ENUM_VALUE" },
                           { "pointer": format!("{t1p}/tags/#bad"), "diagnostic": "INVALID_TAG" } ] },
@@ -1187,9 +1194,10 @@ fn consume_shared_objects(so: &Json, c: &Consumer, results: &mut Results) {
                     &unhex(&n["plaintext"]),
                 ) {
                     Ok(()) => "ACCEPTED".to_owned(),
-                    Err(e) => e
-                        .diagnostic()
-                        .map_or_else(|| e.to_string(), |d| d.name().to_owned()),
+                    Err(e) => e.diagnostic().map_or_else(
+                        || e.code().map_or_else(|| e.to_string(), str::to_owned),
+                        |d| d.name().to_owned(),
+                    ),
                 };
                 ensure(json!(got) == n["expect"], || format!("got {got}"))
             }
