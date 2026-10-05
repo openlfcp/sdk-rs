@@ -146,7 +146,9 @@ type MatrixRow = [(&'static str, BTreeSet<u64>); 4];
 #[test]
 fn authority_matrix_at_c3_to_c6() {
     let f = Fixture::load();
-    let all: BTreeSet<u64> = (1..=11).collect();
+    // §17.1: the owner holds every standard ability except the reserved
+    // 9, which confers nothing.
+    let all: BTreeSet<u64> = (1..=11).filter(|&code| code != 9).collect();
     let set = |codes: &[u64]| codes.iter().copied().collect::<BTreeSet<u64>>();
     let expected: [(&str, MatrixRow); 4] = [
         (
@@ -154,7 +156,7 @@ fn authority_matrix_at_c3_to_c6() {
             [
                 ("OWNER", all.clone()),
                 ("BOB", set(&[1, 2, 3])),
-                ("INVITE", set(&[1, 2, 11])),
+                ("INVITE", set(&[1, 2])),
                 ("CAROL", set(&[1, 2])),
             ],
         ),
@@ -163,7 +165,7 @@ fn authority_matrix_at_c3_to_c6() {
             [
                 ("OWNER", set(&[])),
                 ("BOB", all.clone()),
-                ("INVITE", set(&[1, 2, 11])),
+                ("INVITE", set(&[1, 2])),
                 ("CAROL", set(&[1, 2])),
             ],
         ),
@@ -172,7 +174,7 @@ fn authority_matrix_at_c3_to_c6() {
             [
                 ("OWNER", set(&[])),
                 ("BOB", all.clone()),
-                ("INVITE", set(&[1, 2, 11])),
+                ("INVITE", set(&[1, 2])),
                 ("CAROL", set(&[1, 2])),
             ],
         ),
@@ -181,11 +183,13 @@ fn authority_matrix_at_c3_to_c6() {
             [
                 ("OWNER", set(&[])),
                 ("BOB", all.clone()),
-                ("INVITE", set(&[1, 2, 11])),
+                ("INVITE", set(&[1, 2])),
                 ("CAROL", set(&[1, 2])),
             ],
         ),
     ];
+    // §18.1: C3 used the single claim of C2, so from C3 on INVITE's grant
+    // confers no invite/claim.
     for (case_id, row) in expected {
         for (name, abilities) in row {
             let held = abilities_at(
@@ -421,6 +425,101 @@ mod synthetic {
             AuthorityRule::RevokeTargetUnknown,
             "revoke of an unknown grant",
         );
+    }
+
+    #[test]
+    fn revoking_a_revoked_grant_fails() {
+        // §17.3 (DV3): the second revoke of C1 is AUTHORIZATION_FAILED,
+        // also for the owner, who may revoke any grant.
+        let f = Fixture::load();
+        let c3 = f.state("C3_invite_claim_carol");
+        let owner = f.keys("OWNER");
+        let revoke_c1 = ControlBody::CapabilityRevoke(CapabilityRevokeBody {
+            grant: f.record_id("C1_grant_bob"),
+        });
+        let revoked = propose(c3, &record(c3, owner, revoke_c1.clone())).unwrap();
+        assert!(!revoked.is_active(&f.record_id("C1_grant_bob")));
+        denied(
+            propose(&revoked, &record(&revoked, owner, revoke_c1)),
+            AuthorityRule::RevokeAlreadyRevoked,
+            "second revoke",
+        );
+    }
+
+    #[test]
+    fn invitation_grants_need_a_claim_limit_and_lose_invite_claim_when_used_up() {
+        let f = Fixture::load();
+        let c2 = f.state("C2_invite_grant");
+        let (owner, invite, carol) = (f.keys("OWNER"), f.keys("INVITE"), f.keys("CAROL"));
+        // §18: an invitation grant without claim_limit is not claimable.
+        let unlimited =
+            propose(c2, &record(c2, owner, grant(invite, &[1, 11], &[], None))).unwrap();
+        let unlimited_id = unlimited.head.id;
+        denied(
+            propose(
+                &unlimited,
+                &record(&unlimited, invite, claim(unlimited_id, carol, &[1])),
+            ),
+            AuthorityRule::ClaimNotClaimable,
+            "claim on a grant without claim_limit",
+        );
+
+        // §18.1: C2 confers invite/claim until its one claim is used (C3).
+        let c3 = f.state("C3_invite_claim_carol");
+        let invitation = f.record_id("C2_invite_grant");
+        let invite_id = invite.descriptor().id();
+        assert!(c2.holds(invite_id, 11), "C2: invite/claim");
+        assert!(!c3.holds(invite_id, 11), "C3: claims used up");
+        assert!(c3.holds(invite_id, 1), "C3: other abilities stay");
+        let grant_c2 = c3.grant(&invitation).unwrap();
+        assert!(c3.is_active(&invitation) && !c3.confers_invite(grant_c2));
+
+        // §25.2 (G-CAP9): the invitation exception ends with it. INVITE
+        // holds data/read anyway, so test a recipient without it.
+        let only_invite = propose(c2, &record(c2, owner, grant(carol, &[11], &[], None))).unwrap();
+        let distribute = |state: &ControlState| {
+            lfcp::wire::control::authority::can_distribute_key(
+                state,
+                owner.descriptor().id(),
+                carol.descriptor().id(),
+            )
+        };
+        assert_eq!(
+            distribute(&only_invite),
+            Ok(()),
+            "subject of an active grant conferring invite/claim"
+        );
+        // claim_limit 0: used up from the start, so no invite/claim.
+        let exhausted = ControlBody::CapabilityGrant(CapabilityGrantBody {
+            subject: carol.descriptor().clone(),
+            abilities: vec![11],
+            delegable: vec![],
+            parent: None,
+            claim_limit: Some(0),
+        });
+        let exhausted = propose(c2, &record(c2, owner, exhausted)).unwrap();
+        assert_eq!(
+            distribute(&exhausted),
+            Err(Error::AuthorizationFailed(AuthorityRule::MissingAbility(1))),
+            "used-up invitation grant"
+        );
+    }
+
+    #[test]
+    fn ability_9_and_unknown_codes_confer_nothing() {
+        // §17.1, §23.1: a grant of 9 or of an unknown code is kept as
+        // written and confers nothing.
+        let f = Fixture::load();
+        let c2 = f.state("C2_invite_grant");
+        let carol = f.keys("CAROL");
+        let state = propose(
+            c2,
+            &record(c2, f.keys("OWNER"), grant(carol, &[9, 200], &[], None)),
+        )
+        .unwrap();
+        assert_eq!(state.grant(&state.head.id).unwrap().abilities, vec![9, 200]);
+        assert!(state.abilities(carol.descriptor().id()).is_empty());
+        assert!(!state.holds(f.keys("OWNER").descriptor().id(), 9));
     }
 
     #[test]

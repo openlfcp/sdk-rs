@@ -7,20 +7,30 @@
 //! | Genesis | self-signed by the owner in its body (chain rule) | §15 |
 //! | Capability Grant, no parent | owner; a non-owner cannot prove authority without a parent | §17.2 |
 //! | Capability Grant, with parent | parent exists and is active; issuer is its subject; abilities ⊆ parent delegable; delegable ⊆ parent delegable; a non-owner also holds `capability/grant` | §17.2 |
-//! | Capability Revoke | owner, or `capability/revoke` covering the grant | §17.3 |
-//! | Capability Claim | §18.1 rules 1–5: invitation grant active, grants `invite/claim`, claims remain, abilities ⊆ invitation abilities (minus `invite/claim` unless delegable), issuer is the Invitation Principal; consumes one claim | §18.1 |
+//! | Capability Revoke | owner, or `capability/revoke` covering the grant (issued by the revoker or delegated from a grant it issued); the grant is not already revoked | §17.3 |
+//! | Capability Claim | §18.1 rules 1–5: invitation grant active, grants `invite/claim`, has a `claim_limit` with claims remaining, abilities ⊆ invitation abilities (minus `invite/claim` unless delegable), issuer is the Invitation Principal; consumes one claim | §18, §18.1 |
 //! | Key Epoch | `key/rotate`; new epoch = current + 1; closes the current epoch with its final frontier | §19 |
-//! | Route Update | `route/update`; route version increases | §20 |
+//! | Route Update | `route/update`; route version strictly above the current one (0 after Genesis) | §15, §20 |
 //! | Owner Transfer Commit | §23.3 rules 1–6 and §23.2: offer by the current owner at the current head, accept by the named Principal for this offer, commit by that Principal at the offered sequence | §23 |
 //! | Coordinator Recovery, Resource Tombstone | refused: not applied in MVP 0.1 | §22, §24, MVP-SCOPE §4 |
-//! | extension type | owner only (provisional) | §14 |
-//! | Key Package | epoch known, sender holds `key/distribute`, recipient holds `data/read` or is the subject of an active invite grant, at the package's Control Head | §25.2, §19 |
+//! | extension type | owner only | §14 |
+//! | Key Package | epoch known, sender holds `key/distribute`, recipient holds `data/read` or is the subject of an active grant that includes and still confers `invite/claim`, at the package's Control Head | §25.2, §19 |
 //! | Data Unit | actor holds `data/write` at the unit's Control Head; epoch per [`super::epoch`] | §26.3 |
 //! | Snapshot | epoch known and publisher holds `snapshot/publish` at its Control Head | §29, §29.2 |
 //!
-//! The owner implicitly holds every standard ability (§15, §17.1). A
-//! grant is active while it is not revoked and, provisionally, while its
-//! parent is active. Unauthorized records are `AUTHORIZATION_FAILED`.
+//! The owner implicitly holds every standard ability (§15, §17.1); ability
+//! 9 is reserved and confers nothing, and unknown codes confer nothing
+//! (§17.1). A grant is active while it is not revoked and, when it has a
+//! parent, while the parent is active (§17.2). An invitation grant whose
+//! claims are used up confers no `invite/claim` (§18.1). After an
+//! ownership transfer the former owner keeps no implicit authority, and
+//! the grants it issued stay active (§23.3).
+//!
+//! Unauthorized records are `AUTHORIZATION_FAILED` where the text names
+//! it (§17.3 revoking a revoked grant, §23.3 transfers). Where it names
+//! no code (escalation, a revoke the issuer's authority does not cover,
+//! a non-owner extension record, a route version that does not increase)
+//! the same code is used provisionally; see the `PROVISIONAL` markers.
 //!
 //! [`CapabilityEngine`] is the [`ChainPolicy`] for full validation: it
 //! derives a [`ControlState`] after every accepted record, so authority can
@@ -59,7 +69,8 @@ pub mod ability {
     pub const KEY_ROTATE: u64 = 7;
     /// `route/update`
     pub const ROUTE_UPDATE: u64 = 8;
-    /// `owner/transfer-offer`
+    /// `owner/transfer-offer`: reserved, confers nothing in WIRE-01; only
+    /// the current owner creates offers (§17.1, §23.1).
     pub const OWNER_TRANSFER_OFFER: u64 = 9;
     /// `resource/tombstone`
     pub const RESOURCE_TOMBSTONE: u64 = 10;
@@ -67,6 +78,12 @@ pub mod ability {
     pub const INVITE_CLAIM: u64 = 11;
     /// Every standard ability, as the owner holds them.
     pub const STANDARD: std::ops::RangeInclusive<u64> = 1..=11;
+
+    /// Whether `code` confers anything: a standard ability other than the
+    /// reserved `owner/transfer-offer` (§17.1, §23.1).
+    pub fn confers(code: u64) -> bool {
+        STANDARD.contains(&code) && code != OWNER_TRANSFER_OFFER
+    }
 }
 
 fn deny(rule: AuthorityRule) -> Error {
@@ -107,7 +124,7 @@ pub struct ControlState {
     pub head: ChainHead,
     /// The current owner.
     pub owner: PrincipalDescriptor,
-    /// The current route version; Genesis is version 0 (provisional, G-CP2).
+    /// The current route version; Genesis is version 0 (§15).
     pub route_version: u64,
     /// DEK commitments by Data Epoch: Genesis for epoch 0, then Key Epochs.
     pub dek_commitments: BTreeMap<u64, Hash32>,
@@ -147,9 +164,7 @@ impl ControlState {
         match self.grant(id) {
             None => false,
             Some(grant) if grant.revoked => false,
-            // PROVISIONAL (revocation cascade): §17.3 does not say whether
-            // revoking a grant revokes grants delegated from it. A child
-            // grant is active only while its parent is active.
+            // §17.2: a child grant is active only while its parent is.
             Some(Grant {
                 parent: Some(parent),
                 ..
@@ -158,20 +173,40 @@ impl ControlState {
         }
     }
 
-    /// The standard abilities `principal` holds: all of them for the owner,
-    /// otherwise the union over its active grants.
+    /// The abilities `principal` holds: every conferring standard ability
+    /// for the owner, otherwise the union of what its active grants confer.
     pub fn abilities(&self, principal: &PrincipalId) -> BTreeSet<u64> {
         if self.is_owner(principal) {
-            return ability::STANDARD.collect();
+            return ability::STANDARD.filter(|&c| ability::confers(c)).collect();
         }
         self.grants
             .values()
             .filter(|g| &g.subject == principal && self.is_active(&g.id))
-            .flat_map(|g| g.abilities.iter().copied())
-            // PROVISIONAL (G-CP6): unknown codes are kept in the grant but
-            // confer nothing and are never held.
-            .filter(|code| ability::STANDARD.contains(code))
+            .flat_map(|g| self.conferred(g))
             .collect()
+    }
+
+    /// What one grant confers, active or not: its abilities that confer
+    /// anything (§17.1: unknown codes and ability 9 are kept but confer
+    /// nothing), without `invite/claim` once its claims are used up
+    /// (§18.1).
+    pub fn conferred(&self, grant: &Grant) -> BTreeSet<u64> {
+        let exhausted = grant
+            .claim_limit
+            .is_some_and(|limit| grant.claims_used >= limit);
+        grant
+            .abilities
+            .iter()
+            .copied()
+            .filter(|&code| ability::confers(code))
+            .filter(|&code| !(exhausted && code == ability::INVITE_CLAIM))
+            .collect()
+    }
+
+    /// Whether `grant` is active and still confers `invite/claim`: what
+    /// makes its subject an Invitation Principal for §25.2.
+    pub fn confers_invite(&self, grant: &Grant) -> bool {
+        self.is_active(&grant.id) && self.conferred(grant).contains(&ability::INVITE_CLAIM)
     }
 
     /// Whether `principal` holds `code`.
@@ -225,7 +260,7 @@ pub fn apply(
                 resource_id: header.resource_id,
                 head,
                 owner: genesis.owner.clone(),
-                // PROVISIONAL (G-CP2): Genesis implies route version 0.
+                // §15: Genesis implies route version 0.
                 route_version: 0,
                 dek_commitments: BTreeMap::from([(0, genesis.dek_commitment)]),
                 current_epoch: 0,
@@ -276,14 +311,20 @@ pub fn apply(
             let target = state
                 .grant(&revoke.grant)
                 .ok_or(deny(AuthorityRule::RevokeTargetUnknown))?;
+            // PROVISIONAL (unknown revoke target code): §17.3 names no code
+            // for a revoke naming no grant; AUTHORIZATION_FAILED is used.
             if !is_owner {
                 state.require(&issuer, ability::CAPABILITY_REVOKE)?;
-                // PROVISIONAL (G-CAP1): §17.3 does not define when revoke
-                // authority "covers" a grant. It covers grants the issuer
-                // issued and grants delegated from them.
+                // §17.3: revoke authority covers a grant the revoker issued,
+                // or one delegated from a grant it issued.
+                // PROVISIONAL (revoke not covered code): §17.3 names no code.
                 if !state.issued_in_line(target, &issuer) {
                     return Err(deny(AuthorityRule::RevokeNotCovered));
                 }
+            }
+            // §17.3: revoking an already revoked grant is AUTHORIZATION_FAILED.
+            if target.revoked {
+                return Err(deny(AuthorityRule::RevokeAlreadyRevoked));
             }
             state
                 .grants
@@ -301,7 +342,11 @@ pub fn apply(
             if !invitation.abilities.contains(&ability::INVITE_CLAIM) {
                 return Err(deny(AuthorityRule::ClaimNotInvite));
             }
-            let limit = invitation.claim_limit.unwrap_or(0);
+            // §18: an invitation grant without claim_limit is not
+            // claimable; §18.1 rule 3: claims must remain.
+            let Some(limit) = invitation.claim_limit else {
+                return Err(deny(AuthorityRule::ClaimNotClaimable));
+            };
             if invitation.claims_used >= limit {
                 return Err(deny(AuthorityRule::ClaimLimitExhausted));
             }
@@ -321,10 +366,9 @@ pub fn apply(
                 .unwrap()
                 .claims_used += 1;
             state.learn(&claim.claimant);
-            // PROVISIONAL (G-CAP2): §18.1 says a claim "creates a new
-            // capability grant to the claimant" without its delegable set or
-            // parent. It has none, so revoking the invitation afterwards
-            // does not revoke the claimant.
+            // §18.1: the claim's grant has the claim record's ID, no parent
+            // and an empty delegable list, so revoking the invitation
+            // afterwards does not revoke the claimant.
             state.grants.insert(
                 *record.id().as_bytes(),
                 Grant {
@@ -342,9 +386,10 @@ pub fn apply(
         }
         ControlBody::KeyEpoch(epoch) => {
             state.require(&issuer, ability::KEY_ROTATE)?;
-            // §19: "exactly the previous Data Epoch plus one". Provisional
-            // code: §19 names none; a skipped or repeated epoch breaks the
-            // chain's epoch sequence, so INVALID_CONTROL_CHAIN.
+            // §19: "exactly the previous Data Epoch plus one".
+            // PROVISIONAL (epoch not next code): §19 names no code; a
+            // skipped or repeated epoch breaks the chain's epoch sequence,
+            // so INVALID_CONTROL_CHAIN.
             if state.current_epoch.checked_add(1) != Some(epoch.epoch) {
                 return Err(Error::InvalidControlChain(
                     crate::base::ChainRule::EpochNotNext,
@@ -360,8 +405,9 @@ pub fn apply(
         }
         ControlBody::RouteUpdate(route) => {
             state.require(&issuer, ability::ROUTE_UPDATE)?;
-            // PROVISIONAL (G-CP2): each Route Update strictly increases the
-            // route version, starting from Genesis's implied 0.
+            // §20: each Route Update strictly increases the route version,
+            // from Genesis's implied 0 (§15).
+            // PROVISIONAL (route version code): §20 names no code.
             if route.version <= state.route_version {
                 return Err(deny(AuthorityRule::RouteVersionNotIncreasing));
             }
@@ -376,8 +422,10 @@ pub fn apply(
             return Err(Error::UnsupportedInMvp(record.body().control_type()));
         }
         ControlBody::Extension { .. } => {
-            // PROVISIONAL (G-CAP3): §14 lets an unknown extension record be
-            // retained but not interpreted, and names no authority for it.
+            // §14: an extension record requires owner authority, whether or
+            // not the extension is supported; it is retained, not
+            // interpreted.
+            // PROVISIONAL (extension authority code): §14 names no code.
             if !is_owner {
                 return Err(deny(AuthorityRule::NotOwner));
             }
@@ -393,9 +441,11 @@ fn check_grant(
     is_owner: bool,
     grant: &CapabilityGrantBody,
 ) -> Result<(), Error> {
+    // §17.2: the owner may grant without a parent; a non-owner must hold
+    // capability/grant and reference a parent it is the subject of.
+    // PROVISIONAL (grant escalation code): §17.2 names no code for any of
+    // these rules; AUTHORIZATION_FAILED is used.
     let Some(parent_id) = &grant.parent else {
-        // §17.2: a non-owner must prove authority to grant every ability;
-        // without a parent grant there is nothing to prove it with.
         return if is_owner {
             Ok(())
         } else {
@@ -417,8 +467,8 @@ fn check_grant(
     if !grant.abilities.iter().all(|a| parent.delegable.contains(a)) {
         return Err(deny(AuthorityRule::Escalation));
     }
-    // Inferred no-escalation: a child may not make delegable what its
-    // parent cannot delegate.
+    // §17.2: every delegable ability of the new grant is delegable by the
+    // parent.
     if !grant.delegable.iter().all(|a| parent.delegable.contains(a)) {
         return Err(deny(AuthorityRule::DelegableEscalation));
     }
@@ -565,18 +615,17 @@ pub fn abilities_at(
 
 /// §25.2: whether `sender` may deliver a DEK to `recipient` in `state`.
 /// The sender holds `key/distribute`; the recipient holds `data/read` or is
-/// the subject of an active invite grant.
+/// the subject of an active grant that includes and still confers
+/// `invite/claim`.
 pub fn can_distribute_key(
     state: &ControlState,
     sender: &PrincipalId,
     recipient: &PrincipalId,
 ) -> Result<(), Error> {
     state.require(sender, ability::KEY_DISTRIBUTE)?;
-    let invited = state.grants().any(|g| {
-        &g.subject == recipient
-            && g.abilities.contains(&ability::INVITE_CLAIM)
-            && state.is_active(&g.id)
-    });
+    let invited = state
+        .grants()
+        .any(|g| &g.subject == recipient && state.confers_invite(g));
     if state.holds(recipient, ability::DATA_READ) || invited {
         Ok(())
     } else {

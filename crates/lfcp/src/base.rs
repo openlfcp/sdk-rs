@@ -227,18 +227,23 @@ pub enum AuthorityRule {
     NotParentSubject,
     /// A granted ability is not delegable by the parent (§17.2).
     Escalation,
-    /// A delegable ability is not delegable by the parent.
+    /// A delegable ability is not delegable by the parent (§17.2).
     DelegableEscalation,
     /// The revoked grant does not exist (§17.3).
     RevokeTargetUnknown,
     /// The issuer's revoke authority does not cover the grant (§17.3).
     RevokeNotCovered,
+    /// The grant is already revoked (§17.3).
+    RevokeAlreadyRevoked,
     /// The invitation grant does not exist (§18.1).
     ClaimGrantUnknown,
     /// The invitation grant is not active (§18.1 rule 1).
     ClaimGrantInactive,
     /// The invitation grant does not grant `invite/claim` (§18.1 rule 2).
     ClaimNotInvite,
+    /// The invitation grant has no `claim_limit`, so it is not claimable
+    /// (§18).
+    ClaimNotClaimable,
     /// No claims remain on the invitation grant (§18.1 rule 3).
     ClaimLimitExhausted,
     /// The claim asks for abilities the invitation does not give (§18.1
