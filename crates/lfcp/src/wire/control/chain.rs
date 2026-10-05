@@ -142,6 +142,21 @@ pub fn check_fork(a: &ControlRecord, b: &ControlRecord) -> Result<(), Error> {
     }
 }
 
+/// The coordinator's compare-and-swap check for `CONTROL_PUT` (§47): the
+/// expected head must equal the current head, or the put is rejected with
+/// `NACK(CONTROL_HEAD_MISMATCH)` carrying the current head. Committing the
+/// record atomically with this check is the coordinator's job.
+pub fn check_expected_head(
+    expected: Option<ControlRecordId>,
+    current: Option<ControlRecordId>,
+) -> Result<(), Error> {
+    if expected == current {
+        Ok(())
+    } else {
+        Err(Error::ControlHeadMismatch { current })
+    }
+}
+
 /// Validate `records`, given as exact signed-object bytes in chain order,
 /// starting at `start`.
 ///
@@ -360,6 +375,17 @@ mod tests {
     fn validate(records: &[&ControlRecord]) -> Result<ChainOutcome, ChainFailure> {
         let bytes: Vec<&[u8]> = records.iter().map(|r| r.signed_object().bytes()).collect();
         validate_chain(&bytes, ChainStart::Genesis, &mut SignaturesOnly)
+    }
+
+    #[test]
+    fn expected_head_must_be_current() {
+        let a = Some(ControlRecordId::from_bytes([1; 32]));
+        let b = Some(ControlRecordId::from_bytes([2; 32]));
+        assert_eq!(check_expected_head(a, a), Ok(()));
+        let err = check_expected_head(a, b).unwrap_err();
+        assert_eq!(err, Error::ControlHeadMismatch { current: b });
+        assert_eq!(err.wire_code().unwrap().name(), "CONTROL_HEAD_MISMATCH");
+        assert!(check_expected_head(None, b).is_err());
     }
 
     #[test]

@@ -160,6 +160,12 @@ pub enum Error {
     AuthFailed(AuthFailure),
     /// No wire profile is supported by both peers (§34, §35).
     NoCommonWireProfile,
+    /// A `CONTROL_PUT` expected another Control Head than the coordinator's
+    /// current one (§47).
+    ControlHeadMismatch {
+        /// The coordinator's current head, which the `NACK` reports.
+        current: Option<ControlRecordId>,
+    },
 }
 
 /// Why an `AUTH` did not authenticate the session Principal (§36).
@@ -275,6 +281,7 @@ impl Error {
             Error::UnsupportedMessageType(_) => "UNSUPPORTED_MESSAGE_TYPE",
             Error::AuthFailed(_) => "AUTH_FAILED",
             Error::NoCommonWireProfile => "NO_COMMON_WIRE_PROFILE",
+            Error::ControlHeadMismatch { .. } => "CONTROL_HEAD_MISMATCH",
         }
     }
 
@@ -329,6 +336,7 @@ impl Error {
             Error::UnsupportedMessageType(_) => Some(WireCode::ProtocolUnsupported),
             Error::AuthFailed(_) => Some(WireCode::AuthFailed),
             Error::NoCommonWireProfile => Some(WireCode::ProtocolUnsupported),
+            Error::ControlHeadMismatch { .. } => Some(WireCode::ControlHeadMismatch),
             // Provisional: whether an unknown core type is MALFORMED_MESSAGE
             // or INVALID_CONTROL_CHAIN is an open question for the project
             // owner (§14 names no code).
@@ -441,6 +449,12 @@ impl fmt::Display for Error {
             Error::UnsupportedMessageType(code) => write!(f, "unsupported message type {code}"),
             Error::AuthFailed(reason) => write!(f, "authentication failed: {reason:?}"),
             Error::NoCommonWireProfile => f.write_str("no common wire profile"),
+            Error::ControlHeadMismatch { current } => {
+                write!(
+                    f,
+                    "expected Control Head is not the current head {current:?}"
+                )
+            }
         }
     }
 }
