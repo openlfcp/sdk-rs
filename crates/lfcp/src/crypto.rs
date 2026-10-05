@@ -185,18 +185,23 @@ pub fn hpke_seal(
     Ok((enc_bytes(&enc), ciphertext))
 }
 
-/// [`hpke_seal`] with a caller-supplied RNG, for the RFC 9180 self-test
-/// only. Not part of the API: a predictable ephemeral key breaks HPKE.
-#[cfg(test)]
-fn hpke_seal_with_rng(
+/// [`hpke_seal`] with a caller-supplied random source, the `hpke` crate's
+/// own `single_shot_seal_with_rng`. The ephemeral key is
+/// `DeriveKeyPair(ikmE)` (RFC 9180 §7.1.3) for the first 32 bytes the
+/// source yields as `ikmE`, so a fixed source reproduces published vectors
+/// (G-KP2). A sender MUST use a fresh ephemeral key for every package
+/// (§25): outside tests, use [`hpke_seal`] or a cryptographically secure
+/// source.
+pub fn hpke_seal_with_rng(
     recipient: &[u8; 32],
     info: &[u8],
     aad: &[u8],
     plaintext: &[u8],
     rng: &mut impl hpke::rand_core::CryptoRng,
-) -> ([u8; 32], Vec<u8>) {
+) -> Result<([u8; 32], Vec<u8>), Error> {
     use hpke::Deserializable as _;
-    let recipient = <HpkeKem as hpke::Kem>::PublicKey::from_bytes(recipient).unwrap();
+    let recipient = <HpkeKem as hpke::Kem>::PublicKey::from_bytes(recipient)
+        .map_err(|_| Error::HpkeSealFailed)?;
     let (enc, ciphertext) = hpke::single_shot_seal_with_rng::<HpkeAead, HpkeKdf, HpkeKem>(
         &hpke::OpModeS::Base,
         &recipient,
@@ -205,8 +210,8 @@ fn hpke_seal_with_rng(
         aad,
         rng,
     )
-    .unwrap();
-    (enc_bytes(&enc), ciphertext)
+    .map_err(|_| Error::HpkeSealFailed)?;
+    Ok((enc_bytes(&enc), ciphertext))
 }
 
 fn enc_bytes(enc: &<HpkeKem as hpke::Kem>::EncappedKey) -> [u8; 32] {
@@ -371,7 +376,7 @@ mod tests {
         assert_eq!(recipient.public_key(), pk_r);
         assert_eq!(
             hpke_seal_with_rng(&pk_r, &info, &aad, &pt, &mut FixedRng(ikm_e)),
-            (enc, ct.clone())
+            Ok((enc, ct.clone()))
         );
         assert_eq!(*hpke_open(&recipient, &enc, &info, &aad, &ct).unwrap(), pt);
 

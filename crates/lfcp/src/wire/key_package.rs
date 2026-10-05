@@ -7,10 +7,11 @@
 //! | HPKE `info` | det-CBOR `["LFCP-KEY-v1", resource-id, epoch, recipient]` | §25.1 |
 //! | HPKE AAD | det-CBOR `[resource-id, epoch, Control Head]` | §25.1 |
 //! | HPKE plaintext | the 32-byte DEK | §25.1 |
-//! | `enc`, ciphertext | HPKE Base `SealBase(pkR = recipient X25519 key, info, aad, DEK)` | §9, §25.1 |
-//! | signer | the sender, field 4 (gap G-RS1) | §25, §10.5 |
+//! | `enc`, ciphertext | HPKE Base `SealBase(pkR = recipient X25519 key, info, aad, DEK)`: 32 and 48 bytes, else `MALFORMED_MESSAGE` | §9, §25, §25.1 |
+//! | ephemeral key | fresh per package; `DeriveKeyPair(ikmE)` from the random source | §25, RFC 9180 §7.1.3 |
+//! | signer | the sender, field 4: `kid` = sender, else `INVALID_SIGNATURE` | §25, §10.5 |
 //! | package ID | SHA-256 of the exact COSE_Sign1 bytes | §25, §10.6 |
-//! | acceptance | the DEK matches `dek_commitment` of its epoch | §11, §25.2 |
+//! | acceptance | a 32-byte plaintext matching `dek_commitment` of its epoch | §11, §25.2 |
 //!
 //! Every way a package can fail to deliver its key — it names another
 //! recipient, HPKE does not open, or the DEK does not match the commitment —
@@ -32,6 +33,13 @@ use crate::wire::{
 };
 
 const INFO_LABEL: &str = "LFCP-KEY-v1";
+
+/// Length of payload field 5, the HPKE `enc` (§25).
+pub const ENC_BYTES: usize = 32;
+
+/// Length of payload field 6, the HPKE ciphertext: the 32-byte DEK and the
+/// 16-byte tag (§25).
+pub const CIPHERTEXT_BYTES: usize = 48;
 
 /// Payload fields 0 to 4 of a Key Package (§25).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -93,8 +101,13 @@ impl KeyPackageHeader {
             control_head: hash_field(payload, 3, &err)?,
             sender: principal_field(payload, 4, &err)?,
         };
+        // §25: enc is the 32-byte X25519 ephemeral key; the ciphertext is
+        // the 32-byte DEK and the 16-byte tag.
         let enc = bytes_field(payload, 5, &err)?.to_vec();
         let ciphertext = bytes_field(payload, 6, &err)?.to_vec();
+        if enc.len() != ENC_BYTES || ciphertext.len() != CIPHERTEXT_BYTES {
+            return Err(err);
+        }
         Ok((header, enc, ciphertext))
     }
 }
@@ -131,9 +144,8 @@ impl ReceivedKeyPackage {
     /// ask `authorize` whether the sender and recipient had the §25.2
     /// authority at the referenced Control Head.
     ///
-    /// §25 does not state who signs a Key Package; requiring the `kid` to be
-    /// the sender is spec gap G-RS1, which every vector agrees with. Any
-    /// other signer is [`Error::CoseKidMismatch`].
+    /// §25: the `kid` must be the sender; any other signer is
+    /// [`Error::CoseKidMismatch`] (`INVALID_SIGNATURE`).
     pub fn verify(
         self,
         sender: &PrincipalDescriptor,
@@ -164,7 +176,8 @@ pub struct KeyPackage {
 
 impl KeyPackage {
     /// Deliver `dek`, the DEK of `data_epoch`, to `recipient`, sealed with
-    /// a fresh HPKE ephemeral key and signed by `sender`.
+    /// a fresh HPKE ephemeral key from the operating system's RNG and
+    /// signed by `sender`.
     pub fn seal(
         resource_id: ResourceId,
         data_epoch: u64,
@@ -173,6 +186,50 @@ impl KeyPackage {
         recipient: &PrincipalDescriptor,
         sender: &PrincipalKeys,
     ) -> Result<KeyPackage, Error> {
+        Self::seal_inner(
+            resource_id,
+            data_epoch,
+            control_head,
+            dek,
+            recipient,
+            sender,
+            crypto::hpke_seal,
+        )
+    }
+
+    /// [`KeyPackage::seal`] with the ephemeral key drawn from `rng` (see
+    /// [`crypto::hpke_seal_with_rng`]): a fixed source yielding a
+    /// published `ikmE` reproduces that vector byte for byte (G-KP2). Only
+    /// a cryptographically secure source is safe outside tests.
+    pub fn seal_with_rng(
+        resource_id: ResourceId,
+        data_epoch: u64,
+        control_head: Hash32,
+        dek: &Dek,
+        recipient: &PrincipalDescriptor,
+        sender: &PrincipalKeys,
+        rng: &mut impl hpke::rand_core::CryptoRng,
+    ) -> Result<KeyPackage, Error> {
+        Self::seal_inner(
+            resource_id,
+            data_epoch,
+            control_head,
+            dek,
+            recipient,
+            sender,
+            |pk, info, aad, pt| crypto::hpke_seal_with_rng(pk, info, aad, pt, rng),
+        )
+    }
+
+    fn seal_inner(
+        resource_id: ResourceId,
+        data_epoch: u64,
+        control_head: Hash32,
+        dek: &Dek,
+        recipient: &PrincipalDescriptor,
+        sender: &PrincipalKeys,
+        seal: impl FnOnce(&[u8; 32], &[u8], &[u8], &[u8]) -> Result<([u8; 32], Vec<u8>), Error>,
+    ) -> Result<KeyPackage, Error> {
         let header = KeyPackageHeader {
             resource_id,
             data_epoch,
@@ -180,7 +237,7 @@ impl KeyPackage {
             control_head,
             sender: *sender.descriptor().id(),
         };
-        let (enc, ciphertext) = crypto::hpke_seal(
+        let (enc, ciphertext) = seal(
             recipient.x25519_public(),
             &header.hpke_info(),
             &header.hpke_aad(),
@@ -214,7 +271,8 @@ impl KeyPackage {
             &self.header.hpke_aad(),
             &self.ciphertext,
         )?;
-        // §25.1: the plaintext is exactly the 32-byte DEK.
+        // §25.1: the plaintext is exactly the 32-byte DEK; §25.2: any other
+        // length does not match the commitment.
         let bytes: [u8; 32] = plaintext
             .as_slice()
             .try_into()
@@ -319,6 +377,33 @@ mod tests {
             received.verify(keys(1).descriptor(), |_| Err(Error::KeyPackageMalformed)),
             Err(Error::KeyPackageMalformed)
         );
+    }
+
+    #[test]
+    fn enc_and_ciphertext_sizes_are_fixed() {
+        // §25 (G-KP3): enc is 32 bytes and the ciphertext 48, else the
+        // payload is MALFORMED_MESSAGE.
+        let package = sealed(&Dek::from_bytes([9; 32]));
+        assert_eq!((package.enc().len(), package.ciphertext().len()), (32, 48));
+        let header = package.header().clone();
+        for (enc, ciphertext) in [
+            (vec![1; 31], vec![2; 48]),
+            (vec![1; 33], vec![2; 48]),
+            (vec![1; 32], vec![2; 47]),
+            (vec![1; 32], vec![2; 64]),
+        ] {
+            let payload = cbor::encode(&header.payload(&enc, &ciphertext)).unwrap();
+            let object = cose::sign(&payload, &keys(1)).unwrap();
+            let err = ReceivedKeyPackage::parse(object.bytes()).unwrap_err();
+            assert_eq!(
+                err,
+                Error::KeyPackageMalformed,
+                "{} {}",
+                enc.len(),
+                ciphertext.len()
+            );
+            assert_eq!(err.wire_code().unwrap().name(), "MALFORMED_MESSAGE");
+        }
     }
 
     #[test]
