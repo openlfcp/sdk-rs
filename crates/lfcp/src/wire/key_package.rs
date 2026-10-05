@@ -140,6 +140,11 @@ impl ReceivedKeyPackage {
         &self.header
     }
 
+    /// The Key Package ID: SHA-256 of the exact signed-object bytes (§10.6).
+    pub fn id(&self) -> Hash32 {
+        *self.object.id()
+    }
+
     /// Verify that the sender in payload field 4 signed the package, then
     /// ask `authorize` whether the sender and recipient had the §25.2
     /// authority at the referenced Control Head.
@@ -332,6 +337,7 @@ mod tests {
         let commitment = dek_commitment(&RESOURCE, 3, &dek);
         let package = sealed(&dek);
         let received = ReceivedKeyPackage::parse(package.signed_object().bytes()).unwrap();
+        assert_eq!(&received.id(), package.id());
         let verified = received.verify(keys(1).descriptor(), |_| Ok(())).unwrap();
         assert_eq!(verified, package);
         let opened = verified.open(&keys(2), &commitment).unwrap();

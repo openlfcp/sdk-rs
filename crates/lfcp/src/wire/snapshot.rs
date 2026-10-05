@@ -127,6 +127,11 @@ impl ReceivedSnapshot {
         &self.header
     }
 
+    /// The Snapshot ID: SHA-256 of the exact signed-object bytes (§10.6).
+    pub fn id(&self) -> Hash32 {
+        *self.object.id()
+    }
+
     /// Verify that the publisher in payload field 2 signed the Snapshot.
     /// Any other signer is [`Error::CoseKidMismatch`].
     pub fn verify(self, publisher: &PrincipalDescriptor) -> Result<Snapshot, Error> {
@@ -254,6 +259,7 @@ mod tests {
         let dek = Dek::from_bytes([3; 32]);
         let snapshot = Snapshot::seal(header(), b"state", &dek, &publisher()).unwrap();
         let received = ReceivedSnapshot::parse(snapshot.signed_object().bytes()).unwrap();
+        assert_eq!(&received.id(), snapshot.signed_object().id());
         let verified = received.verify(publisher().descriptor()).unwrap();
         assert_eq!(verified, snapshot);
         assert_eq!(verified.open(&dek).unwrap(), b"state");
