@@ -12,8 +12,10 @@
 //! - [`principal`]: Principal IDs, descriptors and keys;
 //! - [`cose`]: canonical COSE structures;
 //! - [`wire`]: LFCP Wire structures and messages;
-//! - [`shared_objects`]: the Shared Objects profile on Automerge
-//!   (SHARED-OBJECTS-PROFILE-01), carried in Data Units and Snapshots.
+//! - `shared_objects` (feature `shared-objects`): the Shared Objects profile
+//!   on Automerge (SHARED-OBJECTS-PROFILE-01), carried in Data Units and
+//!   Snapshots. The default build is the protocol core only, without
+//!   Automerge.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -23,5 +25,6 @@ pub mod cbor;
 pub mod cose;
 pub mod crypto;
 pub mod principal;
+#[cfg(feature = "shared-objects")]
 pub mod shared_objects;
 pub mod wire;

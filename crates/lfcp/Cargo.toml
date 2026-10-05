@@ -38,15 +38,28 @@ chacha20poly1305 = { version = "0.11", default-features = false, features = ["al
 # `danger` module, whose docs ask for a patch-version pin.
 hpke = { version = "=0.14.1", default-features = false, features = ["x25519", "chacha", "alloc", "getrandom"] }
 # Automerge, the CRDT engine of the Shared Objects profile
-# (SHARED-OBJECTS-PROFILE-01 §7). Pinned exactly: 0.12.0 is the Rust core of
-# @automerge/automerge 3.5.0, the profile's reference target; pre-1.0 minor
-# releases break the API. No features: the defaults are empty and the wasm
-# and indexing features are not needed.
-automerge = { version = "=0.12.0", default-features = false }
+# (SHARED-OBJECTS-PROFILE-01 §7), only with the `shared-objects` feature.
+# Pinned exactly: 0.12.0 is the Rust core of @automerge/automerge 3.5.0, the
+# profile's reference target; pre-1.0 minor releases break the API. No
+# features of its own: the defaults are empty and the wasm and indexing
+# features are not needed.
+automerge = { version = "=0.12.0", default-features = false, optional = true }
 # Wipes DEKs, derived keys and HPKE plaintexts on drop; "alloc" covers the
 # Vec-held HPKE plaintext. Already in the tree through the
 # dalek crates; used directly for this crate's own key types.
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
+
+[features]
+# The default build is the LFCP protocol core only. The reference server
+# uses it as is and must never link Automerge or Task semantics
+# (AGENT-OPERATING-GUIDE §6.4).
+default = []
+# lfcp::shared_objects: the Shared Objects profile on Automerge.
+shared-objects = ["dep:automerge"]
+
+[[test]]
+name = "shared_objects_vectors"
+required-features = ["shared-objects"]
 
 [dev-dependencies]
 serde_json = "1"

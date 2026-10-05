@@ -56,14 +56,24 @@ uses the modules listed above it.
 | `principal` | Principal IDs, descriptors and keys (WIRE §7) |
 | `cose` | Canonical untagged COSE_Sign1: sign, parse, verify (WIRE §10) |
 | `wire` | LFCP Wire structures: Data Epoch keys, Data Units, frontiers, Snapshots, Control Records, the Control Chain, Key Packages, messages, the handshake, Have Vectors, state machines, the capability engine and Data Epochs |
-| `shared_objects` | The Shared Objects profile on Automerge: actor IDs, plaintext framing, validation and diagnostics, the document and its Task intents |
+| `shared_objects` | Feature `shared-objects` only. The Shared Objects profile on Automerge: actor IDs, plaintext framing, validation and diagnostics, the document and its Task intents |
 
 The crate has no application or editor dependency, and it forbids `unsafe`
 code. Its runtime dependencies are `sha2`, `hkdf`, `chacha20poly1305`,
-`ed25519-dalek`, `x25519-dalek`, `hpke`, `zeroize` and `automerge`
-(pinned at 0.12.0, the core of the profile's reference
-`@automerge/automerge` 3.5.0), with default features off;
-`Cargo.toml` justifies each enabled feature. There is no CBOR dependency.
+`ed25519-dalek`, `x25519-dalek`, `hpke` and `zeroize`, with default
+features off;
+`Cargo.toml` justifies each enabled feature.
+
+Cargo features:
+
+| Feature | Default | Adds |
+| --- | --- | --- |
+| `shared-objects` | off | `lfcp::shared_objects` and `automerge` (pinned at 0.12.0, the core of the profile's reference `@automerge/automerge` 3.5.0) |
+
+The default build is the LFCP protocol core only. The reference server
+depends on it that way and never links Automerge or Task semantics
+(AGENT-OPERATING-GUIDE §6.4). Clients that use the profile enable
+`shared-objects`. There is no CBOR dependency.
 Secret keys redact themselves in `Debug` and are wiped on drop. The crate
 builds on the stable Rust toolchain; no older minimum version is promised.
 
@@ -93,8 +103,9 @@ including its tags), or `LFCP_SPEC_DIR` pointing at it:
 
 ```sh
 cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo clippy --workspace --all-targets --no-default-features -- -D warnings
+cargo test --workspace --all-features
 ```
 
 These are the same commands CI runs; CI also checks out the spec at the
