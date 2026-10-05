@@ -11,6 +11,7 @@
 //! - [`body`]: typed bodies of every core Control Record type.
 //! - [`chain`]: Control Chain validation and fork detection.
 //! - [`authority`]: the capability engine and Control transitions.
+//! - [`epoch`]: Data Epochs and the strict previous-epoch cutoff.
 //!
 //! A record is received in two steps, as Data Units are:
 //! [`ReceivedControlRecord::parse`] checks structure and the typed body,
@@ -20,6 +21,7 @@
 pub mod authority;
 pub mod body;
 pub mod chain;
+pub mod epoch;
 
 use crate::base::{ControlRecordId, Error, PrincipalId, ResourceId};
 use crate::cbor::{self, Value};

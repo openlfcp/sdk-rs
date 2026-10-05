@@ -184,6 +184,22 @@ pub enum Error {
     UnsupportedInMvp(u64),
     /// A Control Head that the evaluated chain does not contain.
     UnknownControlHead,
+    /// A Data Unit, Key Package or Snapshot names a Data Epoch that its
+    /// Control Head does not know (§26.3 step 4, §25.2, §29).
+    UnknownDataEpoch(u64),
+    /// A closed-epoch Data Unit outside the epoch's final frontier (§19.1).
+    /// A server answers `NACK(STALE_DATA_EPOCH)`; a client keeps the unit
+    /// in quarantine and does not merge it.
+    StaleDataEpoch(QuarantineReason),
+}
+
+/// Why a closed-epoch Data Unit is held back by the cutoff (§19.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QuarantineReason {
+    /// The actor's sequence is beyond its entry in the final frontier.
+    BeyondCutoff,
+    /// The actor has no entry in the final frontier.
+    ActorAbsent,
 }
 
 /// The authority rule a Control Record, Key Package or Data Unit breaks.
@@ -360,6 +376,8 @@ impl Error {
             Error::AuthorizationFailed(_) => "AUTHORIZATION_FAILED",
             Error::UnsupportedInMvp(_) => "UNSUPPORTED_IN_MVP",
             Error::UnknownControlHead => "UNKNOWN_CONTROL_HEAD",
+            Error::UnknownDataEpoch(_) => "UNKNOWN_DATA_EPOCH",
+            Error::StaleDataEpoch(_) => "STALE_DATA_EPOCH",
         }
     }
 
@@ -428,6 +446,11 @@ impl Error {
             // Provisional: no section names a code for an object that
             // references a Control Head the receiver does not have.
             Error::UnknownControlHead => Some(WireCode::MissingDependency),
+            // Provisional: §26.3 step 4 requires a recognized epoch but
+            // names no code; the object depends on Control state its
+            // referenced head does not have.
+            Error::UnknownDataEpoch(_) => Some(WireCode::MissingDependency),
+            Error::StaleDataEpoch(_) => Some(WireCode::StaleDataEpoch),
             // Provisional: whether an unknown core type is MALFORMED_MESSAGE
             // or INVALID_CONTROL_CHAIN is an open question for the project
             // owner (§14 names no code).
@@ -557,6 +580,10 @@ impl fmt::Display for Error {
                 write!(f, "Control Record type {code} is not supported in MVP 0.1")
             }
             Error::UnknownControlHead => f.write_str("unknown Control Head"),
+            Error::UnknownDataEpoch(epoch) => write!(f, "Data Epoch {epoch} is not known"),
+            Error::StaleDataEpoch(reason) => {
+                write!(f, "closed-epoch Data Unit beyond the cutoff: {reason:?}")
+            }
         }
     }
 }

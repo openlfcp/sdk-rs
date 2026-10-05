@@ -214,19 +214,27 @@ fn key_packages_pass_the_section_25_2_hook() {
 
 #[test]
 fn data_units_pass_the_section_26_3_hook() {
+    // Every unit's actor may write at its head; D3 is then held back by
+    // the C6 cutoff (BOB <= 2), which the epoch tests cover in full.
     let f = Fixture::load();
-    for case_id in [
-        "D1_bob_epoch0_seq1",
-        "D2_bob_epoch0_seq2",
-        "D3_bob_epoch0_seq3_stale",
-        "D4_carol_epoch1_seq1",
+    for (case_id, expected) in [
+        ("D1_bob_epoch0_seq1", Ok(())),
+        ("D2_bob_epoch0_seq2", Ok(())),
+        (
+            "D3_bob_epoch0_seq3_stale",
+            Err(Error::StaleDataEpoch(
+                lfcp::base::QuarantineReason::BeyondCutoff,
+            )),
+        ),
+        ("D4_carol_epoch1_seq1", Ok(())),
     ] {
         let bytes = hex(case_id, &f.suite.case(case_id)["expected"]["cose_sign1"]);
         let received = ReceivedDataUnit::parse(&bytes).unwrap();
         let actor = principal_by_id(&f.principals, case_id, &received.header().actor);
-        received
+        let result = received
             .verify_with(actor.descriptor(), data_unit_policy(&f.history))
-            .unwrap_or_else(|err| panic!("{case_id}: {err}"));
+            .map(|_| ());
+        assert_eq!(result, expected, "{case_id}");
     }
 }
 

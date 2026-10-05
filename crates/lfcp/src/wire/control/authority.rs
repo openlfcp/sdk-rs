@@ -14,8 +14,9 @@
 //! | Owner Transfer Commit | §23.3 rules 1–6 and §23.2: offer by the current owner at the current head, accept by the named Principal for this offer, commit by that Principal at the offered sequence | §23 |
 //! | Coordinator Recovery, Resource Tombstone | refused: not applied in MVP 0.1 | §22, §24, MVP-SCOPE §4 |
 //! | extension type | owner only (provisional) | §14 |
-//! | Key Package | sender holds `key/distribute`; recipient holds `data/read` or is the subject of an active invite grant, at the package's Control Head | §25.2 |
-//! | Data Unit | actor holds `data/write` at the unit's Control Head | §26.3 |
+//! | Key Package | epoch known, sender holds `key/distribute`, recipient holds `data/read` or is the subject of an active invite grant, at the package's Control Head | §25.2, §19 |
+//! | Data Unit | actor holds `data/write` at the unit's Control Head; epoch per [`super::epoch`] | §26.3 |
+//! | Snapshot | epoch known and publisher holds `snapshot/publish` at its Control Head | §29, §29.2 |
 //!
 //! The owner implicitly holds every standard ability (§15, §17.1). A
 //! grant is active while it is not revoked and, provisionally, while its
@@ -596,19 +597,47 @@ pub fn key_package_policy(
     move |header| {
         let head = ControlRecordId::from_bytes(*header.control_head.as_bytes());
         let state = state_at(history, &head).ok_or(Error::UnknownControlHead)?;
+        // §25.2 with §19: the package's epoch must be known at its head.
+        if !state.dek_commitments.contains_key(&header.data_epoch) {
+            return Err(Error::UnknownDataEpoch(header.data_epoch));
+        }
         can_distribute_key(state, &header.sender, &header.recipient)
     }
 }
 
-/// A Data Unit authorization hook evaluating §26.3 at the unit's Control
-/// Head, for [`crate::wire::data_unit::ReceivedDataUnit::verify_with`].
+/// A Data Unit hook for [`crate::wire::data_unit::ReceivedDataUnit::verify_with`]:
+/// `data/write` at the unit's Control Head (§26.3 steps 2–3), then its
+/// epoch (steps 4–5). A unit held back by the cutoff fails with
+/// [`Error::StaleDataEpoch`]; the client keeps it in quarantine (§19.1).
 pub fn data_unit_policy(
     history: &[ControlState],
 ) -> impl FnOnce(&DataUnitHeader) -> Result<(), Error> + '_ {
     move |header| {
         let head = ControlRecordId::from_bytes(*header.control_head.as_bytes());
         let state = state_at(history, &head).ok_or(Error::UnknownControlHead)?;
-        can_write(state, &header.actor)
+        can_write(state, &header.actor)?;
+        match crate::wire::control::epoch::client_disposition(history, header)? {
+            crate::wire::control::epoch::Disposition::Accept => Ok(()),
+            crate::wire::control::epoch::Disposition::Quarantine(reason) => {
+                Err(Error::StaleDataEpoch(reason))
+            }
+        }
+    }
+}
+
+/// A Snapshot hook for [`crate::wire::snapshot::ReceivedSnapshot::verify_with`]:
+/// the Snapshot's epoch is known at its Control Head, and the publisher
+/// holds `snapshot/publish` there (§29, §29.2).
+pub fn snapshot_policy(
+    history: &[ControlState],
+) -> impl FnOnce(&crate::wire::snapshot::SnapshotHeader) -> Result<(), Error> + '_ {
+    move |header| {
+        let head = ControlRecordId::from_bytes(*header.control_head.as_bytes());
+        let state = state_at(history, &head).ok_or(Error::UnknownControlHead)?;
+        if !state.dek_commitments.contains_key(&header.data_epoch) {
+            return Err(Error::UnknownDataEpoch(header.data_epoch));
+        }
+        state.require(&header.publisher, ability::SNAPSHOT_PUBLISH)
     }
 }
 

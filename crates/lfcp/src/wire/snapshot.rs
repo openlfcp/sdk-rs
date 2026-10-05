@@ -126,10 +126,21 @@ impl ReceivedSnapshot {
     /// Verify that the publisher in payload field 2 signed the Snapshot.
     /// Any other signer is [`Error::CoseKidMismatch`].
     pub fn verify(self, publisher: &PrincipalDescriptor) -> Result<Snapshot, Error> {
+        self.verify_with(publisher, |_| Ok(()))
+    }
+
+    /// [`verify`](Self::verify), then ask `authorize` whether the Snapshot
+    /// is acceptable at its Control Head (§29, §29.2).
+    pub fn verify_with(
+        self,
+        publisher: &PrincipalDescriptor,
+        authorize: impl FnOnce(&SnapshotHeader) -> Result<(), Error>,
+    ) -> Result<Snapshot, Error> {
         if publisher.id() != &self.header.publisher {
             return Err(Error::CoseKidMismatch);
         }
         cose::verify(&self.object, publisher)?;
+        authorize(&self.header)?;
         Ok(Snapshot {
             object: self.object,
             header: self.header,
