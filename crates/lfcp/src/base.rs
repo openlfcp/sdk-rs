@@ -99,6 +99,14 @@ pub enum Error {
     /// ciphertext. Only a client holding the DEK can detect it, so it is
     /// client-local and has no wire code (§26.3, §29.1.4, N3).
     AeadFailure,
+    /// A Data Unit payload is not the closed §26 map with the field types
+    /// the CDDL gives.
+    DataUnitMalformed,
+    /// A Data Unit has actor sequence 0; sequences begin at 1 (§8, N4).
+    DataUnitSequenceZero,
+    /// Two different validly signed Data Units share one
+    /// `(resource, actor, sequence)` (§26.2).
+    ActorEquivocation,
 }
 
 impl Error {
@@ -134,6 +142,9 @@ impl Error {
             Error::CoseSignatureLength => "COSE_SIGNATURE_LENGTH",
             Error::CoseKidMismatch => "COSE_KID_MISMATCH",
             Error::AeadFailure => "AEAD_FAILURE",
+            Error::DataUnitMalformed => "DATA_UNIT_MALFORMED",
+            Error::DataUnitSequenceZero => "DATA_UNIT_SEQUENCE_ZERO",
+            Error::ActorEquivocation => "ACTOR_EQUIVOCATION",
         }
     }
 
@@ -168,7 +179,10 @@ impl Error {
             | Error::CoseProtectedHeader
             | Error::CoseUnprotectedNotEmpty
             | Error::CosePayloadAbsent
-            | Error::CoseSignatureLength => Some(WireCode::MalformedMessage),
+            | Error::CoseSignatureLength
+            | Error::DataUnitMalformed
+            | Error::DataUnitSequenceZero => Some(WireCode::MalformedMessage),
+            Error::ActorEquivocation => Some(WireCode::ActorEquivocation),
             Error::SignatureInvalid | Error::CoseKidMismatch => Some(WireCode::InvalidSignature),
         }
     }
@@ -234,6 +248,9 @@ impl fmt::Display for Error {
             Error::CoseSignatureLength => f.write_str("signature is not 64 bytes"),
             Error::CoseKidMismatch => f.write_str("kid is not the required signer"),
             Error::AeadFailure => f.write_str("AEAD authentication failed"),
+            Error::DataUnitMalformed => f.write_str("malformed Data Unit payload"),
+            Error::DataUnitSequenceZero => f.write_str("Data Unit actor sequence is 0"),
+            Error::ActorEquivocation => f.write_str("actor equivocation"),
         }
     }
 }
@@ -250,6 +267,8 @@ pub enum WireCode {
     AuthFailed,
     /// `INVALID_SIGNATURE` (7).
     InvalidSignature,
+    /// `ACTOR_EQUIVOCATION` (16).
+    ActorEquivocation,
 }
 
 impl WireCode {
@@ -259,6 +278,7 @@ impl WireCode {
             WireCode::MalformedMessage => 2,
             WireCode::AuthFailed => 3,
             WireCode::InvalidSignature => 7,
+            WireCode::ActorEquivocation => 16,
         }
     }
 
@@ -268,6 +288,7 @@ impl WireCode {
             WireCode::MalformedMessage => "MALFORMED_MESSAGE",
             WireCode::AuthFailed => "AUTH_FAILED",
             WireCode::InvalidSignature => "INVALID_SIGNATURE",
+            WireCode::ActorEquivocation => "ACTOR_EQUIVOCATION",
         }
     }
 }
