@@ -95,6 +95,10 @@ pub enum Error {
     /// The `kid` does not name the Principal the object requires as signer
     /// (§10.5, G1/N2).
     CoseKidMismatch,
+    /// AEAD authentication failed: wrong key, nonce, AAD or a changed
+    /// ciphertext. Only a client holding the DEK can detect it, so it is
+    /// client-local and has no wire code (§26.3, §29.1.4, N3).
+    AeadFailure,
 }
 
 impl Error {
@@ -129,6 +133,7 @@ impl Error {
             Error::CosePayloadAbsent => "COSE_PAYLOAD_ABSENT",
             Error::CoseSignatureLength => "COSE_SIGNATURE_LENGTH",
             Error::CoseKidMismatch => "COSE_KID_MISMATCH",
+            Error::AeadFailure => "AEAD_FAILURE",
         }
     }
 
@@ -141,6 +146,7 @@ impl Error {
             | Error::InvalidHex
             | Error::InvalidBase64Url
             | Error::InvalidObjectId => None,
+            Error::AeadFailure => None,
             Error::CborTruncated
             | Error::CborTrailingBytes
             | Error::CborNonShortest
@@ -169,6 +175,13 @@ impl Error {
 }
 
 impl Error {
+    /// Whether this rejection is client-local: the receiver must not merge
+    /// the object and should surface it to the application, but it has no
+    /// wire code because the server cannot detect it (N3, N5).
+    pub fn is_client_local(&self) -> bool {
+        matches!(self, Error::AeadFailure)
+    }
+
     /// The wire code for this error when it occurs in a `HELLO` or `AUTH`
     /// message (session context). It differs from [`Error::wire_code`] only
     /// for [`Error::PrincipalIdMismatch`], which is `AUTH_FAILED` there
@@ -220,6 +233,7 @@ impl fmt::Display for Error {
             Error::CosePayloadAbsent => f.write_str("COSE payload is absent"),
             Error::CoseSignatureLength => f.write_str("signature is not 64 bytes"),
             Error::CoseKidMismatch => f.write_str("kid is not the required signer"),
+            Error::AeadFailure => f.write_str("AEAD authentication failed"),
         }
     }
 }

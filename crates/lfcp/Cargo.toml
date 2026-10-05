@@ -20,6 +20,17 @@ ed25519-dalek = { version = "3", default-features = false, features = ["fast", "
 # reusable private key, which a Principal's long-term key is; "zeroize"
 # wipes it on drop.
 x25519-dalek = { version = "3", default-features = false, features = ["precomputed-tables", "static_secrets", "zeroize"] }
+# HKDF-SHA256 for the actor and snapshot keys (WIRE §9, §12, §29.1.1). It
+# has no optional features this crate needs.
+hkdf = { version = "0.13", default-features = false }
+# ChaCha20-Poly1305 for Data Units and Snapshots (WIRE §9, §12, §29.1.4).
+# "alloc" provides the Vec-returning seal and open; "zeroize" wipes the
+# cipher's key schedule on drop. "getrandom" stays off: LFCP nonces are
+# derived from sequence numbers, never random.
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc", "zeroize"] }
+# Wipes DEKs and derived keys on drop. Already in the tree through the
+# dalek crates; used directly for this crate's own key types.
+zeroize = { version = "1", default-features = false }
 
 [dev-dependencies]
 serde_json = "1"
