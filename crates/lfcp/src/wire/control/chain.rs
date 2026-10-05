@@ -295,9 +295,24 @@ fn verify(
             .get(&issuer)
             .cloned()
             .or_else(|| policy.resolve_issuer(&issuer))
+            .or_else(|| transfer_new_owner(record.body(), &issuer))
             .ok_or(Error::InvalidControlChain(ChainRule::IssuerUnknown))?,
     };
     record.verify(&descriptor)
+}
+
+/// The new owner a Transfer Commit's embedded offer describes, when it is
+/// the issuer: the commit is signed by that Principal (§23.3), and a
+/// descriptor is self-certifying, so it may come from the offer itself.
+fn transfer_new_owner(body: &ControlBody, issuer: &PrincipalId) -> Option<PrincipalDescriptor> {
+    match body {
+        ControlBody::OwnerTransferCommit(commit) => commit
+            .offer()
+            .ok()
+            .map(|(_, offer)| offer.new_owner)
+            .filter(|owner| owner.id() == issuer),
+        _ => None,
+    }
 }
 
 /// Record the descriptors a verified record carries: the Genesis owner,

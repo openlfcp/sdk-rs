@@ -177,6 +177,65 @@ pub enum Error {
     /// A Resource, Control, Data, Key or Snapshot message before the
     /// session is `READY` (§64).
     SessionNotReady(u64),
+    /// A Control Record whose issuer lacks the authority it needs (§17–§23).
+    AuthorizationFailed(AuthorityRule),
+    /// A Control Record type that MVP 0.1 defers (MVP-SCOPE §4): Coordinator
+    /// Recovery and Resource Tombstone are not applied.
+    UnsupportedInMvp(u64),
+    /// A Control Head that the evaluated chain does not contain.
+    UnknownControlHead,
+}
+
+/// The authority rule a Control Record, Key Package or Data Unit breaks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthorityRule {
+    /// The issuer lacks this ability (§17.1).
+    MissingAbility(u64),
+    /// Only the owner may issue this record.
+    NotOwner,
+    /// The parent grant does not exist (§17.2).
+    ParentUnknown,
+    /// The parent grant is not active (§17.2).
+    ParentInactive,
+    /// The issuer is not the subject of the parent grant (§17.2).
+    NotParentSubject,
+    /// A granted ability is not delegable by the parent (§17.2).
+    Escalation,
+    /// A delegable ability is not delegable by the parent.
+    DelegableEscalation,
+    /// The revoked grant does not exist (§17.3).
+    RevokeTargetUnknown,
+    /// The issuer's revoke authority does not cover the grant (§17.3).
+    RevokeNotCovered,
+    /// The invitation grant does not exist (§18.1).
+    ClaimGrantUnknown,
+    /// The invitation grant is not active (§18.1 rule 1).
+    ClaimGrantInactive,
+    /// The invitation grant does not grant `invite/claim` (§18.1 rule 2).
+    ClaimNotInvite,
+    /// No claims remain on the invitation grant (§18.1 rule 3).
+    ClaimLimitExhausted,
+    /// The claim asks for abilities the invitation does not give (§18.1
+    /// rule 4).
+    ClaimAbilitiesExceed,
+    /// The claim is not issued by the Invitation Principal (§18.1 rule 5).
+    ClaimIssuerNotInvitation,
+    /// The route version does not increase (§20).
+    RouteVersionNotIncreasing,
+    /// The offer or accept names another Resource (§23).
+    TransferResourceMismatch,
+    /// The transfer offer is not signed by the current owner (§23.3 rule 1).
+    TransferOfferNotByOwner,
+    /// The offer does not reference the current Control Head (§23.3 rule 2).
+    TransferOfferStaleHead,
+    /// The accept is not by the Principal the offer names (§23.3 rules 3, 4).
+    TransferAcceptorMismatch,
+    /// The accept does not name this offer (§23.2).
+    TransferAcceptNotForOffer,
+    /// The commit is not issued by the accepting Principal (§23.3 rule 5).
+    TransferCommitIssuer,
+    /// The offer's expected sequence is not the commit's (§23.3 rule 6).
+    TransferSequenceMismatch,
 }
 
 /// Why an `AUTH` did not authenticate the session Principal (§36).
@@ -295,6 +354,9 @@ impl Error {
             Error::ControlHeadMismatch { .. } => "CONTROL_HEAD_MISMATCH",
             Error::IllegalTransition { .. } => "ILLEGAL_TRANSITION",
             Error::SessionNotReady(_) => "SESSION_NOT_READY",
+            Error::AuthorizationFailed(_) => "AUTHORIZATION_FAILED",
+            Error::UnsupportedInMvp(_) => "UNSUPPORTED_IN_MVP",
+            Error::UnknownControlHead => "UNKNOWN_CONTROL_HEAD",
         }
     }
 
@@ -355,6 +417,14 @@ impl Error {
             // before READY but names no code; the session is not yet
             // authorized for them (cf. §41). An open question (G-SM2).
             Error::SessionNotReady(_) => Some(WireCode::AuthorizationFailed),
+            Error::AuthorizationFailed(_) => Some(WireCode::AuthorizationFailed),
+            // Provisional: MVP-SCOPE §4 defers these record types and names no
+            // code for refusing them; PROTOCOL_UNSUPPORTED says "not
+            // implemented here" without blaming the signature or the issuer.
+            Error::UnsupportedInMvp(_) => Some(WireCode::ProtocolUnsupported),
+            // Provisional: no section names a code for an object that
+            // references a Control Head the receiver does not have.
+            Error::UnknownControlHead => Some(WireCode::MissingDependency),
             // Provisional: whether an unknown core type is MALFORMED_MESSAGE
             // or INVALID_CONTROL_CHAIN is an open question for the project
             // owner (§14 names no code).
@@ -479,6 +549,11 @@ impl fmt::Display for Error {
             Error::SessionNotReady(code) => {
                 write!(f, "message type {code} before the session is READY")
             }
+            Error::AuthorizationFailed(rule) => write!(f, "not authorized: {rule:?}"),
+            Error::UnsupportedInMvp(code) => {
+                write!(f, "Control Record type {code} is not supported in MVP 0.1")
+            }
+            Error::UnknownControlHead => f.write_str("unknown Control Head"),
         }
     }
 }

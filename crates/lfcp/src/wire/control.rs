@@ -10,12 +10,14 @@
 //!
 //! - [`body`]: typed bodies of every core Control Record type.
 //! - [`chain`]: Control Chain validation and fork detection.
+//! - [`authority`]: the capability engine and Control transitions.
 //!
 //! A record is received in two steps, as Data Units are:
 //! [`ReceivedControlRecord::parse`] checks structure and the typed body,
 //! and [`ReceivedControlRecord::verify`] checks the signature of the
 //! issuer. Whether the issuer was authorized is evaluated separately.
 
+pub mod authority;
 pub mod body;
 pub mod chain;
 

@@ -158,10 +158,21 @@ impl ReceivedDataUnit {
     /// descriptor of the Principal in payload field 2; any other signer is
     /// [`Error::CoseKidMismatch`] (§10.5, §26).
     pub fn verify(self, actor: &PrincipalDescriptor) -> Result<DataUnit, Error> {
+        self.verify_with(actor, |_| Ok(()))
+    }
+
+    /// [`verify`](Self::verify), then ask `authorize` whether the actor had
+    /// `data/write` at the referenced Control Head (§26.3 steps 2–3).
+    pub fn verify_with(
+        self,
+        actor: &PrincipalDescriptor,
+        authorize: impl FnOnce(&DataUnitHeader) -> Result<(), Error>,
+    ) -> Result<DataUnit, Error> {
         if actor.id() != &self.header.actor {
             return Err(Error::CoseKidMismatch);
         }
         cose::verify(&self.object, actor)?;
+        authorize(&self.header)?;
         Ok(DataUnit {
             object: self.object,
             header: self.header,
