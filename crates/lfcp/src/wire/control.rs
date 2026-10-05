@@ -160,6 +160,7 @@ impl ControlRecord {
         if signer.descriptor().id() != &header.issuer {
             return Err(Error::CoseKidMismatch);
         }
+        body.check_writable()?;
         let payload = cbor::encode(&encode_payload(&header, &body))?;
         let object = cose::sign(&payload, signer)?;
         Ok(ControlRecord {

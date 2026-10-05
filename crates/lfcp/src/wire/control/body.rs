@@ -13,12 +13,21 @@
 //! | 4 | Key Epoch | 0 new epoch, 1 new DEK commitment, 2 final frontier, 3 reason | §19 |
 //! | 5 | Route Update | 0 route version, 1 endpoints (≥ 1), 2 coordinator URL | §20 |
 //! | 6 | Owner Transfer Commit | 0 offer COSE bytes, 1 accept COSE bytes | §23.3 |
-//! | 7 | Coordinator Recovery | 0 route version, 1 endpoints (≥ 1), 2 coordinator URL, 3 reason (≤ 256 bytes) | §22 |
-//! | 8 | Resource Tombstone | 0 reason, ?1 note (≤ 256 bytes) | §24 |
-//! | 9–31 | reserved | rejected | §14 |
+//! | 7 | Coordinator Recovery | 0 route version, 1 endpoints (≥ 1), 2 coordinator URL, 3 reason | §22 |
+//! | 8 | Resource Tombstone | 0 reason, ?1 note | §24 |
+//! | 9–31 | reserved | rejected, `INVALID_CONTROL_CHAIN` | §14 |
 //! | ≥ 32 | extension | kept opaque | §14 |
 //!
 //! An endpoint is `{0: URL, 1: priority, ?2: flags}` (§16).
+//!
+//! Receivers and writers are held to different rules:
+//!
+//! | Rule | Receiver ([`ControlBody::from_value`]) | Writer ([`ControlBody::check_writable`]) | § |
+//! | --- | --- | --- | --- |
+//! | endpoint and coordinator URL scheme | `ws` or `wss`, else `MALFORMED_MESSAGE` | `wss`, or `ws` to a loopback host | §16 |
+//! | endpoint flags | reserved bits ignored | reserved bits 0 | §16 |
+//! | reason and note text | any length | at most 256 UTF-8 bytes | §22, §24 |
+//! | ability lists | no repeated code, else `MALFORMED_MESSAGE` | no repeated code | §17.1 |
 
 use crate::base::{ControlRecordId, Error, Hash32, PrincipalId, ResourceId};
 use crate::cbor::Value;
@@ -30,8 +39,13 @@ use crate::wire::{
     uint_array, uint_array_field, uint_field,
 };
 
-/// Longest human-readable reason or note, in UTF-8 bytes (§22, §24).
+/// Longest human-readable reason or note a writer may produce, in UTF-8
+/// bytes (§22, §24). Receivers do not enforce it.
 pub const MAX_NOTE_BYTES: usize = 256;
+
+/// The endpoint flag bits §16 defines (bits 0–5); writers set every other
+/// bit to 0 and receivers ignore them.
+pub const DEFINED_ENDPOINT_FLAGS: u64 = 0b11_1111;
 
 /// First Control Record type of the extension space (§14).
 pub const FIRST_EXTENSION_TYPE: u64 = 32;
@@ -53,7 +67,7 @@ impl Endpoint {
     fn from_value(value: &Value) -> Result<Endpoint, Error> {
         check_closed_map(value, &[0, 1], &[2], MALFORMED)?;
         Ok(Endpoint {
-            url: text_field(value, 0, &MALFORMED)?.to_owned(),
+            url: url_field(value, 0)?,
             priority: uint_field(value, 1, &MALFORMED)?,
             flags: match value.get_uint(2) {
                 Some(_) => Some(uint_field(value, 2, &MALFORMED)?),
@@ -166,7 +180,7 @@ pub struct CoordinatorRecoveryBody {
     pub endpoints: Vec<Endpoint>,
     /// Field 2: the new coordinator URL.
     pub coordinator: String,
-    /// Field 3: human-readable reason, at most 256 UTF-8 bytes.
+    /// Field 3: human-readable reason; writers keep it to 256 UTF-8 bytes.
     pub reason: String,
 }
 
@@ -175,7 +189,7 @@ pub struct CoordinatorRecoveryBody {
 pub struct ResourceTombstoneBody {
     /// Field 0: the reason code.
     pub reason: u64,
-    /// Field 1: optional note, at most 256 UTF-8 bytes.
+    /// Field 1: optional note; writers keep it to 256 UTF-8 bytes.
     pub note: Option<String>,
 }
 
@@ -238,7 +252,7 @@ impl ControlBody {
                     owner: descriptor_field(body, 1)?,
                     dek_commitment: hash_field(body, 2, m)?,
                     endpoints: endpoints_field(body, 3)?,
-                    coordinator: text_field(body, 4, m)?.to_owned(),
+                    coordinator: url_field(body, 4)?,
                 })
             }
             1 => {
@@ -273,10 +287,9 @@ impl ControlBody {
             }
             4 => {
                 check_closed_map(body, &[0, 1, 2, 3], &[], MALFORMED)?;
-                // PROVISIONAL (G-CP1): the CDDL types the final frontier as
-                // [* actor-have]; it is held to the full canonical-frontier
-                // rules (§28.1, §28.2 order, no duplicate Principal), and a
-                // violation is MALFORMED_MESSAGE (N6).
+                // §19: the final frontier is a canonical-frontier (§28.1,
+                // §28.2 order, one entry per Principal); a violation is
+                // MALFORMED_MESSAGE.
                 let final_frontier = Frontier::from_value(body.get_uint(2).ok_or(MALFORMED)?)?;
                 ControlBody::KeyEpoch(KeyEpochBody {
                     epoch: uint_field(body, 0, m)?,
@@ -290,7 +303,7 @@ impl ControlBody {
                 ControlBody::RouteUpdate(RouteUpdateBody {
                     version: uint_field(body, 0, m)?,
                     endpoints: endpoints_field(body, 1)?,
-                    coordinator: text_field(body, 2, m)?.to_owned(),
+                    coordinator: url_field(body, 2)?,
                 })
             }
             6 => {
@@ -305,8 +318,8 @@ impl ControlBody {
                 ControlBody::CoordinatorRecovery(CoordinatorRecoveryBody {
                     version: uint_field(body, 0, m)?,
                     endpoints: endpoints_field(body, 1)?,
-                    coordinator: text_field(body, 2, m)?.to_owned(),
-                    reason: note(text_field(body, 3, m)?)?,
+                    coordinator: url_field(body, 2)?,
+                    reason: text_field(body, 3, m)?.to_owned(),
                 })
             }
             8 => {
@@ -314,7 +327,7 @@ impl ControlBody {
                 ControlBody::ResourceTombstone(ResourceTombstoneBody {
                     reason: uint_field(body, 0, m)?,
                     note: match body.get_uint(1) {
-                        Some(_) => Some(note(text_field(body, 1, m)?)?),
+                        Some(_) => Some(text_field(body, 1, m)?.to_owned()),
                         None => None,
                     },
                 })
@@ -325,6 +338,42 @@ impl ControlBody {
                 body: body.clone(),
             },
         })
+    }
+
+    /// Check the writer-side rules a received body is not held to (see the
+    /// module docs): `wss` URLs (or `ws` to a loopback host), reserved
+    /// endpoint flag bits 0, reasons and notes of at most
+    /// [`MAX_NOTE_BYTES`], and no repeated ability code. A violation is
+    /// [`Error::ControlRecordMalformed`].
+    pub fn check_writable(&self) -> Result<(), Error> {
+        let distinct = |codes: &[u64]| {
+            let mut seen = std::collections::BTreeSet::new();
+            if codes.iter().all(|code| seen.insert(*code)) {
+                Ok(())
+            } else {
+                Err(MALFORMED)
+            }
+        };
+        match self {
+            ControlBody::Genesis(b) => check_writable_endpoints(&b.endpoints, &b.coordinator),
+            ControlBody::CapabilityGrant(b) => {
+                distinct(&b.abilities)?;
+                distinct(&b.delegable)
+            }
+            ControlBody::CapabilityClaim(b) => distinct(&b.abilities),
+            ControlBody::RouteUpdate(b) => check_writable_endpoints(&b.endpoints, &b.coordinator),
+            ControlBody::CoordinatorRecovery(b) => {
+                check_writable_endpoints(&b.endpoints, &b.coordinator)?;
+                check_writable_note(&b.reason)
+            }
+            ControlBody::ResourceTombstone(b) => {
+                b.note.as_deref().map_or(Ok(()), check_writable_note)
+            }
+            ControlBody::CapabilityRevoke(_)
+            | ControlBody::KeyEpoch(_)
+            | ControlBody::OwnerTransferCommit(_)
+            | ControlBody::Extension { .. } => Ok(()),
+        }
     }
 
     /// The body as a CBOR value.
@@ -422,8 +471,8 @@ fn endpoints(endpoints: &[Endpoint]) -> Value {
 /// An ability-code list (§17.1, §17.2, §18.1).
 fn abilities(body: &Value, key: u64) -> Result<Vec<u64>, Error> {
     let codes = uint_array_field(body, key, &MALFORMED)?;
-    // PROVISIONAL (G-CP6): a code repeated within one list makes the
-    // record malformed. Unknown codes are kept; they confer nothing.
+    // §17.1: a code repeated within one list makes the record
+    // MALFORMED_MESSAGE. Unknown codes are kept; they confer nothing.
     let mut seen = std::collections::BTreeSet::new();
     if codes.iter().all(|code| seen.insert(*code)) {
         Ok(codes)
@@ -440,11 +489,76 @@ fn non_empty<T>(items: Vec<T>) -> Result<Vec<T>, Error> {
     }
 }
 
-fn note(text: &str) -> Result<String, Error> {
+/// A text field holding an endpoint or Control Coordinator URL: a
+/// receiver rejects any scheme other than `ws` or `wss` (§16).
+fn url_field(body: &Value, key: u64) -> Result<String, Error> {
+    let url = text_field(body, key, &MALFORMED)?;
+    match scheme(url) {
+        Some(scheme) if scheme == "ws" || scheme == "wss" => Ok(url.to_owned()),
+        _ => Err(MALFORMED),
+    }
+}
+
+/// The lower-cased RFC 3986 scheme of `url`, if it has one followed by
+/// `://`.
+fn scheme(url: &str) -> Option<String> {
+    let (scheme, rest) = url.split_once(':')?;
+    let valid = scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+        && scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+    (valid && rest.starts_with("//")).then(|| scheme.to_ascii_lowercase())
+}
+
+/// Whether the host of a `scheme://authority/...` URL is a loopback
+/// address: `localhost`, an IPv4 address in 127.0.0.0/8, or `[::1]`.
+fn is_loopback(url: &str) -> bool {
+    let Some((_, rest)) = url.split_once("://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let host = if host_port.starts_with('[') {
+        host_port.split_inclusive(']').next().unwrap_or("")
+    } else {
+        host_port.split(':').next().unwrap_or("")
+    };
+    let host = host.to_ascii_lowercase();
+    host == "localhost"
+        || host == "[::1]"
+        || host
+            .parse::<std::net::Ipv4Addr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// A URL a writer may put in a record: `wss`, or `ws` to a loopback host
+/// (§16).
+fn check_writable_url(url: &str) -> Result<(), Error> {
+    match scheme(url).as_deref() {
+        Some("wss") => Ok(()),
+        Some("ws") if is_loopback(url) => Ok(()),
+        _ => Err(MALFORMED),
+    }
+}
+
+fn check_writable_endpoints(endpoints: &[Endpoint], coordinator: &str) -> Result<(), Error> {
+    for endpoint in endpoints {
+        check_writable_url(&endpoint.url)?;
+        if endpoint
+            .flags
+            .is_some_and(|f| f & !DEFINED_ENDPOINT_FLAGS != 0)
+        {
+            return Err(MALFORMED);
+        }
+    }
+    check_writable_url(coordinator)
+}
+
+fn check_writable_note(text: &str) -> Result<(), Error> {
     if text.len() > MAX_NOTE_BYTES {
         Err(MALFORMED)
     } else {
-        Ok(text.to_owned())
+        Ok(())
     }
 }
 
@@ -771,18 +885,115 @@ mod tests {
     }
 
     #[test]
-    fn notes_are_limited_to_256_bytes() {
+    fn note_limit_is_writer_side() {
         let tombstone = |note: String| {
             ControlBody::ResourceTombstone(ResourceTombstoneBody {
                 reason: 0,
                 note: Some(note),
             })
-            .to_value()
         };
-        assert!(ControlBody::from_value(8, &tombstone("é".repeat(128))).is_ok());
+        let at_limit = tombstone("é".repeat(128));
+        let over = tombstone(format!("{}x", "é".repeat(128)));
+        assert_eq!(at_limit.check_writable(), Ok(()));
+        assert_eq!(over.check_writable(), Err(MALFORMED));
+        // §24, T1: a receiver does not reject a longer note.
+        assert_eq!(ControlBody::from_value(8, &over.to_value()), Ok(over));
+    }
+
+    fn route(urls: &[&str], coordinator: &str, flags: Option<u64>) -> ControlBody {
+        ControlBody::RouteUpdate(RouteUpdateBody {
+            version: 1,
+            endpoints: urls
+                .iter()
+                .map(|url| Endpoint {
+                    url: (*url).into(),
+                    priority: 0,
+                    flags,
+                })
+                .collect(),
+            coordinator: coordinator.into(),
+        })
+    }
+
+    #[test]
+    fn receivers_accept_only_ws_and_wss_urls() {
+        for url in [
+            "wss://a.example/ws",
+            "ws://a.example/ws",
+            "WSS://a.example/ws",
+        ] {
+            let body = route(&[url], url, None);
+            assert_eq!(
+                ControlBody::from_value(5, &body.to_value()),
+                Ok(body),
+                "{url}"
+            );
+        }
+        for url in [
+            "http://a.example/ws",
+            "https://a.example/ws",
+            "a.example/ws",
+            "wss:a",
+        ] {
+            let endpoint = route(&[url], "wss://a.example/ws", None);
+            assert_eq!(
+                ControlBody::from_value(5, &endpoint.to_value()),
+                Err(MALFORMED),
+                "{url}"
+            );
+            let coordinator = route(&["wss://a.example/ws"], url, None);
+            assert_eq!(
+                ControlBody::from_value(5, &coordinator.to_value()),
+                Err(MALFORMED),
+                "{url}"
+            );
+        }
+        assert_eq!(MALFORMED.wire_code().unwrap().name(), "MALFORMED_MESSAGE");
+    }
+
+    #[test]
+    fn writers_use_wss_except_loopback_ws() {
+        let ok = "wss://a.example/ws";
+        for url in [
+            ok,
+            "ws://localhost:8080/ws",
+            "ws://127.0.0.1/ws",
+            "ws://127.9.9.9:1",
+            "ws://[::1]:80/x",
+            "ws://user@LOCALHOST/",
+        ] {
+            assert_eq!(route(&[url], ok, None).check_writable(), Ok(()), "{url}");
+            assert_eq!(route(&[ok], url, None).check_writable(), Ok(()), "{url}");
+        }
+        for url in [
+            "ws://a.example/ws",
+            "ws://128.0.0.1/",
+            "ws://localhost.example/",
+            "http://localhost/",
+        ] {
+            assert_eq!(
+                route(&[url], ok, None).check_writable(),
+                Err(MALFORMED),
+                "{url}"
+            );
+            assert_eq!(
+                route(&[ok], url, None).check_writable(),
+                Err(MALFORMED),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn reserved_flag_bits_are_written_as_zero_and_ignored() {
+        let ok = "wss://a.example/ws";
+        assert_eq!(route(&[ok], ok, Some(0b11_1111)).check_writable(), Ok(()));
+        let reserved = route(&[ok], ok, Some(1 << 6));
+        assert_eq!(reserved.check_writable(), Err(MALFORMED));
         assert_eq!(
-            ControlBody::from_value(8, &tombstone(format!("{}x", "é".repeat(128)))),
-            Err(MALFORMED)
+            ControlBody::from_value(5, &reserved.to_value()),
+            Ok(reserved),
+            "§16: a receiver ignores reserved bits"
         );
     }
 
