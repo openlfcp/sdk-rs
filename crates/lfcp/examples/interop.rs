@@ -745,9 +745,9 @@ fn produce_shared_objects(p: &Producer) -> Json {
             { "name": "change_signer", "kind": "change", "plaintext": hex(&framing::encode_change(&raw)), "signer": "carol",
               "expect": "CHANGE_ACTOR_MISMATCH" },
             { "name": "change_checksum", "kind": "change", "plaintext": hex(&framing::encode_change(&corrupt)), "signer": "bob",
-              "expect": "INVALID_CHANGE" },
+              "expect": "INVALID_AUTOMERGE_BYTES" },
             { "name": "snapshot_change_chunk", "kind": "snapshot", "plaintext": hex(&framing::encode_snapshot(&raw)),
-              "expect": "INVALID_SNAPSHOT" },
+              "expect": "INVALID_AUTOMERGE_BYTES" },
             { "name": "state_problems", "kind": "state", "changes": invalid_changes,
               "expect": [ { "pointer": format!("{t1p}/status"), "diagnostic": "INVALID_ENUM_VALUE" },
                           { "pointer": format!("{t1p}/tags/#bad"), "diagnostic": "INVALID_TAG" } ] },
@@ -1189,15 +1189,16 @@ fn consume_shared_objects(so: &Json, c: &Consumer, results: &mut Results) {
                     Ok(()) => "ACCEPTED".to_owned(),
                     Err(e) => e
                         .diagnostic()
-                        .map(|d| d.name().to_owned())
-                        .unwrap_or_else(|| "INVALID_CHANGE".into()),
+                        .map_or_else(|| e.to_string(), |d| d.name().to_owned()),
                 };
                 ensure(json!(got) == n["expect"], || format!("got {got}"))
             }
             "snapshot" => {
                 let got = match framing::decode_snapshot(&unhex(&n["plaintext"])) {
-                    Ok(_) => "ACCEPTED",
-                    Err(_) => "INVALID_SNAPSHOT",
+                    Ok(_) => "ACCEPTED".to_owned(),
+                    Err(e) => e
+                        .diagnostic()
+                        .map_or_else(|| e.to_string(), |d| d.name().to_owned()),
                 };
                 ensure(json!(got) == n["expect"], || format!("got {got}"))
             }

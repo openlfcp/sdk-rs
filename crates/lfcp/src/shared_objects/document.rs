@@ -169,10 +169,14 @@ impl SharedObjects {
         }
     }
 
-    /// Load a full-save image (§13) and continue writing as `actor`.
+    /// Load a full-save image (§13) and continue writing as `actor`. A
+    /// save that does not load is `PROFILE_INVALID` with
+    /// `INVALID_AUTOMERGE_BYTES`.
     pub fn load(save: &[u8], actor: ActorId) -> Result<SharedObjects, ProfileError> {
         Ok(SharedObjects {
-            doc: AutoCommit::load(save)?.with_actor(actor),
+            doc: AutoCommit::load(save)
+                .map_err(|_| ProfileError::Invalid(Diagnostic::InvalidAutomergeBytes))?
+                .with_actor(actor),
             time: 0,
         })
     }

@@ -7,7 +7,8 @@
 //!
 //! Both are deterministic CBOR. A receiver rejects plaintext that is not
 //! CBOR, not a two-element array, uses another framing version, or does not
-//! carry a valid Automerge chunk of the right type (§11, §13). Version 1
+//! carry a valid Automerge chunk of the right type (§11, §13), with
+//! `PROFILE_INVALID` and `INVALID_AUTOMERGE_BYTES` (§74.1). Version 1
 //! carries one change per Data Unit (§12).
 //!
 //! Chunks (SC-CHUNK): a Data Unit carries one change chunk (uncompressed
@@ -20,7 +21,10 @@
 use automerge::{AutoCommit, Change};
 
 use crate::cbor::{self, Value};
-use crate::shared_objects::ProfileError;
+use crate::shared_objects::{Diagnostic, ProfileError};
+
+/// Every rejection here: `PROFILE_INVALID` with `INVALID_AUTOMERGE_BYTES`.
+const INVALID: ProfileError = ProfileError::Invalid(Diagnostic::InvalidAutomergeBytes);
 
 /// The framing version this module reads and writes.
 pub const FRAMING_VERSION: u64 = 1;
@@ -36,19 +40,12 @@ fn frame(bytes: &[u8]) -> Vec<u8> {
 
 /// The payload of `[1, bytes]`, rejecting anything else.
 fn unframe(plaintext: &[u8]) -> Result<Vec<u8>, ProfileError> {
-    let value = cbor::decode_strict(plaintext).map_err(|_| ProfileError::FramingInvalid)?;
+    let value = cbor::decode_strict(plaintext).map_err(|_| INVALID)?;
     match value.as_array() {
-        Some([version, payload]) => {
-            let version = version.as_u64().ok_or(ProfileError::FramingInvalid)?;
-            if version != FRAMING_VERSION {
-                return Err(ProfileError::FramingVersionUnsupported(version));
-            }
-            payload
-                .as_bytes()
-                .map(<[u8]>::to_vec)
-                .ok_or(ProfileError::FramingInvalid)
+        Some([version, payload]) if version.as_u64() == Some(FRAMING_VERSION) => {
+            payload.as_bytes().map(<[u8]>::to_vec).ok_or(INVALID)
         }
-        _ => Err(ProfileError::FramingInvalid),
+        _ => Err(INVALID),
     }
 }
 
@@ -74,7 +71,7 @@ struct ChunkHeader {
 }
 
 fn chunk_header(bytes: &[u8]) -> Result<ChunkHeader, ProfileError> {
-    let invalid = || ProfileError::Automerge("not an Automerge chunk".into());
+    let invalid = || INVALID;
     if bytes.len() < 9 || bytes[..4] != CHUNK_MAGIC {
         return Err(invalid());
     }
@@ -113,16 +110,13 @@ pub fn decode_change(plaintext: &[u8]) -> Result<Change, ProfileError> {
     let bytes = unframe(plaintext)?;
     let header = chunk_header(&bytes)?;
     if !matches!(header.chunk_type, CHANGE_CHUNK | COMPRESSED_CHANGE_CHUNK) {
-        return Err(ProfileError::Automerge("not a change chunk".into()));
+        return Err(INVALID);
     }
-    let change =
-        Change::from_bytes(bytes).map_err(|err| ProfileError::Automerge(err.to_string()))?;
+    let change = Change::from_bytes(bytes).map_err(|_| INVALID)?;
     // The checksum is the first four bytes of the (uncompressed) change's
     // hash, which Automerge computes from the chunk's contents.
     if change.hash().0[..4] != header.checksum {
-        return Err(ProfileError::Automerge(
-            "change chunk checksum mismatch".into(),
-        ));
+        return Err(INVALID);
     }
     Ok(change)
 }
@@ -140,11 +134,9 @@ pub fn decode_snapshot(plaintext: &[u8]) -> Result<Vec<u8>, ProfileError> {
     let save = unframe(plaintext)?;
     let header = chunk_header(&save)?;
     if header.chunk_type != DOCUMENT_CHUNK || header.end != save.len() {
-        return Err(ProfileError::Automerge(
-            "not a single document chunk".into(),
-        ));
+        return Err(INVALID);
     }
-    AutoCommit::load(&save)?;
+    AutoCommit::load(&save).map_err(|_| INVALID)?;
     Ok(save)
 }
 
@@ -161,26 +153,17 @@ mod tests {
     fn framing_rejects_other_shapes() {
         assert_eq!(encode_change(&[1, 2]), vec![0x82, 0x01, 0x42, 0x01, 0x02]);
         let reject = |plaintext: &[u8]| snapshot_payload(plaintext).unwrap_err();
-        assert_eq!(reject(&[0xff]), ProfileError::FramingInvalid);
-        assert_eq!(reject(&[0x81, 0x01]), ProfileError::FramingInvalid);
-        assert_eq!(
-            reject(&[0x83, 0x01, 0x40, 0x40]),
-            ProfileError::FramingInvalid
-        );
-        assert_eq!(reject(&[0x82, 0x01, 0x60]), ProfileError::FramingInvalid);
-        assert_eq!(
-            reject(&[0x82, 0x02, 0x40]),
-            ProfileError::FramingVersionUnsupported(2)
-        );
+        assert_eq!(reject(&[0xff]), INVALID);
+        assert_eq!(reject(&[0x81, 0x01]), INVALID);
+        assert_eq!(reject(&[0x83, 0x01, 0x40, 0x40]), INVALID);
+        assert_eq!(reject(&[0x82, 0x01, 0x60]), INVALID);
+        assert_eq!(reject(&[0x82, 0x02, 0x40]), INVALID);
         // Not deterministic CBOR: the version in a two-byte head.
+        assert_eq!(reject(&[0x82, 0x18, 0x01, 0x40]), INVALID);
         assert_eq!(
-            reject(&[0x82, 0x18, 0x01, 0x40]),
-            ProfileError::FramingInvalid
+            decode_change(&encode_change(&[0, 1, 2])).unwrap_err(),
+            INVALID
         );
-        assert!(matches!(
-            decode_change(&encode_change(&[0, 1, 2])),
-            Err(ProfileError::Automerge(_))
-        ));
     }
 
     /// A document with one change writing `value`; its change bytes and
@@ -206,15 +189,12 @@ mod tests {
         assert!(Change::from_bytes(corrupt.clone()).is_ok());
         assert!(matches!(
             decode_change(&encode_change(&corrupt)),
-            Err(ProfileError::Automerge(_))
+            Err(INVALID)
         ));
 
         // A full save is a document chunk, not a change.
         assert_eq!(save[8], DOCUMENT_CHUNK);
-        assert!(matches!(
-            decode_change(&encode_change(&save)),
-            Err(ProfileError::Automerge(_))
-        ));
+        assert!(matches!(decode_change(&encode_change(&save)), Err(INVALID)));
 
         // A compressed change chunk is a change too.
         let (big, _) = sample(&"x".repeat(4096));
@@ -237,7 +217,7 @@ mod tests {
         assert!(AutoCommit::load(&change).is_ok());
         assert!(matches!(
             decode_snapshot(&encode_snapshot(&change)),
-            Err(ProfileError::Automerge(_))
+            Err(INVALID)
         ));
         // Nor is a document chunk followed by more.
         let two = [save.clone(), change].concat();

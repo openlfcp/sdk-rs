@@ -12,7 +12,7 @@
 //! The profile's errors are application-level codes, not LFCP Wire codes
 //! (§74.1), so they have their own [`ProfileError`] type.
 //!
-//! Three rules bind the profile to Automerge (baseline.4, ADR 0003):
+//! Four rules bind the profile to Automerge (ADR 0003, ADR 0004):
 //!
 //! - every profile string is written as an Automerge scalar string, and a
 //!   field found as collaborative Text is `PROFILE_INVALID` with
@@ -24,7 +24,11 @@
 //!   valid checksum whose Automerge actor is the §8 actor of the Principal
 //!   that signed the Data Unit carrying it; another actor is
 //!   `PROFILE_INVALID` with `CHANGE_ACTOR_MISMATCH` (§8, §11, SO-SEC1,
-//!   [`document::SharedObjects::apply_unit_change`]).
+//!   [`document::SharedObjects::apply_unit_change`]);
+//! - a Data Unit or Snapshot plaintext that is not the §11 or §13 framing
+//!   of a valid chunk of the right type, with a matching checksum, that
+//!   Automerge parses or loads, is `PROFILE_INVALID` with
+//!   `INVALID_AUTOMERGE_BYTES` ([`framing`]).
 
 use std::fmt;
 
@@ -74,6 +78,11 @@ pub enum Diagnostic {
     /// A Data Unit's Automerge change is not a change of the §8 actor of
     /// the unit's signer; it is not merged (§8, §11, SO-SEC1).
     ChangeActorMismatch,
+    /// A Data Unit or Snapshot plaintext is not the §11 or §13 framing, or
+    /// its Automerge bytes are not a valid chunk of the required type with
+    /// a matching checksum, or cannot be parsed or loaded; nothing is
+    /// merged (§11, §13).
+    InvalidAutomergeBytes,
 }
 
 impl Diagnostic {
@@ -94,6 +103,7 @@ impl Diagnostic {
             Diagnostic::InvalidTag => "INVALID_TAG",
             Diagnostic::ImmutableFieldMutated => "IMMUTABLE_FIELD_MUTATED",
             Diagnostic::ChangeActorMismatch => "CHANGE_ACTOR_MISMATCH",
+            Diagnostic::InvalidAutomergeBytes => "INVALID_AUTOMERGE_BYTES",
         }
     }
 }
@@ -105,13 +115,9 @@ pub enum ProfileError {
     Invalid(Diagnostic),
     /// `OBJECT_ID_COLLISION`: concurrent creations used one Object ID (§21).
     ObjectIdCollision,
-    /// Profile plaintext that is not `[1, bstr]` deterministic CBOR (§11,
-    /// §13).
-    FramingInvalid,
-    /// A framing version other than 1 (§11, §13).
-    FramingVersionUnsupported(u64),
-    /// Bytes that are not a valid Automerge change or save image, or an
-    /// Automerge operation that failed. Carries Automerge's message.
+    /// A local Automerge operation that failed. Carries Automerge's
+    /// message. Received bytes that are not valid are
+    /// [`Diagnostic::InvalidAutomergeBytes`] instead.
     Automerge(String),
     /// No object with this ID in the document.
     UnknownObject,
@@ -155,10 +161,6 @@ impl fmt::Display for ProfileError {
         match self {
             ProfileError::Invalid(d) => write!(f, "PROFILE_INVALID: {}", d.name()),
             ProfileError::ObjectIdCollision => f.write_str("OBJECT_ID_COLLISION"),
-            ProfileError::FramingInvalid => f.write_str("profile plaintext is not [1, bstr]"),
-            ProfileError::FramingVersionUnsupported(v) => {
-                write!(f, "unsupported framing version {v}")
-            }
             ProfileError::Automerge(message) => write!(f, "Automerge: {message}"),
             ProfileError::UnknownObject => f.write_str("no such object"),
             ProfileError::NotATask => f.write_str("the object is not a Task"),
