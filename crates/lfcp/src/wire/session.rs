@@ -22,6 +22,7 @@ use crate::cose::{self, SignedObject};
 use crate::principal::{PrincipalDescriptor, PrincipalKeys};
 use crate::wire::message::{
     AuthBody, ChallengeBody, DecodeOptions, HelloBody, HostingCredential, ReadyBody,
+    DEFAULT_MAX_MESSAGE_BYTES,
 };
 
 /// The wire profile this crate implements.
@@ -118,11 +119,15 @@ pub fn verify_auth(
     })
 }
 
-/// The decode options a client uses after `READY`: the server's advertised
-/// maximum message size (§31, §37).
-pub fn options_after_ready(ready: &ReadyBody) -> DecodeOptions {
+/// The decode options a client uses after `READY` (§31, §37): the server's
+/// advertised maximum message size, never above the client's own maximum
+/// `local_max`, which is at least the 8 MiB default. A larger advertised
+/// value would otherwise make the client accept messages of any size; a
+/// larger message is then `MESSAGE_TOO_LARGE`.
+pub fn options_after_ready(ready: &ReadyBody, local_max: usize) -> DecodeOptions {
+    let advertised = usize::try_from(ready.max_message_bytes).unwrap_or(usize::MAX);
     DecodeOptions {
-        max_message_bytes: usize::try_from(ready.max_message_bytes).unwrap_or(usize::MAX),
+        max_message_bytes: advertised.min(local_max.max(DEFAULT_MAX_MESSAGE_BYTES)),
         ..DecodeOptions::default()
     }
 }
@@ -130,6 +135,28 @@ pub fn options_after_ready(ready: &ReadyBody) -> DecodeOptions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_ready_never_raises_the_receive_limit_above_the_local_maximum() {
+        // §31 (security review M1).
+        let ready = |max: u64| ReadyBody {
+            wire_profile: WIRE_PROFILE.into(),
+            server_id: [1; 32],
+            max_message_bytes: max,
+            durability: 1,
+            heartbeat_ms: 0,
+            extensions: None,
+        };
+        let mib = 1024 * 1024;
+        let limit = |max, local| options_after_ready(&ready(max), local).max_message_bytes;
+        // A smaller server limit applies as advertised.
+        assert_eq!(limit(mib as u64, 8 * mib), mib);
+        // A larger one is capped at the local maximum.
+        assert_eq!(limit(u64::MAX, 8 * mib), 8 * mib);
+        assert_eq!(limit(64 * mib as u64, 16 * mib), 16 * mib);
+        // The local maximum is at least 8 MiB.
+        assert_eq!(limit(u64::MAX, 0), DEFAULT_MAX_MESSAGE_BYTES);
+    }
 
     fn keys(n: u8) -> PrincipalKeys {
         PrincipalKeys::from_secrets(&[n; 32], [n + 1; 32])
