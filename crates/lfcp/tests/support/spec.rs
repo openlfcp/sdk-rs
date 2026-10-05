@@ -86,6 +86,16 @@ impl Spec {
         })
     }
 
+    /// `path` at `commit`, a full commit ID of the same checkout, parsed as
+    /// JSON. For spec files newer than the locked baseline; each caller
+    /// names its commit and says why.
+    pub fn read_json_at(&self, commit: &str, path: &str) -> serde_json::Value {
+        let bytes = git(&self.dir, &["show", &format!("{commit}:{path}")])
+            .unwrap_or_else(|err| panic!("cannot read {path} at spec commit {commit}: {err}"));
+        serde_json::from_slice(&bytes)
+            .unwrap_or_else(|err| panic!("{path} at spec commit {commit} is not JSON: {err}"))
+    }
+
     /// `path` at the locked commit, parsed as JSON.
     pub fn read_json(&self, path: &str) -> serde_json::Value {
         serde_json::from_slice(&self.read(path)).unwrap_or_else(|err| {

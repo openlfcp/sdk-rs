@@ -26,9 +26,14 @@ Implemented and checked against the official vectors:
 - Data Epochs (LFCP-042b3): epoch rotation and the strict previous-epoch
   cutoff, with quarantine and `STALE_DATA_EPOCH`.
 
+- the Shared Objects profile (LFCP-069): actor IDs, framing, profile
+  validation with its diagnostics, Task intents as Automerge changes,
+  conflict exposure, add-wins tags and assignees, tombstones and
+  preservation of unknown fields and types; checked against
+  SHARED-OBJECTS-TEST-VECTORS-01 and the Automerge reference corpus.
+
 The LFCP protocol layer of this SDK (LFCP-041 to LFCP-043) is complete
-for MVP 0.1: every LFCP-TEST-VECTORS-01 case is decided in scope. Next:
-the Shared Objects profile (LFCP-069).
+for MVP 0.1: every LFCP-TEST-VECTORS-01 case is decided in scope.
 
 ## Independence rule
 
@@ -51,11 +56,13 @@ uses the modules listed above it.
 | `principal` | Principal IDs, descriptors and keys (WIRE §7) |
 | `cose` | Canonical untagged COSE_Sign1: sign, parse, verify (WIRE §10) |
 | `wire` | LFCP Wire structures: Data Epoch keys, Data Units, frontiers, Snapshots, Control Records, the Control Chain, Key Packages, messages, the handshake, Have Vectors, state machines, the capability engine and Data Epochs |
+| `shared_objects` | The Shared Objects profile on Automerge: actor IDs, plaintext framing, validation and diagnostics, the document and its Task intents |
 
 The crate has no application or editor dependency, and it forbids `unsafe`
 code. Its runtime dependencies are `sha2`, `hkdf`, `chacha20poly1305`,
-`ed25519-dalek`, `x25519-dalek`, `hpke` and `zeroize`, with default
-features off;
+`ed25519-dalek`, `x25519-dalek`, `hpke`, `zeroize` and `automerge`
+(pinned at 0.12.0, the core of the profile's reference
+`@automerge/automerge` 3.5.0), with default features off;
 `Cargo.toml` justifies each enabled feature. There is no CBOR dependency.
 Secret keys redact themselves in `Debug` and are wiped on drop. The crate
 builds on the stable Rust toolchain; no older minimum version is promised.
