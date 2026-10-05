@@ -245,8 +245,8 @@ impl ControlBody {
                 check_closed_map(body, &[0, 1, 2], &[3, 4], MALFORMED)?;
                 ControlBody::CapabilityGrant(CapabilityGrantBody {
                     subject: descriptor_field(body, 0)?,
-                    abilities: non_empty(uint_array_field(body, 1, m)?)?,
-                    delegable: uint_array_field(body, 2, m)?,
+                    abilities: non_empty(abilities(body, 1)?)?,
+                    delegable: abilities(body, 2)?,
                     parent: match body.get_uint(3) {
                         Some(_) => Some(record_id_field(body, 3)?),
                         None => None,
@@ -268,7 +268,7 @@ impl ControlBody {
                 ControlBody::CapabilityClaim(CapabilityClaimBody {
                     invitation_grant: record_id_field(body, 0)?,
                     claimant: descriptor_field(body, 1)?,
-                    abilities: non_empty(uint_array_field(body, 2, m)?)?,
+                    abilities: non_empty(abilities(body, 2)?)?,
                 })
             }
             4 => {
@@ -428,6 +428,19 @@ fn endpoints(endpoints: &[Endpoint]) -> Value {
 }
 
 /// CDDL `[1* …]`: at least one element.
+/// An ability-code list (§17.1, §17.2, §18.1).
+fn abilities(body: &Value, key: u64) -> Result<Vec<u64>, Error> {
+    let codes = uint_array_field(body, key, &MALFORMED)?;
+    // PROVISIONAL (G-CP6): a code repeated within one list makes the
+    // record malformed. Unknown codes are kept; they confer nothing.
+    let mut seen = std::collections::BTreeSet::new();
+    if codes.iter().all(|code| seen.insert(*code)) {
+        Ok(codes)
+    } else {
+        Err(MALFORMED)
+    }
+}
+
 fn non_empty<T>(items: Vec<T>) -> Result<Vec<T>, Error> {
     if items.is_empty() {
         Err(MALFORMED)
@@ -686,6 +699,38 @@ mod tests {
         });
         assert_eq!(
             ControlBody::from_value(5, &route.to_value()),
+            Err(MALFORMED)
+        );
+    }
+
+    #[test]
+    fn repeated_ability_codes_are_malformed() {
+        let grant = |abilities: Vec<u64>, delegable: Vec<u64>| {
+            ControlBody::CapabilityGrant(CapabilityGrantBody {
+                subject: descriptor(),
+                abilities,
+                delegable,
+                parent: None,
+                claim_limit: None,
+            })
+            .to_value()
+        };
+        assert!(ControlBody::from_value(1, &grant(vec![1, 2, 99], vec![2])).is_ok());
+        assert_eq!(
+            ControlBody::from_value(1, &grant(vec![1, 2, 1], vec![])),
+            Err(MALFORMED)
+        );
+        assert_eq!(
+            ControlBody::from_value(1, &grant(vec![1], vec![2, 2])),
+            Err(MALFORMED)
+        );
+        let claim = ControlBody::CapabilityClaim(CapabilityClaimBody {
+            invitation_grant: ControlRecordId::from_bytes([1; 32]),
+            claimant: descriptor(),
+            abilities: vec![2, 2],
+        });
+        assert_eq!(
+            ControlBody::from_value(3, &claim.to_value()),
             Err(MALFORMED)
         );
     }
