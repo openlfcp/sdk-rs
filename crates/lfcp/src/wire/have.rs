@@ -152,12 +152,16 @@ impl HaveVector {
                 }
                 ranges.push((start, end));
             }
-            let mine = vector
+            vector
                 .actors
                 .entry(*entry.principal.as_bytes())
-                .or_default();
-            mine.extend(ranges);
-            *mine = normalize(std::mem::take(mine));
+                .or_default()
+                .extend(ranges);
+        }
+        // Normalize each actor once, however many entries it had: the work
+        // is bounded by the number of ranges, never their span.
+        for ranges in vector.actors.values_mut() {
+            *ranges = normalize(std::mem::take(ranges));
         }
         vector.actors.retain(|_, ranges| !ranges.is_empty());
         Ok(vector)
@@ -393,6 +397,33 @@ mod tests {
         assert_eq!(v.insert(&p(1), 3), Ok(true));
         assert_eq!(v.insert(&p(1), 3), Ok(false));
         assert_eq!(v.insert(&p(1), 0), Err(Error::DataUnitSequenceZero));
+    }
+
+    #[test]
+    fn work_is_bounded_by_ranges_not_span() {
+        // A full uint64 span and many repeated entries for one actor.
+        let start = std::time::Instant::now();
+        let mut wire = vec![WireActorHave {
+            principal: p(1),
+            contiguous: u64::MAX,
+            extra: None,
+        }];
+        wire.extend((1..=20_000u64).map(|i| WireActorHave {
+            principal: p(2),
+            contiguous: 0,
+            extra: Some(vec![(4 * i, 4 * i)]),
+        }));
+        let theirs = HaveVector::from_wire(&wire).unwrap();
+        let ours = HaveVector::from_wire(&[WireActorHave {
+            principal: p(1),
+            contiguous: 5,
+            extra: Some(vec![(u64::MAX, u64::MAX)]),
+        }])
+        .unwrap();
+        let diff = difference(&ours, &theirs);
+        assert_eq!(diff.request[0], range(1, 6, u64::MAX - 1));
+        assert_eq!(diff.request.len(), 1 + 20_000);
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
     }
 
     #[test]
