@@ -14,6 +14,7 @@
 //! - [`key_package`]: HPKE Key Packages that deliver a DEK.
 //! - [`message`]: the message envelope and every typed body.
 //! - [`session`]: the HELLO / CHALLENGE / AUTH / READY handshake.
+//! - [`state`]: connection, session and per-Resource sync state machines.
 //!
 //! Capability evaluation arrives in LFCP-042b2 and epoch cutoff in
 //! LFCP-042b3.
@@ -27,6 +28,7 @@ pub mod keys;
 pub mod message;
 pub mod session;
 pub mod snapshot;
+pub mod state;
 
 use crate::base::{Error, Hash32, PrincipalId, ResourceId};
 use crate::cbor::Value;

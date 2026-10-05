@@ -166,6 +166,17 @@ pub enum Error {
         /// The coordinator's current head, which the `NACK` reports.
         current: Option<ControlRecordId>,
     },
+    /// An event that the §63–§65 state machine does not allow in the
+    /// current state. A local logic error with no wire code.
+    IllegalTransition {
+        /// The state, by name.
+        state: String,
+        /// The event, by name.
+        event: String,
+    },
+    /// A Resource, Control, Data, Key or Snapshot message before the
+    /// session is `READY` (§64).
+    SessionNotReady(u64),
 }
 
 /// Why an `AUTH` did not authenticate the session Principal (§36).
@@ -282,6 +293,8 @@ impl Error {
             Error::AuthFailed(_) => "AUTH_FAILED",
             Error::NoCommonWireProfile => "NO_COMMON_WIRE_PROFILE",
             Error::ControlHeadMismatch { .. } => "CONTROL_HEAD_MISMATCH",
+            Error::IllegalTransition { .. } => "ILLEGAL_TRANSITION",
+            Error::SessionNotReady(_) => "SESSION_NOT_READY",
         }
     }
 
@@ -337,6 +350,11 @@ impl Error {
             Error::AuthFailed(_) => Some(WireCode::AuthFailed),
             Error::NoCommonWireProfile => Some(WireCode::ProtocolUnsupported),
             Error::ControlHeadMismatch { .. } => Some(WireCode::ControlHeadMismatch),
+            Error::IllegalTransition { .. } => None,
+            // Provisional: §64 says the server MUST reject these messages
+            // before READY but names no code; the session is not yet
+            // authorized for them (cf. §41). An open question (G-SM2).
+            Error::SessionNotReady(_) => Some(WireCode::AuthorizationFailed),
             // Provisional: whether an unknown core type is MALFORMED_MESSAGE
             // or INVALID_CONTROL_CHAIN is an open question for the project
             // owner (§14 names no code).
@@ -454,6 +472,12 @@ impl fmt::Display for Error {
                     f,
                     "expected Control Head is not the current head {current:?}"
                 )
+            }
+            Error::IllegalTransition { state, event } => {
+                write!(f, "event {event} is not allowed in state {state}")
+            }
+            Error::SessionNotReady(code) => {
+                write!(f, "message type {code} before the session is READY")
             }
         }
     }
