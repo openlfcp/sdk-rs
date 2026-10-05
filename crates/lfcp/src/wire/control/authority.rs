@@ -9,7 +9,7 @@
 //! | Capability Grant, with parent | parent exists and is active; issuer is its subject; abilities ⊆ parent delegable; delegable ⊆ parent delegable; a non-owner also holds `capability/grant` | §17.2 |
 //! | Capability Revoke | owner, or `capability/revoke` covering the grant | §17.3 |
 //! | Capability Claim | §18.1 rules 1–5: invitation grant active, grants `invite/claim`, claims remain, abilities ⊆ invitation abilities (minus `invite/claim` unless delegable), issuer is the Invitation Principal; consumes one claim | §18.1 |
-//! | Key Epoch | `key/rotate` | §19 |
+//! | Key Epoch | `key/rotate`; new epoch = current + 1; closes the current epoch with its final frontier | §19 |
 //! | Route Update | `route/update`; route version increases | §20 |
 //! | Owner Transfer Commit | §23.3 rules 1–6 and §23.2: offer by the current owner at the current head, accept by the named Principal for this offer, commit by that Principal at the offered sequence | §23 |
 //! | Coordinator Recovery, Resource Tombstone | refused: not applied in MVP 0.1 | §22, §24, MVP-SCOPE §4 |
@@ -37,6 +37,7 @@ use crate::wire::control::chain::{
 };
 use crate::wire::control::ControlRecord;
 use crate::wire::data_unit::DataUnitHeader;
+use crate::wire::frontier::Frontier;
 use crate::wire::key_package::KeyPackageHeader;
 
 /// Standard ability codes (§17.1).
@@ -109,6 +110,11 @@ pub struct ControlState {
     pub route_version: u64,
     /// DEK commitments by Data Epoch: Genesis for epoch 0, then Key Epochs.
     pub dek_commitments: BTreeMap<u64, Hash32>,
+    /// The current Data Epoch: 0 at Genesis, then each Key Epoch's.
+    pub current_epoch: u64,
+    /// The final frontier of each closed epoch, from the Key Epoch that
+    /// closed it (§19, §19.1).
+    pub closed_frontiers: BTreeMap<u64, Frontier>,
     grants: BTreeMap<[u8; 32], Grant>,
     principals: BTreeMap<[u8; 32], PrincipalDescriptor>,
 }
@@ -221,6 +227,8 @@ pub fn apply(
                 // PROVISIONAL (G-CP2): Genesis implies route version 0.
                 route_version: 0,
                 dek_commitments: BTreeMap::from([(0, genesis.dek_commitment)]),
+                current_epoch: 0,
+                closed_frontiers: BTreeMap::new(),
                 grants: BTreeMap::new(),
                 principals: BTreeMap::new(),
             };
@@ -333,10 +341,21 @@ pub fn apply(
         }
         ControlBody::KeyEpoch(epoch) => {
             state.require(&issuer, ability::KEY_ROTATE)?;
-            // Epoch numbering and the cutoff are evaluated in LFCP-042b3.
+            // §19: "exactly the previous Data Epoch plus one". Provisional
+            // code: §19 names none; a skipped or repeated epoch breaks the
+            // chain's epoch sequence, so INVALID_CONTROL_CHAIN.
+            if state.current_epoch.checked_add(1) != Some(epoch.epoch) {
+                return Err(Error::InvalidControlChain(
+                    crate::base::ChainRule::EpochNotNext,
+                ));
+            }
             state
                 .dek_commitments
                 .insert(epoch.epoch, epoch.dek_commitment);
+            state
+                .closed_frontiers
+                .insert(state.current_epoch, epoch.final_frontier.clone());
+            state.current_epoch = epoch.epoch;
         }
         ControlBody::RouteUpdate(route) => {
             state.require(&issuer, ability::ROUTE_UPDATE)?;

@@ -272,6 +272,9 @@ pub enum ChainRule {
     /// No descriptor is known for the issuer, so its signature cannot be
     /// checked.
     IssuerUnknown,
+    /// A Key Epoch's new epoch is not the previous Data Epoch plus one
+    /// (§19).
+    EpochNotNext,
 }
 
 /// The canonical-form rule a frontier breaks (LFCP-WIRE-01 §28.1, §28.2).
