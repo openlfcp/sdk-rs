@@ -138,11 +138,15 @@ pub enum ProfileError {
 }
 
 impl ProfileError {
-    /// The profile-level code (§21, §74.1), when there is one.
+    /// The profile-level code (§21, §74.1), or the LFCP code a profile
+    /// error stands for (ACTOR_EQUIVOCATION), when there is one.
     pub fn code(&self) -> Option<&'static str> {
         match self {
             ProfileError::Invalid(_) => Some("PROFILE_INVALID"),
             ProfileError::ObjectIdCollision => Some("OBJECT_ID_COLLISION"),
+            // §14.1 / LFCP-WIRE-01 §26.2: another change holds the actor's
+            // sequence; the same code as sdk-ts and the server report.
+            ProfileError::SequenceTaken { .. } => Some("ACTOR_EQUIVOCATION"),
             _ => None,
         }
     }

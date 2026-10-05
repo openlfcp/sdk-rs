@@ -1018,10 +1018,9 @@ mod admission_tests {
         let mut receiver = SharedObjects::new(actor(2));
         receiver.apply_changes(vec![first, second]).unwrap();
         let before = state(&mut receiver);
-        assert_eq!(
-            receiver.apply_changes(vec![other]),
-            Err(ProfileError::SequenceTaken { seq: 2, latest: 2 })
-        );
+        let err = receiver.apply_changes(vec![other]).unwrap_err();
+        assert_eq!(err, ProfileError::SequenceTaken { seq: 2, latest: 2 });
+        assert_eq!(err.code(), Some("ACTOR_EQUIVOCATION"));
         assert_eq!(state(&mut receiver), before);
     }
 
