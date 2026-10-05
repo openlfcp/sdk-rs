@@ -8,10 +8,15 @@ test vectors in `openlfcp/spec`, not ported from `sdk-ts`.
 
 ## Status
 
-The protocol primitives are implemented and checked against the official
-vectors (LFCP-041): identifiers, deterministic CBOR, Principals and
-canonical COSE_Sign1. Control Plane, Data Plane, AEAD, HKDF and HPKE are
-LFCP-042; the wire session is LFCP-043.
+Implemented and checked against the official vectors:
+
+- protocol primitives (LFCP-041): identifiers, deterministic CBOR,
+  Principals and canonical COSE_Sign1;
+- Data Plane crypto (LFCP-042a): DEK commitments, actor and Snapshot
+  keys, Data Units, canonical frontiers and Snapshots.
+
+Next: the Control Plane (LFCP-042b), HPKE Key Packages (LFCP-042c) and the
+wire session (LFCP-043).
 
 ## Independence rule
 
@@ -29,17 +34,18 @@ uses the modules listed above it.
 | Module | Responsibility |
 | --- | --- |
 | `base` | 32-byte ID types, UUIDv7 Object IDs, hex and base64url, the error type with wire codes |
-| `crypto` | SHA-256, Ed25519 (strict verification) and X25519 wrappers; no primitive is implemented here |
+| `crypto` | SHA-256, HKDF-SHA256, ChaCha20-Poly1305, Ed25519 (strict verification) and X25519 wrappers; no primitive is implemented here |
 | `cbor` | Hand-written deterministic CBOR codec (WIRE §5.2) |
 | `principal` | Principal IDs, descriptors and keys (WIRE §7) |
 | `cose` | Canonical untagged COSE_Sign1: sign, parse, verify (WIRE §10) |
-| `wire` | LFCP Wire structures, messages and validation (empty until LFCP-042) |
+| `wire` | LFCP Wire structures: Data Epoch keys, Data Units, frontiers and Snapshots so far |
 
 The crate has no application or editor dependency, and it forbids `unsafe`
-code. Its runtime dependencies are `sha2`, `ed25519-dalek` and
-`x25519-dalek`, with default features off; `Cargo.toml` justifies each
-enabled feature. There is no CBOR dependency. It builds on the stable Rust toolchain; no older minimum version is
-promised.
+code. Its runtime dependencies are `sha2`, `hkdf`, `chacha20poly1305`,
+`ed25519-dalek`, `x25519-dalek` and `zeroize`, with default features off;
+`Cargo.toml` justifies each enabled feature. There is no CBOR dependency.
+Secret keys redact themselves in `Debug` and are wiped on drop. The crate
+builds on the stable Rust toolchain; no older minimum version is promised.
 
 ## Specification pin
 
