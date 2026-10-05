@@ -13,10 +13,13 @@ Implemented and checked against the official vectors:
 - protocol primitives (LFCP-041): identifiers, deterministic CBOR,
   Principals and canonical COSE_Sign1;
 - Data Plane crypto (LFCP-042a): DEK commitments, actor and Snapshot
-  keys, Data Units, canonical frontiers and Snapshots.
+  keys, Data Units, canonical frontiers and Snapshots;
+- Control Plane structure (LFCP-042b1): typed Control Records, Control
+  Chain validation and fork detection.
 
-Next: the Control Plane (LFCP-042b), HPKE Key Packages (LFCP-042c) and the
-wire session (LFCP-043).
+Next: capabilities and Control transitions (LFCP-042b2), epoch rotation
+and cutoff (LFCP-042b3), HPKE Key Packages (LFCP-042c) and the wire session
+(LFCP-043).
 
 ## Independence rule
 
@@ -38,7 +41,7 @@ uses the modules listed above it.
 | `cbor` | Hand-written deterministic CBOR codec (WIRE §5.2) |
 | `principal` | Principal IDs, descriptors and keys (WIRE §7) |
 | `cose` | Canonical untagged COSE_Sign1: sign, parse, verify (WIRE §10) |
-| `wire` | LFCP Wire structures: Data Epoch keys, Data Units, frontiers and Snapshots so far |
+| `wire` | LFCP Wire structures: Data Epoch keys, Data Units, frontiers, Snapshots, Control Records and the Control Chain so far |
 
 The crate has no application or editor dependency, and it forbids `unsafe`
 code. Its runtime dependencies are `sha2`, `hkdf`, `chacha20poly1305`,
