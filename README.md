@@ -15,11 +15,11 @@ Implemented and checked against the official vectors:
 - Data Plane crypto (LFCP-042a): DEK commitments, actor and Snapshot
   keys, Data Units, canonical frontiers and Snapshots;
 - Control Plane structure (LFCP-042b1): typed Control Records, Control
-  Chain validation and fork detection.
+  Chain validation and fork detection;
+- HPKE Key Packages (LFCP-042c).
 
 Next: capabilities and Control transitions (LFCP-042b2), epoch rotation
-and cutoff (LFCP-042b3), HPKE Key Packages (LFCP-042c) and the wire session
-(LFCP-043).
+and cutoff (LFCP-042b3) and the wire session (LFCP-043).
 
 ## Independence rule
 
@@ -37,15 +37,16 @@ uses the modules listed above it.
 | Module | Responsibility |
 | --- | --- |
 | `base` | 32-byte ID types, UUIDv7 Object IDs, hex and base64url, the error type with wire codes |
-| `crypto` | SHA-256, HKDF-SHA256, ChaCha20-Poly1305, Ed25519 (strict verification) and X25519 wrappers; no primitive is implemented here |
+| `crypto` | SHA-256, HKDF-SHA256, ChaCha20-Poly1305, Ed25519 (strict verification), X25519 and HPKE Base-mode wrappers; no primitive is implemented here |
 | `cbor` | Hand-written deterministic CBOR codec (WIRE §5.2) |
 | `principal` | Principal IDs, descriptors and keys (WIRE §7) |
 | `cose` | Canonical untagged COSE_Sign1: sign, parse, verify (WIRE §10) |
-| `wire` | LFCP Wire structures: Data Epoch keys, Data Units, frontiers, Snapshots, Control Records and the Control Chain so far |
+| `wire` | LFCP Wire structures: Data Epoch keys, Data Units, frontiers, Snapshots, Control Records, the Control Chain and Key Packages so far |
 
 The crate has no application or editor dependency, and it forbids `unsafe`
 code. Its runtime dependencies are `sha2`, `hkdf`, `chacha20poly1305`,
-`ed25519-dalek`, `x25519-dalek` and `zeroize`, with default features off;
+`ed25519-dalek`, `x25519-dalek`, `hpke` and `zeroize`, with default
+features off;
 `Cargo.toml` justifies each enabled feature. There is no CBOR dependency.
 Secret keys redact themselves in `Debug` and are wiped on drop. The crate
 builds on the stable Rust toolchain; no older minimum version is promised.
