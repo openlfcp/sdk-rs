@@ -79,6 +79,15 @@ pub(crate) fn values_of(
         .collect()
 }
 
+/// [`values_of`] for the rules: a value nested too deep reads as
+/// [`Plain::Unknown`] (see [`values::read_truncated`]) instead of failing.
+fn field_values(doc: &AutoCommit, obj: &ObjId, field: &str) -> Result<Vec<Plain>, ProfileError> {
+    doc.get_all(obj, field)?
+        .iter()
+        .map(|(value, id)| values::read_truncated(doc, value, id))
+        .collect()
+}
+
 /// One profile-invalid value (§74.1): where it is, as an RFC 6901 JSON
 /// Pointer into the document, and its diagnostic.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -123,7 +132,9 @@ impl Problems {
 }
 
 /// `INVALID_FIELD_TYPE` for every value under the map or list `obj` (at
-/// `path`) that is collaborative Text, however deep (§30, SO-STRINGS).
+/// `path`) that is collaborative Text, however deep (§30, SO-STRINGS), and
+/// for every map or list more than [`values::MAX_VALUE_DEPTH`] levels
+/// below the object, whose contents are not walked.
 fn text_problems(
     doc: &AutoCommit,
     obj: &ObjId,
@@ -148,6 +159,11 @@ fn text_problems(
                     let segments: Vec<&str> = path.iter().map(String::as_str).collect();
                     problems.add(&segments, Diagnostic::InvalidFieldType);
                 }
+                // `path` is `objects`, the key, then one segment per level.
+                Value::Object(_) if path.len() - 2 > values::MAX_VALUE_DEPTH => {
+                    let segments: Vec<&str> = path.iter().map(String::as_str).collect();
+                    problems.add(&segments, Diagnostic::InvalidFieldType);
+                }
                 Value::Object(_) => text_problems(doc, &child, path, problems)?,
                 Value::Scalar(_) => {}
             }
@@ -163,7 +179,7 @@ fn text_problems(
 /// reverse-domain name (`INVALID_EXTENSION_NAMESPACE`).
 pub fn root_problems(doc: &AutoCommit) -> Result<Vec<Problem>, ProfileError> {
     let mut problems = Problems::default();
-    let profile = values_of(doc, &ROOT, "profile")?;
+    let profile = field_values(doc, &ROOT, "profile")?;
     if profile.is_empty() || profile.iter().any(|p| p.as_str() != Some(PROFILE)) {
         problems.add(&["profile"], Diagnostic::InvalidRoot);
     }
@@ -261,7 +277,7 @@ pub fn object_problems(
                 field: &str,
                 check: &dyn Fn(&Plain) -> Result<(), Diagnostic>|
      -> Result<(), ProfileError> {
-        for value in values_of(doc, obj, field)? {
+        for value in field_values(doc, obj, field)? {
             if let Err(d) = check(&value) {
                 problems.add(&at(key, field), d);
             }
@@ -323,7 +339,7 @@ pub fn object_problems(
         }
     }
 
-    let is_task = values_of(doc, obj, "type")?
+    let is_task = field_values(doc, obj, "type")?
         .iter()
         .any(|p| p.as_str() == Some("task"));
     if is_task {
@@ -368,7 +384,7 @@ pub fn object_problems(
                     if let Err(d) = key_ok(&member) {
                         problems.add(&here, d);
                     }
-                    if values_of(doc, &map, &member)?
+                    if field_values(doc, &map, &member)?
                         .iter()
                         .any(|v| *v != Plain::Bool(true))
                     {
@@ -394,9 +410,9 @@ pub fn object_problems(
             let at_creation: Vec<Plain> = doc
                 .get_all_at(obj, field, &[created])?
                 .iter()
-                .map(|(v, id)| values::read(doc, v, id))
+                .map(|(v, id)| values::read_truncated(doc, v, id))
                 .collect::<Result<_, _>>()?;
-            if at_creation != values_of(doc, obj, field)? {
+            if at_creation != field_values(doc, obj, field)? {
                 problems.add(&at(key, field), ImmutableFieldMutated);
             }
         }

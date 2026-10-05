@@ -135,6 +135,10 @@ pub enum ProfileError {
     UnknownObject,
     /// The object is not a Task.
     NotATask,
+    /// A value nests maps and lists deeper than
+    /// [`values::MAX_READ_DEPTH`]; nothing was read. The validator reports
+    /// such a value as `INVALID_FIELD_TYPE` instead.
+    ValueTooDeep,
 }
 
 impl ProfileError {
@@ -190,6 +194,7 @@ impl fmt::Display for ProfileError {
             }
             ProfileError::UnknownObject => f.write_str("no such object"),
             ProfileError::NotATask => f.write_str("the object is not a Task"),
+            ProfileError::ValueTooDeep => f.write_str("a value nests too deep to read"),
         }
     }
 }

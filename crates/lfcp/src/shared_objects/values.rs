@@ -89,17 +89,63 @@ impl From<&ScalarValue> for Plain {
     }
 }
 
+/// The deepest an object's own maps and lists may nest: a map or list
+/// below this many levels under the object map is `INVALID_FIELD_TYPE`
+/// (see the validator). Bounds every recursion over received values.
+pub const MAX_VALUE_DEPTH: usize = 64;
+
+/// How many nested maps and lists [`read`] reads, the first included:
+/// the root, `objects` and object maps plus [`MAX_VALUE_DEPTH`], so a
+/// whole document of valid objects always reads.
+pub const MAX_READ_DEPTH: usize = MAX_VALUE_DEPTH + 3;
+
 /// Read the value `value` with ID `id` from `doc` as plain data. A map
 /// with conflicting keys shows each key's Automerge-selected value; use
-/// `get_all` to see the others.
+/// `get_all` to see the others. Nesting more than [`MAX_READ_DEPTH`] maps
+/// and lists is [`ProfileError::ValueTooDeep`], so a crafted document
+/// cannot exhaust the stack.
 pub fn read(doc: &impl ReadDoc, value: &Value<'_>, id: &ObjId) -> Result<Plain, ProfileError> {
+    read_within(doc, value, id, MAX_READ_DEPTH, false)
+}
+
+/// [`read`] for the validator, given a field of an object: a map or list
+/// more than [`MAX_VALUE_DEPTH`] levels below the object map reads as
+/// [`Plain::Unknown`], which no rule accepts; the walk over the object
+/// reports it as `INVALID_FIELD_TYPE`.
+pub(crate) fn read_truncated(
+    doc: &impl ReadDoc,
+    value: &Value<'_>,
+    id: &ObjId,
+) -> Result<Plain, ProfileError> {
+    read_within(doc, value, id, MAX_VALUE_DEPTH, true)
+}
+
+fn read_within(
+    doc: &impl ReadDoc,
+    value: &Value<'_>,
+    id: &ObjId,
+    budget: usize,
+    truncate: bool,
+) -> Result<Plain, ProfileError> {
+    let nested = matches!(
+        value,
+        Value::Object(ObjType::Map | ObjType::Table | ObjType::List)
+    );
+    if nested && budget == 0 {
+        return if truncate {
+            Ok(Plain::Unknown)
+        } else {
+            Err(ProfileError::ValueTooDeep)
+        };
+    }
+    let child = |value: &Value<'_>, id: &ObjId| read_within(doc, value, id, budget - 1, truncate);
     Ok(match value {
         Value::Scalar(scalar) => Plain::from(scalar.as_ref()),
         Value::Object(ObjType::Map | ObjType::Table) => {
             let mut map = BTreeMap::new();
             for key in doc.keys(id) {
-                if let Some((child, child_id)) = doc.get(id, key.as_str())? {
-                    map.insert(key, read(doc, &child, &child_id)?);
+                if let Some((value, child_id)) = doc.get(id, key.as_str())? {
+                    map.insert(key, child(&value, &child_id)?);
                 }
             }
             Plain::Map(map)
@@ -107,8 +153,8 @@ pub fn read(doc: &impl ReadDoc, value: &Value<'_>, id: &ObjId) -> Result<Plain, 
         Value::Object(ObjType::List) => {
             let mut list = Vec::new();
             for index in 0..doc.length(id) {
-                if let Some((child, child_id)) = doc.get(id, index)? {
-                    list.push(read(doc, &child, &child_id)?);
+                if let Some((value, child_id)) = doc.get(id, index)? {
+                    list.push(child(&value, &child_id)?);
                 }
             }
             Plain::List(list)

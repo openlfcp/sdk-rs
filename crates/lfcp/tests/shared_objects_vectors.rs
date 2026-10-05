@@ -973,6 +973,74 @@ fn text_anywhere_in_an_object_is_profile_invalid() {
     assert_eq!(problems, expected);
 }
 
+/// S01's document with a change, as another replica would send it, that
+/// nests `levels` maps under the object's `extensions`.
+fn nested_extensions(levels: usize) -> (SharedObjects, String) {
+    use automerge::transaction::Transactable;
+    use automerge::{AutoCommit, ObjType, ReadDoc, ROOT};
+    let suite = suite();
+    let f = Fixtures::load(&suite);
+    let (mut doc, key) = s01_document(&suite, &f);
+    let mut raw = AutoCommit::load(&doc.save()).unwrap();
+    let get = |raw: &AutoCommit, obj: &automerge::ObjId, prop: &str| {
+        raw.get(obj, prop).unwrap().unwrap().1
+    };
+    let objects = get(&raw, &ROOT, "objects");
+    let object = get(&raw, &objects, &key);
+    let mut at = get(&raw, &object, "extensions");
+    // The object map is level 0, `extensions` level 1.
+    for _ in 2..=levels {
+        at = raw
+            .put_object(&at, "org.example.deep", ObjType::Map)
+            .unwrap();
+    }
+    let heads = doc.heads();
+    let changes = raw.get_changes(&heads);
+    assert!(doc.apply_changes(changes).unwrap().is_empty());
+    (doc, key)
+}
+
+#[test]
+fn deeply_nested_values_are_profile_invalid_not_a_crash() {
+    // A change nesting maps far deeper than any stack allows: the
+    // validator reports the first level beyond MAX_VALUE_DEPTH, and
+    // reading the object is a typed error (M7).
+    use lfcp::shared_objects::values::MAX_VALUE_DEPTH;
+    let (doc, key) = nested_extensions(20_000);
+    assert_eq!(
+        doc.object_status(&key).unwrap(),
+        ObjectStatus::Invalid(Diagnostic::InvalidFieldType)
+    );
+    let problems = doc.problems().unwrap();
+    assert_eq!(problems.len(), 1);
+    let depth = problems[0].pointer.matches("/org.example.deep").count();
+    assert_eq!(
+        depth, MAX_VALUE_DEPTH,
+        "extensions plus {depth} nested maps"
+    );
+    assert_eq!(doc.object(&key), Err(ProfileError::ValueTooDeep));
+    assert_eq!(doc.plain(), Err(ProfileError::ValueTooDeep));
+    assert_eq!(
+        doc.values(&key, "extensions"),
+        Err(ProfileError::ValueTooDeep)
+    );
+}
+
+#[test]
+fn nesting_up_to_the_limit_is_valid_and_reads() {
+    use lfcp::shared_objects::values::MAX_VALUE_DEPTH;
+    let (doc, key) = nested_extensions(MAX_VALUE_DEPTH);
+    assert_eq!(doc.object_status(&key).unwrap(), ObjectStatus::Ready);
+    assert!(doc.plain().is_ok());
+    assert!(doc.object(&key).is_ok());
+    let (doc, key) = nested_extensions(MAX_VALUE_DEPTH + 1);
+    assert_eq!(
+        doc.object_status(&key).unwrap(),
+        ObjectStatus::Invalid(Diagnostic::InvalidFieldType)
+    );
+    assert_eq!(doc.plain(), Err(ProfileError::ValueTooDeep));
+}
+
 #[test]
 fn the_corpus_negatives_are_not_merged() {
     // On top of S01, Data Units signed by andrey that a receiver rejects:
