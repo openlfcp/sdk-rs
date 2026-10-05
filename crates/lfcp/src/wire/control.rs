@@ -125,9 +125,8 @@ impl ReceivedControlRecord {
 
     /// Verify that the issuer in payload field 4 signed the record.
     ///
-    /// §13 does not state who signs a Control Record; requiring the `kid`
-    /// to be the issuer is spec gap G-RS1, which every vector agrees with.
-    /// Any other signer is [`Error::CoseKidMismatch`] (`INVALID_SIGNATURE`).
+    /// §13: the `kid` must equal field 4; any other signer is
+    /// [`Error::CoseKidMismatch`] (`INVALID_SIGNATURE`).
     pub fn verify(self, issuer: &PrincipalDescriptor) -> Result<ControlRecord, Error> {
         if issuer.id() != &self.header.issuer {
             return Err(Error::CoseKidMismatch);
