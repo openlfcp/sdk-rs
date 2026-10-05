@@ -365,59 +365,50 @@ fn in_scope_negative_vectors_are_rejected() {
     expect_rejected(case, err);
 }
 
-/// Negative vectors whose rule belongs to a later layer: Data Unit or
-/// Snapshot semantics, Control Plane state, AEAD, HPKE or the session.
-/// Their signed objects are canonical, so they must pass parse and verify
-/// here; the rejection is LFCP-042 / LFCP-043 work.
+/// Negative vectors whose rule belongs to a later task: Control Plane
+/// state, HPKE or the session. Their signed objects are canonical, so they
+/// must pass parse and verify here.
 const DEFERRED_NEGATIVES: &[(&str, &str)] = &[
-    ("actor_equivocation", "042: actor hash chain (§26.2)"),
-    ("stale_epoch", "042: previous-epoch cutoff (§19.1)"),
-    ("noncanonical_aad_D1", "042: AEAD AAD (§26.1), client-local"),
-    ("aead_failure_D1", "042: AEAD (§26.3), client-local"),
+    ("control_fork_C6", "042b: Control fork (§13.2)"),
+    ("stale_epoch", "042b: previous-epoch cutoff (§19.1)"),
+    (
+        "stale_epoch_absent_actor",
+        "042b: previous-epoch cutoff (§19.1)",
+    ),
+    (
+        "hpke_recipient_mismatch_KP0",
+        "042c: HPKE (§25.1, §25.2), client-local",
+    ),
     (
         "stale_control_head_put",
         "043: CONTROL_PUT compare-and-swap (§47)",
     ),
-    ("control_fork_C6", "042: Control fork (§13.2)"),
-    ("actor_seq_zero_D1", "042: actor sequence 0 (§8)"),
-    (
-        "actor_seq1_prev_not_null_D1",
-        "042: actor hash chain (§26.2)",
-    ),
-    (
-        "hpke_recipient_mismatch_KP0",
-        "042: HPKE (§25.1, §25.2), client-local",
-    ),
-    ("have_empty_extra_list", "042: canonical actor-have (§28.1)"),
-    ("have_range_reversed", "042: canonical actor-have (§28.1)"),
-    (
-        "have_range_not_above_contiguous",
-        "042: canonical actor-have (§28.1)",
-    ),
-    ("have_ranges_unsorted", "042: canonical actor-have (§28.1)"),
-    (
-        "have_ranges_overlapping",
-        "042: canonical actor-have (§28.1)",
-    ),
-    ("have_ranges_adjacent", "042: canonical actor-have (§28.1)"),
-    (
-        "frontier_duplicate_principal",
-        "042: canonical frontier (§28.1 rule 9)",
-    ),
-    ("frontier_unsorted", "042: canonical frontier (§28.2)"),
-    (
-        "stale_epoch_absent_actor",
-        "042: previous-epoch cutoff (§19.1)",
-    ),
 ];
 
+/// Negative vectors this crate decides, in this file or in
+/// `data_plane_vectors.rs`.
 const IN_SCOPE_NEGATIVES: &[&str] = &[
+    // Primitives (this file).
     "tagged_cose_D1",
     "noncanonical_payload_D1",
     "invalid_signature_D1",
     "tampered_D1",
     "wrong_kid_D1",
     "descriptor_extra_field",
+    // Data Plane (data_plane_vectors.rs).
+    "noncanonical_aad_D1",
+    "aead_failure_D1",
+    "actor_seq_zero_D1",
+    "actor_seq1_prev_not_null_D1",
+    "actor_equivocation",
+    "have_empty_extra_list",
+    "have_range_reversed",
+    "have_range_not_above_contiguous",
+    "have_ranges_unsorted",
+    "have_ranges_overlapping",
+    "have_ranges_adjacent",
+    "frontier_duplicate_principal",
+    "frontier_unsorted",
 ];
 
 #[test]
@@ -440,10 +431,7 @@ fn deferred_negatives_pass_the_cose_layer() {
     let principals = suite.principals();
     for (case_id, _) in DEFERRED_NEGATIVES {
         let inputs = &suite.case(case_id)["inputs"];
-        let Some(field) = inputs
-            .get("cose_sign1")
-            .or(inputs.get("conflicting_D2_cose"))
-        else {
+        let Some(field) = inputs.get("cose_sign1") else {
             continue; // no signed object (stale_epoch, stale_control_head_put)
         };
         let object = cose::parse(&hex(case_id, field))
