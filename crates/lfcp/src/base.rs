@@ -126,6 +126,12 @@ pub enum Error {
     /// Two different validly signed records reference the same previous
     /// record: a Control Fork (§13.2).
     ControlConflict,
+    /// HPKE decapsulation or decryption failed: wrong recipient key, `info`,
+    /// AAD, `enc` or ciphertext. Only the recipient can detect it, so it is
+    /// client-local and has no wire code (§25.2, N5).
+    HpkeOpenFailed,
+    /// HPKE sealing failed: the recipient's X25519 key is unusable.
+    HpkeSealFailed,
 }
 
 /// The Control Chain rule a record breaks (LFCP-WIRE-01 §13.1, §15).
@@ -217,6 +223,8 @@ impl Error {
             Error::ControlUnknownCoreType(_) => "CONTROL_UNKNOWN_CORE_TYPE",
             Error::InvalidControlChain(_) => "INVALID_CONTROL_CHAIN",
             Error::ControlConflict => "CONTROL_CONFLICT",
+            Error::HpkeOpenFailed => "HPKE_OPEN_FAILED",
+            Error::HpkeSealFailed => "HPKE_SEAL_FAILED",
         }
     }
 
@@ -229,7 +237,7 @@ impl Error {
             | Error::InvalidHex
             | Error::InvalidBase64Url
             | Error::InvalidObjectId => None,
-            Error::AeadFailure => None,
+            Error::AeadFailure | Error::HpkeOpenFailed | Error::HpkeSealFailed => None,
             Error::CborTruncated
             | Error::CborTrailingBytes
             | Error::CborNonShortest
@@ -275,7 +283,7 @@ impl Error {
     /// the object and should surface it to the application, but it has no
     /// wire code because the server cannot detect it (N3, N5).
     pub fn is_client_local(&self) -> bool {
-        matches!(self, Error::AeadFailure)
+        matches!(self, Error::AeadFailure | Error::HpkeOpenFailed)
     }
 
     /// The wire code for this error when it occurs in a `HELLO` or `AUTH`
@@ -342,6 +350,8 @@ impl fmt::Display for Error {
             }
             Error::InvalidControlChain(rule) => write!(f, "invalid Control Chain: {rule:?}"),
             Error::ControlConflict => f.write_str("Control Fork"),
+            Error::HpkeOpenFailed => f.write_str("HPKE open failed"),
+            Error::HpkeSealFailed => f.write_str("HPKE seal failed"),
         }
     }
 }

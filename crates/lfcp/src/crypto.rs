@@ -1,9 +1,10 @@
 //! Thin wrappers over established cryptographic crates.
 //!
 //! This module exposes the primitives of the LFCP crypto profile v1
-//! (LFCP-WIRE-01 §9) that the crate uses so far: SHA-256, HKDF-SHA256,
-//! ChaCha20-Poly1305, Ed25519 and the X25519 public-key derivation. It never
-//! implements a primitive itself.
+//! (LFCP-WIRE-01 §9): SHA-256, HKDF-SHA256, ChaCha20-Poly1305, Ed25519,
+//! X25519 and HPKE (RFC 9180) Base mode with DHKEM(X25519, HKDF-SHA256),
+//! HKDF-SHA256 and ChaCha20-Poly1305. It never implements a primitive
+//! itself.
 //!
 //! Private keys are wrapped in types whose `Debug` output is redacted and
 //! which wipe their memory on drop, so they cannot leak through logs or
@@ -141,6 +142,90 @@ fn ed25519_verify_lenient(public_key: &[u8; 32], message: &[u8], signature: &[u8
         .unwrap_or(false)
 }
 
+type HpkeKem = hpke::kem::X25519HkdfSha256;
+type HpkeKdf = hpke::kdf::HkdfSha256;
+type HpkeAead = hpke::aead::ChaCha20Poly1305;
+
+/// HPKE Base-mode single-shot seal (RFC 9180 §6.1) to an X25519 public key,
+/// with a fresh ephemeral key from the operating system's RNG. Returns the
+/// 32-byte `enc` and the ciphertext with its tag.
+pub fn hpke_seal(
+    recipient: &[u8; 32],
+    info: &[u8],
+    aad: &[u8],
+    plaintext: &[u8],
+) -> Result<([u8; 32], Vec<u8>), Error> {
+    use hpke::Deserializable as _;
+    let recipient = <HpkeKem as hpke::Kem>::PublicKey::from_bytes(recipient)
+        .map_err(|_| Error::HpkeSealFailed)?;
+    let (enc, ciphertext) = hpke::single_shot_seal::<HpkeAead, HpkeKdf, HpkeKem>(
+        &hpke::OpModeS::Base,
+        &recipient,
+        info,
+        plaintext,
+        aad,
+    )
+    .map_err(|_| Error::HpkeSealFailed)?;
+    Ok((enc_bytes(&enc), ciphertext))
+}
+
+/// [`hpke_seal`] with a caller-supplied RNG, for the RFC 9180 self-test
+/// only. Not part of the API: a predictable ephemeral key breaks HPKE.
+#[cfg(test)]
+fn hpke_seal_with_rng(
+    recipient: &[u8; 32],
+    info: &[u8],
+    aad: &[u8],
+    plaintext: &[u8],
+    rng: &mut impl hpke::rand_core::CryptoRng,
+) -> ([u8; 32], Vec<u8>) {
+    use hpke::Deserializable as _;
+    let recipient = <HpkeKem as hpke::Kem>::PublicKey::from_bytes(recipient).unwrap();
+    let (enc, ciphertext) = hpke::single_shot_seal_with_rng::<HpkeAead, HpkeKdf, HpkeKem>(
+        &hpke::OpModeS::Base,
+        &recipient,
+        info,
+        plaintext,
+        aad,
+        rng,
+    )
+    .unwrap();
+    (enc_bytes(&enc), ciphertext)
+}
+
+fn enc_bytes(enc: &<HpkeKem as hpke::Kem>::EncappedKey) -> [u8; 32] {
+    use hpke::Serializable as _;
+    enc.to_bytes().into()
+}
+
+/// HPKE Base-mode single-shot open (RFC 9180 §6.1) with an X25519 private
+/// key. Any failure, including an `enc` that is not a 32-byte X25519 key,
+/// is [`Error::HpkeOpenFailed`]. The plaintext is wiped when dropped.
+pub fn hpke_open(
+    recipient: &X25519PrivateKey,
+    enc: &[u8],
+    info: &[u8],
+    aad: &[u8],
+    ciphertext: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, Error> {
+    use hpke::Deserializable as _;
+    let secret = Zeroizing::new(recipient.0.to_bytes());
+    let recipient = <HpkeKem as hpke::Kem>::PrivateKey::from_bytes(secret.as_slice())
+        .map_err(|_| Error::HpkeOpenFailed)?;
+    let enc =
+        <HpkeKem as hpke::Kem>::EncappedKey::from_bytes(enc).map_err(|_| Error::HpkeOpenFailed)?;
+    hpke::single_shot_open::<HpkeAead, HpkeKdf, HpkeKem>(
+        &hpke::OpModeR::Base,
+        &recipient,
+        &enc,
+        info,
+        ciphertext,
+        aad,
+    )
+    .map(Zeroizing::new)
+    .map_err(|_| Error::HpkeOpenFailed)
+}
+
 /// An X25519 private key (RFC 7748).
 pub struct X25519PrivateKey(x25519_dalek::StaticSecret);
 
@@ -224,6 +309,87 @@ mod tests {
             aead_open(&key, &nonce, &sealed, b"other aad"),
             Err(Error::AeadFailure)
         );
+    }
+
+    /// Returns fixed bytes: the RFC 9180 test vector's `ikmE`.
+    struct FixedRng(Vec<u8>);
+
+    impl hpke::rand_core::TryRng for FixedRng {
+        type Error = core::convert::Infallible;
+        fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+            unimplemented!("the HPKE self-test only fills bytes")
+        }
+        fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+            unimplemented!("the HPKE self-test only fills bytes")
+        }
+        fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+            let bytes: Vec<u8> = self.0.drain(..dst.len()).collect();
+            dst.copy_from_slice(&bytes);
+            Ok(())
+        }
+    }
+
+    impl hpke::rand_core::TryCryptoRng for FixedRng {}
+
+    #[test]
+    fn hpke_matches_rfc9180_a_2_1() {
+        // RFC 9180 Appendix A.2.1: Base mode, DHKEM(X25519, HKDF-SHA256),
+        // HKDF-SHA256, ChaCha20-Poly1305; the first encryption.
+        let info = from_hex("4f6465206f6e2061204772656369616e2055726e").unwrap();
+        let ikm_e =
+            from_hex("909a9b35d3dc4713a5e72a4da274b55d3d3821a37e5d099e74a647db583a904b").unwrap();
+        let sk_r: [u8; 32] =
+            hex("8057991eef8f1f1af18f4a9491d16a1ce333f695d4db8e38da75975c4478e0fb");
+        let pk_r: [u8; 32] =
+            hex("4310ee97d88cc1f088a5576c77ab0cf5c3ac797f3d95139c6c84b5429c59662a");
+        let enc: [u8; 32] = hex("1afa08d3dec047a643885163f1180476fa7ddb54c6a8029ea33f95796bf2ac4a");
+        let aad = from_hex("436f756e742d30").unwrap();
+        let pt = from_hex("4265617574792069732074727574682c20747275746820626561757479").unwrap();
+        let ct = from_hex(concat!(
+            "1c5250d8034ec2b784ba2cfd69dbdb8af406cfe3ff938e131f0def8c8b60b4db",
+            "21993c62ce81883d2dd1b51a28"
+        ))
+        .unwrap();
+
+        let recipient = X25519PrivateKey::from_bytes(sk_r);
+        assert_eq!(recipient.public_key(), pk_r);
+        assert_eq!(
+            hpke_seal_with_rng(&pk_r, &info, &aad, &pt, &mut FixedRng(ikm_e)),
+            (enc, ct.clone())
+        );
+        assert_eq!(*hpke_open(&recipient, &enc, &info, &aad, &ct).unwrap(), pt);
+
+        // Fresh randomness: a different enc each time, still opening.
+        let (enc1, ct1) = hpke_seal(&pk_r, &info, &aad, &pt).unwrap();
+        let (enc2, _) = hpke_seal(&pk_r, &info, &aad, &pt).unwrap();
+        assert_ne!(enc1, enc2);
+        assert_eq!(
+            *hpke_open(&recipient, &enc1, &info, &aad, &ct1).unwrap(),
+            pt
+        );
+
+        for (label, result) in [
+            ("other info", hpke_open(&recipient, &enc, b"x", &aad, &ct)),
+            ("other aad", hpke_open(&recipient, &enc, &info, b"x", &ct)),
+            (
+                "short enc",
+                hpke_open(&recipient, &enc[..31], &info, &aad, &ct),
+            ),
+            (
+                "other key",
+                hpke_open(
+                    &X25519PrivateKey::from_bytes([1; 32]),
+                    &enc,
+                    &info,
+                    &aad,
+                    &ct,
+                ),
+            ),
+        ] {
+            let err = result.unwrap_err();
+            assert_eq!(err, Error::HpkeOpenFailed, "{label}");
+            assert!(err.is_client_local(), "{label}");
+        }
     }
 
     #[test]
