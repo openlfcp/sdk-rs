@@ -864,3 +864,41 @@ fn text_strings_are_profile_invalid() {
         ObjectStatus::Invalid(Diagnostic::InvalidFieldType)
     );
 }
+
+#[test]
+fn a_change_must_carry_the_signers_actor() {
+    // PROVISIONAL (SO-SEC1): ANDREY writes a change; a Data Unit signed by
+    // PAVEL carrying it must not enter the document.
+    let suite = suite();
+    let f = Fixtures::load(&suite);
+    let mut andrey = f.doc("andrey");
+    let mut change = andrey.initialize().unwrap();
+    let plaintext = framing::encode_change(&change.bytes());
+    let (pavel, _) = f.principals["pavel"];
+    let (andrey_id, _) = f.principals["andrey"];
+
+    let mut receiver = f.doc("masha");
+    assert_eq!(
+        receiver.apply_unit_change(&f.resource, &pavel, &plaintext),
+        Err(ProfileError::ActorMismatch)
+    );
+    assert!(receiver.heads().is_empty(), "nothing applied");
+    assert_eq!(
+        lfcp::shared_objects::document::check_change_actor(&f.resource, &pavel, &change),
+        Err(ProfileError::ActorMismatch)
+    );
+
+    assert_eq!(
+        receiver.apply_unit_change(&f.resource, &andrey_id, &plaintext),
+        Ok(())
+    );
+    assert_eq!(receiver.heads(), vec![change.hash()]);
+    // The check is per Resource: the same Principal's actor in another
+    // Resource does not match.
+    let other = ResourceId::from_bytes([9; 32]);
+    assert_eq!(
+        f.doc("masha")
+            .apply_unit_change(&other, &andrey_id, &plaintext),
+        Err(ProfileError::ActorMismatch)
+    );
+}

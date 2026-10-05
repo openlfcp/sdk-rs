@@ -20,6 +20,10 @@
 //!   `INVALID_FIELD_TYPE`;
 //! - an intent that writes always produces a real operation: a value equal
 //!   to the current one is deleted and put again in the same change.
+//!
+//! And one more (SO-SEC1): a received change is applied only when its
+//! Automerge actor is the §8 actor of the Principal that signed the Data
+//! Unit carrying it ([`document::SharedObjects::apply_unit_change`]).
 
 use std::fmt;
 
@@ -104,6 +108,10 @@ pub enum ProfileError {
     Automerge(String),
     /// No object with this ID in the document.
     UnknownObject,
+    /// An Automerge change whose actor is not the §8 actor of the Principal
+    /// that signed the Data Unit carrying it (PROVISIONAL, SO-SEC1): it
+    /// would put the signer's change into another Principal's history.
+    ActorMismatch,
     /// The object is not a Task.
     NotATask,
 }
@@ -151,6 +159,9 @@ impl fmt::Display for ProfileError {
             ProfileError::Automerge(message) => write!(f, "Automerge: {message}"),
             ProfileError::UnknownObject => f.write_str("no such object"),
             ProfileError::NotATask => f.write_str("the object is not a Task"),
+            ProfileError::ActorMismatch => {
+                f.write_str("the change's actor is not the signing Principal's actor")
+            }
         }
     }
 }

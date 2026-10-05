@@ -44,7 +44,9 @@ use automerge::{
     ActorId, AutoCommit, Change, ChangeHash, ObjId, ObjType, ReadDoc, ScalarValue, Value, ROOT,
 };
 
-use crate::base::{ObjectId, PrincipalId};
+use crate::base::{ObjectId, PrincipalId, ResourceId};
+use crate::shared_objects::framing::decode_change;
+use crate::shared_objects::identity::actor_id_bytes;
 use crate::shared_objects::identity::principal_ref;
 use crate::shared_objects::validate::{self, values_of, ObjectStatus};
 use crate::shared_objects::values::{self, Plain};
@@ -185,9 +187,30 @@ impl SharedObjects {
         self.doc.save()
     }
 
-    /// Apply received Automerge changes (§11).
+    /// Apply Automerge changes whose origin is already established, such
+    /// as changes from a trusted local store. Changes received in Data Units
+    /// go through [`SharedObjects::apply_unit_change`], which checks their
+    /// actor against the signer.
     pub fn apply_changes(&mut self, changes: Vec<Change>) -> Result<(), ProfileError> {
         Ok(self.doc.apply_changes(changes)?)
+    }
+
+    /// Apply the change carried by a Data Unit plaintext (§11) of
+    /// `resource`, whose verified signer is `signer` (the unit's actor).
+    ///
+    /// PROVISIONAL (SO-SEC1): the change's Automerge actor must be the §8
+    /// actor of (`resource`, `signer`), otherwise
+    /// [`ProfileError::ActorMismatch`] and nothing is applied: a Principal
+    /// must not inject changes into another Principal's Automerge history.
+    pub fn apply_unit_change(
+        &mut self,
+        resource: &ResourceId,
+        signer: &PrincipalId,
+        plaintext: &[u8],
+    ) -> Result<(), ProfileError> {
+        let change = decode_change(plaintext)?;
+        check_change_actor(resource, signer, &change)?;
+        self.apply_changes(vec![change])
     }
 
     /// A copy writing as `actor`, sharing this document's history.
@@ -592,6 +615,22 @@ impl SharedObjects {
             &principal_ref(principal),
             false,
         )
+    }
+}
+
+/// PROVISIONAL (SO-SEC1): whether `change` was written by the §8 actor of
+/// (`resource`, `signer`), the Principal that signed the Data Unit carrying
+/// it. Any path that accepts a change together with its LFCP signer must
+/// call this before applying it.
+pub fn check_change_actor(
+    resource: &ResourceId,
+    signer: &PrincipalId,
+    change: &Change,
+) -> Result<(), ProfileError> {
+    if change.actor_id().to_bytes() == actor_id_bytes(resource, signer) {
+        Ok(())
+    } else {
+        Err(ProfileError::ActorMismatch)
     }
 }
 
