@@ -115,6 +115,12 @@ pub enum Error {
     /// A Snapshot payload is not the closed §29 map with the field types
     /// the CDDL gives.
     SnapshotMalformed,
+    /// A Control Record payload or body is not the closed map with the
+    /// field types its CDDL gives (§13–§24).
+    ControlRecordMalformed,
+    /// A Control Record type in the reserved core range 9–31 (§14:
+    /// "Unknown core Control Record types MUST cause validation failure").
+    ControlUnknownCoreType(u64),
 }
 
 /// The canonical-form rule a frontier breaks (LFCP-WIRE-01 §28.1, §28.2).
@@ -179,6 +185,8 @@ impl Error {
             Error::FrontierMalformed => "FRONTIER_MALFORMED",
             Error::FrontierNotCanonical(_) => "FRONTIER_NOT_CANONICAL",
             Error::SnapshotMalformed => "SNAPSHOT_MALFORMED",
+            Error::ControlRecordMalformed => "CONTROL_RECORD_MALFORMED",
+            Error::ControlUnknownCoreType(_) => "CONTROL_UNKNOWN_CORE_TYPE",
         }
     }
 
@@ -218,7 +226,12 @@ impl Error {
             | Error::DataUnitSequenceZero
             | Error::FrontierMalformed
             | Error::FrontierNotCanonical(_)
-            | Error::SnapshotMalformed => Some(WireCode::MalformedMessage),
+            | Error::SnapshotMalformed
+            | Error::ControlRecordMalformed => Some(WireCode::MalformedMessage),
+            // Provisional: whether an unknown core type is MALFORMED_MESSAGE
+            // or INVALID_CONTROL_CHAIN is an open question for the project
+            // owner (§14 names no code).
+            Error::ControlUnknownCoreType(_) => Some(WireCode::MalformedMessage),
             Error::ActorEquivocation => Some(WireCode::ActorEquivocation),
             Error::SignatureInvalid | Error::CoseKidMismatch => Some(WireCode::InvalidSignature),
         }
@@ -291,6 +304,10 @@ impl fmt::Display for Error {
             Error::FrontierMalformed => f.write_str("malformed actor-have or frontier"),
             Error::FrontierNotCanonical(rule) => write!(f, "non-canonical frontier: {rule:?}"),
             Error::SnapshotMalformed => f.write_str("malformed Snapshot payload"),
+            Error::ControlRecordMalformed => f.write_str("malformed Control Record"),
+            Error::ControlUnknownCoreType(code) => {
+                write!(f, "unknown core Control Record type {code}")
+            }
         }
     }
 }

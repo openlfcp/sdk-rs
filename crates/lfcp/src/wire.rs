@@ -9,10 +9,12 @@
 //!   chain and equivocation.
 //! - [`frontier`]: Actor Have entries and canonical frontiers.
 //! - [`snapshot`]: Snapshots: payload, key, AAD, seal and open.
+//! - [`control`]: typed Control Records and Control Chain validation.
 //!
-//! Control Records arrive in LFCP-042b, Key Packages in LFCP-042c and
-//! session messages in LFCP-043.
+//! Capability evaluation arrives in LFCP-042b2, epoch cutoff in LFCP-042b3,
+//! Key Packages in LFCP-042c and session messages in LFCP-043.
 
+pub mod control;
 pub mod data_unit;
 pub mod frontier;
 pub mod keys;
@@ -76,4 +78,28 @@ pub(crate) fn principal_field(value: &Value, key: u64, err: &Error) -> Result<Pr
 
 pub(crate) fn hash_field(value: &Value, key: u64, err: &Error) -> Result<Hash32, Error> {
     bytes32_field(value, key, err).map(Hash32::from_bytes)
+}
+
+/// Field `key` as a text string.
+pub(crate) fn text_field<'a>(value: &'a Value, key: u64, err: &Error) -> Result<&'a str, Error> {
+    value
+        .get_uint(key)
+        .and_then(Value::as_text)
+        .ok_or_else(|| err.clone())
+}
+
+/// Field `key` as an array of unsigned integers.
+pub(crate) fn uint_array_field(value: &Value, key: u64, err: &Error) -> Result<Vec<u64>, Error> {
+    value
+        .get_uint(key)
+        .and_then(Value::as_array)
+        .ok_or_else(|| err.clone())?
+        .iter()
+        .map(|item| item.as_u64().ok_or_else(|| err.clone()))
+        .collect()
+}
+
+/// Unsigned integers as a CBOR array.
+pub(crate) fn uint_array(items: &[u64]) -> Value {
+    Value::Array(items.iter().map(|&n| Value::Unsigned(n)).collect())
 }
