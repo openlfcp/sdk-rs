@@ -9,6 +9,7 @@
 //! | --- | --- | --- | --- | --- |
 //! | client connection | DISCONNECTED | open WebSocket | CONNECTING | §63 |
 //! | | CONNECTING | WebSocket + `lfcp-1` accepted | NEGOTIATING | §63, §30 |
+//! | | CONNECTING | connection failed or `lfcp-1` not accepted | DISCONNECTED | §63 |
 //! | | NEGOTIATING | HELLO / CHALLENGE | AUTHENTICATING | §63 |
 //! | | AUTHENTICATING | AUTH / READY | READY | §63 |
 //! | | READY | open/close resources | READY | §63 |
@@ -32,11 +33,13 @@
 //! | | DATA_SYNC | snapshot/replay reaches known frontier | LIVE | §65 |
 //! | | LIVE | missing ranges detected | DATA_SYNC | §65 |
 //! | | LIVE | new Control Record received | CONTROL_SYNC | §65 |
-//! | | LIVE | RESOURCE_CLOSE / connection lost | CLOSED | §65 |
+//! | | every state but CLOSED | RESOURCE_CLOSE / connection lost | CLOSED | §65 |
 //! | | CONTROL_CONFLICT | manual close | CLOSED | §65 |
 //!
 //! [`server_accepts`] applies the §64 rule that a server rejects Resource,
-//! Control, Data, Key and Snapshot messages before `READY`.
+//! Control, Data, Key and Snapshot messages before `READY` with
+//! `AUTHORIZATION_FAILED`; `PING`, `PONG` and `ERROR` are allowed in every
+//! state.
 
 use crate::base::Error;
 
@@ -64,6 +67,7 @@ pub enum ClientConnection {
 pub enum ClientConnectionEvent {
     OpenWebSocket,
     SubprotocolAccepted,
+    ConnectionFailed,
     HelloChallenge,
     AuthReady,
     OpenCloseResources,
@@ -80,6 +84,7 @@ impl ClientConnection {
         match (self, event) {
             (S::Disconnected, E::OpenWebSocket) => Ok(S::Connecting),
             (S::Connecting, E::SubprotocolAccepted) => Ok(S::Negotiating),
+            (S::Connecting, E::ConnectionFailed) => Ok(S::Disconnected),
             (S::Negotiating, E::HelloChallenge) => Ok(S::Authenticating),
             (S::Authenticating, E::AuthReady) => Ok(S::Ready),
             (S::Ready, E::OpenCloseResources) => Ok(S::Ready),
@@ -135,7 +140,8 @@ impl ServerSession {
 
 /// Whether a server in `state` may process a message of `message_type`:
 /// Resource, Control, Data, Key and Snapshot messages (§33.2–§33.6) are
-/// rejected before `READY` (§64). Other types are left to the handshake.
+/// rejected before `READY` (§64). `PING`, `PONG` and `ERROR` pass in every
+/// state; other types are left to the handshake.
 pub fn server_accepts(state: ServerSession, message_type: u64) -> Result<(), Error> {
     let gated = matches!(message_type, 10..=14 | 20..=23 | 30..=33 | 40..=42 | 50..=52);
     if gated && state != ServerSession::Ready {
@@ -193,7 +199,10 @@ impl ResourceSync {
             (S::DataSync, E::FrontierReached) => Ok(S::Live),
             (S::Live, E::MissingRanges) => Ok(S::DataSync),
             (S::Live, E::NewControlRecord) => Ok(S::ControlSync),
-            (S::Live, E::CloseOrConnectionLost) => Ok(S::Closed),
+            // §65: every state moves to CLOSED on RESOURCE_CLOSE or when the
+            // connection is lost. The diagram draws no CLOSED → CLOSED edge.
+            (S::Closed, E::CloseOrConnectionLost) => Err(illegal(S::Closed, event)),
+            (_, E::CloseOrConnectionLost) => Ok(S::Closed),
             (S::ControlConflict, E::ManualClose) => Ok(S::Closed),
             (state, event) => Err(illegal(state, event)),
         }
@@ -224,6 +233,11 @@ mod tests {
             S::Authenticating.transition(E::AuthFailure),
             Ok(S::Disconnected)
         );
+        // §63 (G-SM3): CONNECTING fails back to DISCONNECTED.
+        assert_eq!(
+            S::Connecting.transition(E::ConnectionFailed),
+            Ok(S::Disconnected)
+        );
         let err = S::Connecting.transition(E::AuthReady).unwrap_err();
         assert!(matches!(err, Error::IllegalTransition { .. }));
         assert_eq!(err.wire_code(), None);
@@ -245,6 +259,12 @@ mod tests {
         }
         for code in [0, 2, 5, 90] {
             assert_eq!(server_accepts(S::WaitHello, code), Ok(()), "{code}");
+        }
+        // §64 (G-SM4): PING, PONG and ERROR in every state.
+        for state in [S::Accepted, S::WaitHello, S::WaitAuth, S::Ready, S::Closed] {
+            for code in [5, 6, 4] {
+                assert_eq!(server_accepts(state, code), Ok(()), "{state:?} {code}");
+            }
         }
         let err = server_accepts(S::WaitHello, 33).unwrap_err();
         assert_eq!(err.wire_code().unwrap().name(), "AUTHORIZATION_FAILED");
@@ -274,11 +294,26 @@ mod tests {
             state = state.transition(event).unwrap();
             assert_eq!(state, expected, "{event:?}");
         }
-        // The diagram leaves CONTROL_CONFLICT only by manual close, and
-        // offers no close or connection loss before LIVE.
         assert!(S::ControlConflict
             .transition(E::ControlChainComplete)
             .is_err());
-        assert!(S::DataSync.transition(E::CloseOrConnectionLost).is_err());
+        // §65 (G-SM1): every state closes on RESOURCE_CLOSE or connection
+        // loss.
+        for state in [
+            S::Opening,
+            S::ControlSync,
+            S::ControlConflict,
+            S::KeySync,
+            S::KeyBlocked,
+            S::DataSync,
+            S::Live,
+        ] {
+            assert_eq!(
+                state.transition(E::CloseOrConnectionLost),
+                Ok(S::Closed),
+                "{state:?}"
+            );
+        }
+        assert!(S::Closed.transition(E::CloseOrConnectionLost).is_err());
     }
 }
