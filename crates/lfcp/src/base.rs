@@ -107,6 +107,34 @@ pub enum Error {
     /// Two different validly signed Data Units share one
     /// `(resource, actor, sequence)` (§26.2).
     ActorEquivocation,
+    /// An `actor-have` or frontier value does not have the §28 shape.
+    FrontierMalformed,
+    /// An `actor-have` or frontier breaks a canonical-form rule (§28.1,
+    /// §28.2, N6).
+    FrontierNotCanonical(FrontierRule),
+}
+
+/// The canonical-form rule a frontier breaks (LFCP-WIRE-01 §28.1, §28.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrontierRule {
+    /// §28.1 rule 1: keys 0 and 1 must be present.
+    MissingKey,
+    /// §28.1 rule 2: key 2 must be omitted when there are no extra ranges.
+    EmptyExtraList,
+    /// §28.1 rule 4: each range must have start ≤ end.
+    RangeReversed,
+    /// §28.1 rule 5: ranges must be strictly above `contiguous`.
+    RangeNotAboveContiguous,
+    /// §28.1 rule 6: ranges must be sorted by start, then end.
+    RangesUnsorted,
+    /// §28.1 rule 7: ranges must not overlap.
+    RangesOverlapping,
+    /// §28.1 rule 8: ranges must not be adjacent.
+    RangesAdjacent,
+    /// §28.1 rule 9: one entry per Principal.
+    DuplicatePrincipal,
+    /// §28.2: entries sorted by raw Principal ID bytes.
+    EntriesUnsorted,
 }
 
 impl Error {
@@ -145,6 +173,8 @@ impl Error {
             Error::DataUnitMalformed => "DATA_UNIT_MALFORMED",
             Error::DataUnitSequenceZero => "DATA_UNIT_SEQUENCE_ZERO",
             Error::ActorEquivocation => "ACTOR_EQUIVOCATION",
+            Error::FrontierMalformed => "FRONTIER_MALFORMED",
+            Error::FrontierNotCanonical(_) => "FRONTIER_NOT_CANONICAL",
         }
     }
 
@@ -181,7 +211,9 @@ impl Error {
             | Error::CosePayloadAbsent
             | Error::CoseSignatureLength
             | Error::DataUnitMalformed
-            | Error::DataUnitSequenceZero => Some(WireCode::MalformedMessage),
+            | Error::DataUnitSequenceZero
+            | Error::FrontierMalformed
+            | Error::FrontierNotCanonical(_) => Some(WireCode::MalformedMessage),
             Error::ActorEquivocation => Some(WireCode::ActorEquivocation),
             Error::SignatureInvalid | Error::CoseKidMismatch => Some(WireCode::InvalidSignature),
         }
@@ -251,6 +283,8 @@ impl fmt::Display for Error {
             Error::DataUnitMalformed => f.write_str("malformed Data Unit payload"),
             Error::DataUnitSequenceZero => f.write_str("Data Unit actor sequence is 0"),
             Error::ActorEquivocation => f.write_str("actor equivocation"),
+            Error::FrontierMalformed => f.write_str("malformed actor-have or frontier"),
+            Error::FrontierNotCanonical(rule) => write!(f, "non-canonical frontier: {rule:?}"),
         }
     }
 }
