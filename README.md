@@ -27,7 +27,7 @@ uses the modules listed above it.
 
 | Module | Responsibility |
 | --- | --- |
-| `core` | Identifiers (Resource, Principal, …), errors, byte helpers |
+| `base` | Identifiers (Resource, Principal, …), errors, byte helpers |
 | `crypto` | Thin wrappers over established cryptographic crates; no primitive is implemented here |
 | `cbor` | Hand-written deterministic CBOR codec |
 | `cose` | Canonical COSE structures |

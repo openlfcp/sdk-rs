@@ -6,7 +6,7 @@
 //!
 //! Modules, in dependency order (a module only uses the ones above it):
 //!
-//! - [`core`]: identifiers, errors and byte helpers shared by every layer;
+//! - [`base`]: identifiers, errors and byte helpers shared by every layer;
 //! - [`crypto`]: thin wrappers over established cryptographic crates;
 //! - [`cbor`]: the deterministic CBOR codec;
 //! - [`cose`]: canonical COSE structures;
@@ -17,8 +17,8 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod base;
 pub mod cbor;
-pub mod core;
 pub mod cose;
 pub mod crypto;
 pub mod wire;
