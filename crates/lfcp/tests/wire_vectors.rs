@@ -72,6 +72,9 @@ fn principals_derive_byte_exact() {
 /// What each signed object in a `bytes` case is checked against.
 struct SignedCase<'a> {
     case_id: &'a str,
+    /// The prefix of the object's field names: "" or "offer_", "accept_",
+    /// "auth_proof_".
+    prefix: String,
     cose: Vec<u8>,
     payload: Vec<u8>,
     id: Option<Vec<u8>>,
@@ -105,6 +108,7 @@ fn signed_cases(suite: &Suite) -> Vec<SignedCase<'_>> {
             let unprefixed = |name: &str| if prefix.is_empty() { field(name) } else { None };
             out.push(SignedCase {
                 case_id,
+                prefix: prefix.to_owned(),
                 cose: field(key).unwrap(),
                 payload: field(&payload_key)
                     .unwrap_or_else(|| panic!("{case_id}: no {payload_key}")),
@@ -119,19 +123,25 @@ fn signed_cases(suite: &Suite) -> Vec<SignedCase<'_>> {
 
 /// The Principal a signed object in a `bytes` case requires as signer.
 ///
-/// Where the vector names the signer (`inputs.signer`) that name is used
-/// and cross-checked with the payload. Otherwise the signer follows from
-/// the WIRE section of the object type.
+/// Every case names it (G-RS3): `inputs.signer`, or `inputs.offer_signer`
+/// and `inputs.accept_signer` for the two objects of `owner_transfer`.
+/// The name is cross-checked with the signer the WIRE section of the
+/// object type requires.
 fn required_signer<'a>(
     suite: &Suite,
     principals: &'a BTreeMap<String, PrincipalKeys>,
-    case_id: &str,
+    expected: &SignedCase<'_>,
     object: &cose::SignedObject,
 ) -> &'a PrincipalKeys {
+    let case_id = expected.case_id;
     let case = suite.case(case_id);
     let kind = case["kind"].as_str().unwrap();
     let payload = object.payload();
-    let named = case["inputs"]["signer"].as_str().map(|name| {
+    let key = match expected.prefix.as_str() {
+        "offer_" | "accept_" => format!("{}signer", expected.prefix),
+        _ => "signer".to_owned(),
+    };
+    let named = case["inputs"][key.as_str()].as_str().map(|name| {
         principals
             .get(name)
             .unwrap_or_else(|| panic!("{case_id}: unknown signer fixture {name}"))
@@ -144,8 +154,7 @@ fn required_signer<'a>(
         "data_unit" => Some(2),
         // §29: "signed by the publisher", field 2.
         "snapshot" => Some(2),
-        // §25 names field 4 the sender but does not say who signs; see the
-        // spec-gap note in the LFCP-041 report.
+        // §25: the sender, field 4.
         "key_package" => Some(4),
         _ => None,
     }
@@ -166,29 +175,46 @@ fn required_signer<'a>(
             );
             named
         }
-        (Some(named), None) => named,
-        (None, Some(from_payload)) => from_payload,
-        (None, None) => {
-            if kind == "wire_message" && case_id == "AUTH" {
-                // §36: the transcript's last element is the session
-                // Principal, whose key the proof demonstrates.
-                let items = payload.as_array().expect("AUTH transcript array");
-                let id = items
-                    .last()
-                    .and_then(Value::as_bytes)
-                    .expect("principal-id");
-                principal_by_id(principals, case_id, &PrincipalId::from_slice(id).unwrap())
-            } else if kind == "owner_transfer" && payload.get_uint(3).is_some() {
-                // §23.1: the offer is signed by the current owner. Its payload
-                // names no signer; the chain's owner is OWNER (C0_genesis).
-                &principals["OWNER"]
-            } else if kind == "owner_transfer" {
-                // §23.2: the accept is signed by the new owner, field 2.
-                principal_by_id(principals, case_id, &payload_principal(case_id, payload, 2))
-            } else {
-                panic!("{case_id}: no rule names the signer of this object")
-            }
+        (Some(named), None) => {
+            assert_eq!(
+                named.descriptor().id(),
+                rule_signer(principals, case_id, kind, payload)
+                    .descriptor()
+                    .id(),
+                "{case_id}: inputs.{key} and the WIRE rule disagree on the signer"
+            );
+            named
         }
+        (None, _) => panic!("{case_id}: no inputs.{key} (G-RS3)"),
+    }
+}
+
+/// The signer of an object whose payload has no signer field, by its WIRE
+/// section.
+fn rule_signer<'a>(
+    principals: &'a BTreeMap<String, PrincipalKeys>,
+    case_id: &str,
+    kind: &str,
+    payload: &Value,
+) -> &'a PrincipalKeys {
+    if kind == "wire_message" && case_id == "AUTH" {
+        // §36: the transcript's last element is the session
+        // Principal, whose key the proof demonstrates.
+        let items = payload.as_array().expect("AUTH transcript array");
+        let id = items
+            .last()
+            .and_then(Value::as_bytes)
+            .expect("principal-id");
+        principal_by_id(principals, case_id, &PrincipalId::from_slice(id).unwrap())
+    } else if kind == "owner_transfer" && payload.get_uint(3).is_some() {
+        // §23.1: the offer is signed by the current owner. Its payload
+        // names no signer; the chain's owner is OWNER (C0_genesis).
+        &principals["OWNER"]
+    } else if kind == "owner_transfer" {
+        // §23.2: the accept is signed by the new owner, field 2.
+        principal_by_id(principals, case_id, &payload_principal(case_id, payload, 2))
+    } else {
+        panic!("{case_id}: no rule names the signer of this object")
     }
 }
 
@@ -239,7 +265,7 @@ fn signed_objects_parse_verify_and_resign_byte_exact() {
             );
         }
 
-        let signer = required_signer(&suite, &principals, case_id, &object);
+        let signer = required_signer(&suite, &principals, expected, &object);
         assert_eq!(
             cose::verify(&object, signer.descriptor()),
             Ok(()),
@@ -256,9 +282,46 @@ fn signed_objects_parse_verify_and_resign_byte_exact() {
             "{case_id}: re-signed bytes"
         );
     }
-    // 7 Control Records, offer + accept, 3 Key Packages, 4 Data Units,
+    // 11 Control Records, offer + accept, 3 Key Packages, 4 Data Units,
     // 2 Snapshots and the AUTH proof.
-    assert_eq!(cases.len(), 19, "signed objects in the bytes cases");
+    assert_eq!(cases.len(), 23, "signed objects in the bytes cases");
+}
+
+#[test]
+fn every_named_signer_is_the_kid_of_its_object() {
+    // G-RS3: a case that names inputs.signer carries a signed object whose
+    // kid is that Principal (validation cases included; a negative may be
+    // signed by the wrong Principal, but its kid says who).
+    let suite = Suite::load();
+    let principals = suite.principals();
+    let mut checked = 0;
+    for case in suite.cases() {
+        let case_id = id_of(case);
+        let Some(name) = case["inputs"]["signer"].as_str() else {
+            continue;
+        };
+        let field = ["cose_sign1", "conflicting_D2_cose"]
+            .iter()
+            .find_map(|key| case["inputs"].get(*key))
+            .or(case["expected"].get("cose_sign1"))
+            .or(case["expected"].get("auth_proof_cose_sign1"));
+        let Some(field) = field else {
+            panic!("{case_id}: inputs.signer without a signed object")
+        };
+        // A tag 18 wrapper is not part of the object; skip it to read kid.
+        let bytes = hex(case_id, field);
+        let bytes = bytes.strip_prefix(&[0xd2][..]).unwrap_or(&bytes);
+        let Ok(object) = cose::parse(bytes) else {
+            continue; // noncanonical_payload_D1: not parseable as canonical
+        };
+        assert_eq!(
+            object.kid(),
+            principals[name].descriptor().id(),
+            "{case_id}: kid is inputs.signer {name}"
+        );
+        checked += 1;
+    }
+    assert!(checked >= 50, "only {checked} cases");
 }
 
 #[test]
@@ -325,10 +388,13 @@ fn in_scope_negative_vectors_are_rejected() {
     }
 
     // Signature checks against the Data Unit actor, BOB (§26).
+    // small_order_r_signature_D1 has R = the neutral element and S = k*a:
+    // both equations accept it; only §10.5.1 rule 3 rejects it (G-RS2).
     for (case_id, expected) in [
         ("invalid_signature_D1", Error::SignatureInvalid),
         ("tampered_D1", Error::SignatureInvalid),
         ("wrong_kid_D1", Error::CoseKidMismatch),
+        ("small_order_r_signature_D1", Error::SignatureInvalid),
     ] {
         let case = suite.case(case_id);
         let object = cose::parse(&hex(case_id, &case["inputs"]["cose_sign1"]))
@@ -362,7 +428,31 @@ fn in_scope_negative_vectors_are_rejected() {
     ))
     .expect_err("descriptor_extra_field: decoded");
     assert_eq!(err, Error::PrincipalMalformed, "descriptor_extra_field");
-    expect_rejected(case, err);
+    expect_rejected(case, err.clone());
+    assert_eq!(
+        err.session_wire_code().unwrap().name(),
+        "AUTH_FAILED",
+        "descriptor_extra_field: in HELLO/AUTH (P3)"
+    );
+
+    // §7, §10.5.1 (G-RS2): an order-4 key with its ID recomputed.
+    let case = suite.case("descriptor_small_order_key");
+    let err = PrincipalDescriptor::decode(&hex(
+        "descriptor_small_order_key",
+        &case["inputs"]["descriptor_cbor"],
+    ))
+    .expect_err("descriptor_small_order_key: decoded");
+    assert_eq!(
+        err,
+        Error::PrincipalKeyInvalid,
+        "descriptor_small_order_key"
+    );
+    expect_rejected(case, err.clone());
+    assert_eq!(
+        err.session_wire_code().unwrap().name(),
+        "AUTH_FAILED",
+        "descriptor_small_order_key: in HELLO/AUTH"
+    );
 }
 
 /// Negative vectors whose rule belongs to a later task. None remain: since
@@ -372,7 +462,8 @@ const DEFERRED_NEGATIVES: &[(&str, &str)] = &[];
 
 /// Negative vectors this crate decides, in this file,
 /// `data_plane_vectors.rs`, `control_plane_vectors.rs`,
-/// `key_package_vectors.rs`, `message_vectors.rs` or `epoch_vectors.rs`.
+/// `authority_vectors.rs`, `key_package_vectors.rs`, `message_vectors.rs`
+/// or `epoch_vectors.rs`.
 const IN_SCOPE_NEGATIVES: &[&str] = &[
     // Primitives (this file).
     "tagged_cose_D1",
@@ -380,7 +471,9 @@ const IN_SCOPE_NEGATIVES: &[&str] = &[
     "invalid_signature_D1",
     "tampered_D1",
     "wrong_kid_D1",
+    "small_order_r_signature_D1",
     "descriptor_extra_field",
+    "descriptor_small_order_key",
     // Data Plane (data_plane_vectors.rs).
     "noncanonical_aad_D1",
     "aead_failure_D1",
@@ -395,12 +488,30 @@ const IN_SCOPE_NEGATIVES: &[&str] = &[
     "have_ranges_adjacent",
     "frontier_duplicate_principal",
     "frontier_unsorted",
+    "have_range_at_contiguous_plus_one",
+    "snapshot_sequence_zero",
     // Control Plane (control_plane_vectors.rs).
     "control_fork_C6",
+    // Control Records with authority (authority_vectors.rs).
+    "key_epoch_frontier_unsorted",
+    "key_epoch_frontier_duplicate",
+    "grant_duplicate_ability_C1",
+    "grant_escalation_C9",
+    "revoke_received_grant",
+    "revoke_already_revoked",
+    "genesis_signer_not_owner",
+    "genesis_competing_root",
+    "genesis_http_endpoint",
+    "unknown_core_type_C1",
+    "extension_type_non_owner_C1",
     // Key Packages (key_package_vectors.rs).
     "hpke_recipient_mismatch_KP0",
+    "kp_enc_wrong_size_KP0",
     // Messages (message_vectors.rs).
     "stale_control_head_put",
+    "unknown_message_type",
+    "control_put_null_expected_head",
+    "data_have_reversed_range",
     // Epochs (epoch_vectors.rs).
     "stale_epoch",
     "stale_epoch_absent_actor",
@@ -458,10 +569,12 @@ fn invite_uri_references_are_canonical_base64url() {
         "invite_uri: resource"
     );
 
-    let grant = hex(
-        "C2_invite_grant",
-        &suite.case("C2_invite_grant")["expected"]["record_id"],
-    );
+    // V1: the case names its grant's Control Record case.
+    let grant_case = case["inputs"]["grant_case"]
+        .as_str()
+        .expect("invite_uri: inputs.grant_case");
+    assert_eq!(grant_case, "C2_invite_grant", "invite_uri: grant case");
+    let grant = hex(grant_case, &suite.case(grant_case)["expected"]["record_id"]);
     assert_eq!(
         base::to_b64url(&grant),
         b64("grant_id_b64url"),

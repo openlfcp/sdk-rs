@@ -28,6 +28,21 @@ fn dek(suite: &Suite, epoch: u64) -> Dek {
     Dek::from_bytes(hex32("fixtures", field))
 }
 
+/// The DEK a case names in `inputs.dek` (V3), checked to be the fixture
+/// DEK of `epoch`.
+fn case_dek(suite: &Suite, case: &Json, epoch: u64) -> Dek {
+    let case_id = id_of(case);
+    let name = case["inputs"]["dek"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{case_id}: no inputs.dek"));
+    assert_eq!(
+        name,
+        format!("dek{epoch}"),
+        "{case_id}: inputs.dek names epoch {epoch}"
+    );
+    dek(suite, epoch)
+}
+
 fn input_u64(case: &Json, name: &str) -> u64 {
     case["inputs"][name]
         .as_u64()
@@ -114,7 +129,7 @@ fn data_units_rebuild_byte_exact() {
             .unwrap_or_else(|err| panic!("{case_id}: parse failed: {err}"));
         let header = received.header().clone();
         assert_eq!(header.resource_id, resource(&suite), "{case_id}: resource");
-        let dek = dek(&suite, header.data_epoch);
+        let dek = case_dek(&suite, case, header.data_epoch);
 
         let actor_key =
             ActorKey::derive(&dek, &header.resource_id, header.data_epoch, &header.actor);
@@ -198,7 +213,7 @@ fn snapshots_rebuild_byte_exact() {
             control_head: lfcp::base::Hash32::from_bytes(hex32(case_id, &inputs["control_head"])),
             frontier,
         };
-        let dek = dek(&suite, header.data_epoch);
+        let dek = case_dek(&suite, case, header.data_epoch);
         let key = SnapshotKey::derive(
             &dek,
             &header.resource_id,
@@ -390,6 +405,8 @@ fn non_canonical_frontiers_are_malformed() {
         ("have_empty_extra_list", EmptyExtraList),
         ("have_range_reversed", RangeReversed),
         ("have_range_not_above_contiguous", RangeNotAboveContiguous),
+        // §28.1 rule 5 (W3).
+        ("have_range_at_contiguous_plus_one", RangeNotAboveContiguous),
         ("have_ranges_unsorted", RangesUnsorted),
         ("have_ranges_overlapping", RangesOverlapping),
         ("have_ranges_adjacent", RangesAdjacent),
@@ -402,4 +419,66 @@ fn non_canonical_frontiers_are_malformed() {
         assert_eq!(err, Error::FrontierNotCanonical(rule), "{case_id}");
         expect_invalid(case, "reject", err.wire_code().map(|code| code.name()));
     }
+}
+
+#[test]
+fn snapshot_sequence_zero_is_rejected() {
+    // §29 (W5): Snapshot Sequences begin at 1. The vector names no code;
+    // this crate uses MALFORMED_MESSAGE provisionally.
+    let suite = Suite::load();
+    let case_id = "snapshot_sequence_zero";
+    let case = suite.case(case_id);
+    let err = ReceivedSnapshot::parse(&hex(case_id, &case["inputs"]["cose_sign1"]))
+        .expect_err("snapshot_sequence_zero: parsed");
+    assert_eq!(err, Error::SnapshotSequenceZero, "{case_id}");
+    expect_invalid(case, "reject", None);
+}
+
+#[test]
+fn every_unit_and_snapshot_case_names_the_dek_of_its_epoch() {
+    // V3: inputs.dek names fixtures.resource.dek<epoch>. Units given by
+    // reference (stale_epoch) take the epoch of the referenced unit.
+    let suite = Suite::load();
+    // A negative whose object does not parse (a tag, a non-canonical
+    // payload) has the epoch of its base case.
+    let epoch_of = |case: &Json, bytes: &[u8]| -> u64 {
+        let object = lfcp::cose::parse(bytes).unwrap_or_else(|_| {
+            let base = suite.case(case["derivation"]["base_case"].as_str().unwrap());
+            lfcp::cose::parse(&hex(id_of(base), &base["expected"]["cose_sign1"])).unwrap()
+        });
+        object
+            .payload()
+            .get_uint(1)
+            .and_then(|v| v.as_u64())
+            .unwrap()
+    };
+    let mut checked = 0;
+    for case in suite
+        .cases()
+        .filter(|c| c["kind"] == "data_unit" || c["kind"] == "snapshot")
+    {
+        let case_id = id_of(case);
+        let cose = case["inputs"]
+            .get("cose_sign1")
+            .or(case["inputs"].get("conflicting_D2_cose"))
+            .or(case["expected"].get("cose_sign1"));
+        let bytes = match cose {
+            Some(field) => hex(case_id, field),
+            None => {
+                let unit = hex(case_id, &case["inputs"]["unit_id"]);
+                let target = suite
+                    .cases()
+                    .find(|c| {
+                        c["type"] == "bytes"
+                            && c["kind"] == "data_unit"
+                            && hex(id_of(c), &c["expected"]["unit_id"]) == unit
+                    })
+                    .unwrap_or_else(|| panic!("{case_id}: unit_id names no unit"));
+                hex(id_of(target), &target["expected"]["cose_sign1"])
+            }
+        };
+        case_dek(&suite, case, epoch_of(case, &bytes));
+        checked += 1;
+    }
+    assert!(checked >= 20, "only {checked} cases");
 }

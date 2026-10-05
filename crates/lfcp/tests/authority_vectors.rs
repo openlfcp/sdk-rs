@@ -1,7 +1,9 @@
-//! Authority on LFCP-TEST-VECTORS-01: the chain C0–C6 with the capability
-//! engine, the authority matrix at C3–C6, Key Packages under §25.2 and
-//! Data Units under §26.3; then synthetic negatives built from fixture
-//! keys on top of the published chain (not spec vectors).
+//! Authority on LFCP-TEST-VECTORS-01: the chain C0–C10 with the capability
+//! engine, the authority matrix at C3–C10, Key Packages under §25.2, Data
+//! Units under §26.3, and every Control Record negative of the suite
+//! except control_fork_C6 (`control_plane_vectors.rs`); then synthetic
+//! negatives built from fixture keys on top of the published chain (not
+//! spec vectors).
 //!
 //! Every assertion names its case.
 
@@ -12,10 +14,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use lfcp::base::{AuthorityRule, ControlRecordId, Error, Hash32};
 use lfcp::cbor;
 use lfcp::cose;
-use lfcp::principal::PrincipalKeys;
+use lfcp::principal::{PrincipalDescriptor, PrincipalKeys};
 use lfcp::wire::control::authority::{
     abilities_at, data_unit_policy, key_package_policy, propose_transition, state_at,
-    validate_authorized, ControlState,
+    validate_authorized, validate_authorized_with, ControlState,
 };
 use lfcp::wire::control::body::{
     CapabilityClaimBody, CapabilityGrantBody, CapabilityRevokeBody, ControlBody, KeyEpochBody,
@@ -28,7 +30,7 @@ use lfcp::wire::data_unit::ReceivedDataUnit;
 use lfcp::wire::key_package::ReceivedKeyPackage;
 use support::vectors::{hex, principal_by_id, Suite};
 
-const CHAIN: [&str; 7] = [
+const CHAIN: [&str; 11] = [
     "C0_genesis",
     "C1_grant_bob",
     "C2_invite_grant",
@@ -36,6 +38,10 @@ const CHAIN: [&str; 7] = [
     "C4_owner_transfer_commit",
     "C5_route_update",
     "C6_key_epoch_1",
+    "C7_grant_carol_delegator",
+    "C8_grant_owner_delegated",
+    "C9_grant_invite_grandchild",
+    "C10_revoke_grandchild",
 ];
 
 struct Fixture {
@@ -52,7 +58,7 @@ impl Fixture {
         let refs: Vec<&[u8]> = bytes.iter().map(Vec::as_slice).collect();
         let (outcome, history) = validate_authorized(&refs, None)
             .unwrap_or_else(|f| panic!("{}: {}", CHAIN[f.index], f.error));
-        assert!(matches!(outcome, ChainOutcome::Linear(_)), "C0-C6: linear");
+        assert!(matches!(outcome, ChainOutcome::Linear(_)), "C0-C10: linear");
         Fixture {
             suite,
             principals,
@@ -85,7 +91,7 @@ fn record_bytes(suite: &Suite, case_id: &str) -> Vec<u8> {
 #[test]
 fn chain_validates_with_authority() {
     let f = Fixture::load();
-    assert_eq!(f.history.len(), 7, "C0-C6: states");
+    assert_eq!(f.history.len(), 11, "C0-C10: states");
     let owner_id = |name: &str| *f.keys(name).descriptor().id();
     for (i, case_id) in CHAIN.iter().enumerate() {
         let expected_owner = if i < 4 { "OWNER" } else { "BOB" };
@@ -126,6 +132,25 @@ fn chain_validates_with_authority() {
         (1, Some(1)),
         "C3: claim consumed"
     );
+
+    // §17.2, §17.3: C7 lets CAROL delegate; C8 is CAROL's grant to the
+    // former owner, C9 its grandchild to INVITE; C10 revokes C9, covered
+    // because CAROL issued its parent C8.
+    let c9_id = f.record_id("C9_grant_invite_grandchild");
+    let c9 = f.state("C9_grant_invite_grandchild");
+    let c10 = f.state("C10_revoke_grandchild");
+    let c9_grant = c9.grant(&c9_id).unwrap();
+    assert_eq!(
+        c9_grant.parent,
+        Some(f.record_id("C8_grant_owner_delegated")),
+        "C9_grant_invite_grandchild: parent"
+    );
+    assert!(c9.is_active(&c9_id), "C9_grant_invite_grandchild: active");
+    assert!(!c10.is_active(&c9_id), "C10_revoke_grandchild: C9 revoked");
+    assert!(
+        c10.is_active(&f.record_id("C8_grant_owner_delegated")),
+        "C10_revoke_grandchild: C8 stays"
+    );
 }
 
 #[test]
@@ -137,20 +162,29 @@ fn control_fork_c6_stays_a_conflict() {
     let refs: Vec<&[u8]> = bytes.iter().map(Vec::as_slice).collect();
     let (outcome, history) = validate_authorized(&refs, None).unwrap();
     assert_eq!(outcome.error(), Some(Error::ControlConflict), "{case_id}");
-    assert_eq!(history.len(), 7, "{case_id}: the fork never becomes a head");
+    assert_eq!(
+        history.len(),
+        CHAIN.len(),
+        "{case_id}: the fork never becomes a head"
+    );
+    assert!(
+        !history.iter().any(|state| state.head.sequence == 6
+            && state.head.id != f.record_id("C6_key_epoch_1")),
+        "{case_id}: no state at the competing record"
+    );
 }
 
 /// Each Principal's abilities at one head.
 type MatrixRow = [(&'static str, BTreeSet<u64>); 4];
 
 #[test]
-fn authority_matrix_at_c3_to_c6() {
+fn authority_matrix_at_c3_to_c10() {
     let f = Fixture::load();
     // §17.1: the owner holds every standard ability except the reserved
     // 9, which confers nothing.
     let all: BTreeSet<u64> = (1..=11).filter(|&code| code != 9).collect();
     let set = |codes: &[u64]| codes.iter().copied().collect::<BTreeSet<u64>>();
-    let expected: [(&str, MatrixRow); 4] = [
+    let expected: [(&str, MatrixRow); 8] = [
         (
             "C3_invite_claim_carol",
             [
@@ -185,6 +219,43 @@ fn authority_matrix_at_c3_to_c6() {
                 ("BOB", all.clone()),
                 ("INVITE", set(&[1, 2])),
                 ("CAROL", set(&[1, 2])),
+            ],
+        ),
+        (
+            "C7_grant_carol_delegator",
+            [
+                ("OWNER", set(&[])),
+                ("BOB", all.clone()),
+                ("INVITE", set(&[1, 2])),
+                ("CAROL", set(&[1, 2, 4, 5])),
+            ],
+        ),
+        (
+            // §23.3: the former owner has only what a grant gives it.
+            "C8_grant_owner_delegated",
+            [
+                ("OWNER", set(&[1, 4])),
+                ("BOB", all.clone()),
+                ("INVITE", set(&[1, 2])),
+                ("CAROL", set(&[1, 2, 4, 5])),
+            ],
+        ),
+        (
+            "C9_grant_invite_grandchild",
+            [
+                ("OWNER", set(&[1, 4])),
+                ("BOB", all.clone()),
+                ("INVITE", set(&[1, 2])),
+                ("CAROL", set(&[1, 2, 4, 5])),
+            ],
+        ),
+        (
+            "C10_revoke_grandchild",
+            [
+                ("OWNER", set(&[1, 4])),
+                ("BOB", all.clone()),
+                ("INVITE", set(&[1, 2])),
+                ("CAROL", set(&[1, 2, 4, 5])),
             ],
         ),
     ];
@@ -240,6 +311,185 @@ fn data_units_pass_the_section_26_3_hook() {
             .map(|_| ());
         assert_eq!(result, expected, "{case_id}");
     }
+}
+
+/// How the suite's Control Record negatives are decided.
+enum Outcome {
+    /// The candidate fails with this error.
+    Rejected(Error),
+    /// The candidate competes with an accepted record (§13.2).
+    Conflict,
+}
+
+/// Every Control Record negative, validated with authority on the
+/// published chain up to the record its context names (or on its own),
+/// with the outcome this crate decides.
+fn control_record_negatives() -> Vec<(&'static str, Outcome)> {
+    use lfcp::base::FrontierRule;
+    use Outcome::*;
+    let denied = |rule| Rejected(Error::AuthorizationFailed(rule));
+    vec![
+        // §19 (G-CP1).
+        (
+            "key_epoch_frontier_unsorted",
+            Rejected(Error::FrontierNotCanonical(FrontierRule::EntriesUnsorted)),
+        ),
+        (
+            "key_epoch_frontier_duplicate",
+            Rejected(Error::FrontierNotCanonical(
+                FrontierRule::DuplicatePrincipal,
+            )),
+        ),
+        // §17.1 (G-CP6).
+        (
+            "grant_duplicate_ability_C1",
+            Rejected(Error::ControlRecordMalformed),
+        ),
+        // §17.2 (G-CAP4): C8 delegates only read.
+        ("grant_escalation_C9", denied(AuthorityRule::Escalation)),
+        // §17.3 (DV4): C7 is a grant CAROL received.
+        (
+            "revoke_received_grant",
+            denied(AuthorityRule::RevokeNotCovered),
+        ),
+        // §17.3 (DV3).
+        (
+            "revoke_already_revoked",
+            denied(AuthorityRule::RevokeAlreadyRevoked),
+        ),
+        // §15 (S2).
+        ("genesis_signer_not_owner", Rejected(Error::CoseKidMismatch)),
+        // §13.2 (G-CP5): a second Genesis is a root fork.
+        ("genesis_competing_root", Conflict),
+        // §16 (G-CP4).
+        (
+            "genesis_http_endpoint",
+            Rejected(Error::ControlRecordMalformed),
+        ),
+        // §14 (W1).
+        (
+            "unknown_core_type_C1",
+            Rejected(Error::ControlUnknownCoreType(9)),
+        ),
+        // §14 (DV2).
+        (
+            "extension_type_non_owner_C1",
+            denied(AuthorityRule::NotOwner),
+        ),
+    ]
+}
+
+#[test]
+fn control_record_negatives_are_rejected() {
+    let f = Fixture::load();
+    for (case_id, outcome) in control_record_negatives() {
+        let case = f.suite.case(case_id);
+        let candidate = hex(case_id, &case["inputs"]["cose_sign1"]);
+        let context = &case["context"];
+        // The chain the candidate is offered on: up to its previous record,
+        // up to Genesis for a competing root, or nothing for a Genesis.
+        let last = context["previous_record"]["case"]
+            .as_str()
+            .or(context["competing_record"]["case"].as_str());
+        let prefix: Vec<Vec<u8>> = match last {
+            Some(last) => {
+                let n = CHAIN.iter().position(|id| *id == last).unwrap() + 1;
+                CHAIN[..n]
+                    .iter()
+                    .map(|id| record_bytes(&f.suite, id))
+                    .collect()
+            }
+            None => Vec::new(),
+        };
+        let mut records: Vec<&[u8]> = prefix.iter().map(Vec::as_slice).collect();
+        records.push(&candidate);
+        // Principals are known from the vector fixtures: descriptors are
+        // self-certifying, so a receiver may learn them from anywhere
+        // (§13.1); without that, an issuer not yet described by the chain
+        // is MISSING_DEPENDENCY.
+        let known: Vec<PrincipalDescriptor> = f
+            .principals
+            .values()
+            .map(|keys| keys.descriptor().clone())
+            .collect();
+        let result = validate_authorized_with(&records, None, &known);
+
+        let expected = &case["expected"];
+        assert_eq!(expected["valid"], false, "{case_id}");
+        let error = match (outcome, result) {
+            (Outcome::Rejected(error), Err(failure)) => {
+                assert_eq!(
+                    failure.index,
+                    prefix.len(),
+                    "{case_id}: the candidate fails"
+                );
+                assert_eq!(failure.error, error, "{case_id}");
+                assert_eq!(expected["disposition"], "reject", "{case_id}");
+                error
+            }
+            (Outcome::Conflict, Ok((outcome, _))) => {
+                let error = outcome.error().expect("no conflict");
+                assert_eq!(expected["disposition"], "conflict", "{case_id}");
+                error
+            }
+            (_, other) => panic!("{case_id}: unexpected {other:?}"),
+        };
+        // Where the vector names a code it must match; where it names
+        // none, the code used is provisional (see authority.rs).
+        if let Some(code) = expected["error"]["code"].as_str() {
+            assert_eq!(
+                error.wire_code().map(|c| c.name()),
+                Some(code),
+                "{case_id}: code for {error:?}"
+            );
+        }
+    }
+}
+
+/// The Control Record negatives this file decides.
+pub const CONTROL_RECORD_NEGATIVES: [&str; 11] = [
+    "key_epoch_frontier_unsorted",
+    "key_epoch_frontier_duplicate",
+    "grant_duplicate_ability_C1",
+    "grant_escalation_C9",
+    "revoke_received_grant",
+    "revoke_already_revoked",
+    "genesis_signer_not_owner",
+    "genesis_competing_root",
+    "genesis_http_endpoint",
+    "unknown_core_type_C1",
+    "extension_type_non_owner_C1",
+];
+
+#[test]
+fn an_issuer_the_chain_does_not_describe_is_a_missing_dependency() {
+    // §13.1 (G-CP3): extension_type_non_owner_C1 is issued by BOB right
+    // after Genesis, before any record describes BOB. Without an outside
+    // descriptor the receiver cannot check the signature.
+    let f = Fixture::load();
+    let case_id = "extension_type_non_owner_C1";
+    let candidate = hex(case_id, &f.suite.case(case_id)["inputs"]["cose_sign1"]);
+    let c0 = record_bytes(&f.suite, "C0_genesis");
+    let failure = validate_authorized(&[&c0, &candidate], None).unwrap_err();
+    assert_eq!(
+        (failure.index, &failure.error),
+        (1, &Error::IssuerUnknown(*f.keys("BOB").descriptor().id())),
+        "{case_id}"
+    );
+    assert_eq!(
+        failure.error.wire_code().unwrap().name(),
+        "MISSING_DEPENDENCY",
+        "{case_id}"
+    );
+}
+
+#[test]
+fn the_negatives_table_is_complete() {
+    let ids: Vec<&str> = control_record_negatives()
+        .iter()
+        .map(|(id, _)| *id)
+        .collect();
+    assert_eq!(ids, CONTROL_RECORD_NEGATIVES);
 }
 
 /// Synthetic records on top of the published chain.

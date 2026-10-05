@@ -1,6 +1,8 @@
 //! LFCP-TEST-VECTORS-01 wire messages: every `wire_message` case, the AUTH
-//! handshake, and stale_control_head_put; plus synthetic envelope
-//! negatives built from published messages (not spec vectors).
+//! handshake, stale_control_head_put with its NACK, and the message
+//! negatives unknown_message_type, control_put_null_expected_head and
+//! data_have_reversed_range; plus synthetic envelope negatives built from
+//! published messages (not spec vectors).
 //!
 //! Every assertion names its case.
 
@@ -10,12 +12,13 @@ use lfcp::base::{ControlRecordId, Error};
 use lfcp::cbor::{self, Value};
 use lfcp::cose;
 use lfcp::wire::control::chain::check_expected_head;
-use lfcp::wire::message::{Body, DecodeOptions, Message, DEFAULT_MAX_MESSAGE_BYTES};
+use lfcp::wire::have::HaveVector;
+use lfcp::wire::message::{Body, DecodeOptions, ErrorBody, Message, DEFAULT_MAX_MESSAGE_BYTES};
 use lfcp::wire::session::{auth_transcript, verify_auth};
 use support::vectors::{hex, hex32, id_of, Suite};
 
 /// The §33 type code each wire_message case carries.
-const MESSAGES: [(&str, u64); 28] = [
+const MESSAGES: [(&str, u64); 29] = [
     ("HELLO", 0),
     ("CHALLENGE", 1),
     ("AUTH", 2),
@@ -43,6 +46,7 @@ const MESSAGES: [(&str, u64); 28] = [
     ("SNAPSHOT", 51),
     ("SNAPSHOT_PUT", 52),
     ("NACK_STALE_DATA_EPOCH", 91),
+    ("NACK_CONTROL_HEAD_MISMATCH", 91),
     ("ACK_DATA_PUT_D1_D2", 90),
 ];
 
@@ -74,7 +78,10 @@ fn message(suite: &Suite, case_id: &str) -> Message {
 fn every_wire_message_round_trips_typed() {
     let suite = Suite::load();
     let listed: Vec<&str> = MESSAGES.iter().map(|(id, _)| *id).collect();
-    for case in suite.cases().filter(|c| c["kind"] == "wire_message") {
+    for case in suite
+        .cases()
+        .filter(|c| c["kind"] == "wire_message" && c["type"] == "bytes")
+    {
         assert!(
             listed.contains(&id_of(case)),
             "{}: not in MESSAGES",
@@ -232,12 +239,94 @@ fn stale_control_head_put_is_a_head_mismatch() {
     let stale = put(&hex(case_id, &case["inputs"]["message_cbor"]), case_id);
     let err = check_expected_head(stale, current).expect_err("stale head accepted");
     assert_eq!(err, Error::ControlHeadMismatch { current }, "{case_id}");
+
+    // §47 (G-MSG5): the coordinator answers with NACK(CONTROL_HEAD_MISMATCH)
+    // carrying the current head, correlated to the put.
+    let nack = message(&suite, "NACK_CONTROL_HEAD_MISMATCH");
+    let Body::Nack(body) = &nack.body else {
+        panic!("NACK_CONTROL_HEAD_MISMATCH: not a NACK")
+    };
+    assert_eq!(
+        Some(body),
+        ErrorBody::for_error(&err).as_ref(),
+        "NACK_CONTROL_HEAD_MISMATCH: body for the mismatch"
+    );
+    let stale_put = Message::decode(
+        &hex(case_id, &case["inputs"]["message_cbor"]),
+        &DecodeOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        nack.correlation_id,
+        Some(stale_put.message_id),
+        "NACK_CONTROL_HEAD_MISMATCH: correlation id"
+    );
     assert_eq!(
         err.wire_code().map(|c| c.name()),
         case["expected"]["error"]["code"].as_str(),
         "{case_id}: code"
     );
     assert_eq!(case["expected"]["disposition"], "reject", "{case_id}");
+}
+
+/// The error `case_id`'s message bytes fail with, checked against the
+/// vector's code.
+fn rejected(suite: &Suite, case_id: &str, decide: impl FnOnce(&[u8]) -> Error) -> Error {
+    let case = suite.case(case_id);
+    assert_eq!(case["expected"]["valid"], false, "{case_id}");
+    assert_eq!(case["expected"]["disposition"], "reject", "{case_id}");
+    let err = decide(&hex(case_id, &case["inputs"]["message_cbor"]));
+    assert_eq!(
+        err.wire_code().map(|c| c.name()),
+        case["expected"]["error"]["code"].as_str(),
+        "{case_id}: code for {err:?}"
+    );
+    err
+}
+
+#[test]
+fn unknown_message_type_is_protocol_unsupported() {
+    // §33 (G-MSG1).
+    let suite = Suite::load();
+    let err = rejected(&suite, "unknown_message_type", |bytes| {
+        Message::decode(bytes, &DecodeOptions::default()).unwrap_err()
+    });
+    assert_eq!(
+        err,
+        Error::UnsupportedMessageType(7),
+        "unknown_message_type"
+    );
+}
+
+#[test]
+fn control_put_with_a_null_expected_head_is_malformed() {
+    // §47 (G-MSG5).
+    let suite = Suite::load();
+    let err = rejected(&suite, "control_put_null_expected_head", |bytes| {
+        Message::decode(bytes, &DecodeOptions::default()).unwrap_err()
+    });
+    assert_eq!(
+        err,
+        Error::MessageMalformed,
+        "control_put_null_expected_head"
+    );
+}
+
+#[test]
+fn live_have_with_a_reversed_range_is_malformed() {
+    // §48 (G-MSG6): the envelope and body decode; normalizing the live
+    // Have rejects the range.
+    let suite = Suite::load();
+    let err = rejected(&suite, "data_have_reversed_range", |bytes| {
+        let Body::DataHave { have, .. } = Message::decode(bytes, &DecodeOptions::default())
+            .expect("data_have_reversed_range: decode")
+            .body
+        else {
+            panic!("data_have_reversed_range: not a DATA_HAVE")
+        };
+        HaveVector::from_wire(&have).unwrap_err()
+    });
+    assert_eq!(err, Error::MessageMalformed, "data_have_reversed_range");
 }
 
 /// Synthetic negatives: published messages with the envelope or body

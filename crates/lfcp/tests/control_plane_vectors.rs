@@ -1,5 +1,6 @@
 //! LFCP-TEST-VECTORS-01 cases for the Control Plane: typed Control Records
-//! C0–C6, the Control Chain, ownership transfer payloads and the fork case.
+//! C0–C10, the Control Chain, ownership transfer payloads and the fork case.
+//! The Control Record negatives are decided in `authority_vectors.rs`.
 //!
 //! The synthetic negatives at the end are built in the test from fixture
 //! keys; they are not spec vectors. Every assertion names its case.
@@ -17,7 +18,7 @@ use lfcp::wire::control::chain::{
 use lfcp::wire::control::{ControlRecord, ControlRecordHeader, ReceivedControlRecord};
 use support::vectors::{hex, Suite};
 
-const RECORDS: [(&str, u64); 7] = [
+const RECORDS: [(&str, u64); 11] = [
     ("C0_genesis", 0),
     ("C1_grant_bob", 1),
     ("C2_invite_grant", 1),
@@ -25,6 +26,10 @@ const RECORDS: [(&str, u64); 7] = [
     ("C4_owner_transfer_commit", 6),
     ("C5_route_update", 5),
     ("C6_key_epoch_1", 4),
+    ("C7_grant_carol_delegator", 1),
+    ("C8_grant_owner_delegated", 1),
+    ("C9_grant_invite_grandchild", 1),
+    ("C10_revoke_grandchild", 2),
 ];
 
 fn record_bytes(suite: &Suite, case_id: &str) -> Vec<u8> {
@@ -91,7 +96,7 @@ fn records_decode_typed_and_re_encode_byte_exact() {
 }
 
 #[test]
-fn chain_c0_to_c6_validates() {
+fn chain_c0_to_c10_validates() {
     let suite = Suite::load();
     let bytes: Vec<Vec<u8>> = RECORDS
         .iter()
@@ -99,21 +104,21 @@ fn chain_c0_to_c6_validates() {
         .collect();
     let refs: Vec<&[u8]> = bytes.iter().map(Vec::as_slice).collect();
     // Every issuer is described by an earlier record: OWNER in Genesis,
-    // BOB and INVITE as grant subjects.
+    // BOB, INVITE and CAROL as grant subjects or claimants.
     let outcome = validate_chain(&refs, ChainStart::Genesis, &mut SignaturesOnly)
         .unwrap_or_else(|f| panic!("{}: {}", RECORDS[f.index].0, f.error));
     let ChainOutcome::Linear(chain) = outcome else {
-        panic!("C0-C6: unexpected conflict")
+        panic!("C0-C10: unexpected conflict")
     };
-    assert_eq!(chain.records.len(), 7, "C0-C6: records");
-    assert_eq!(chain.head.sequence, 6, "C0-C6: head sequence");
+    assert_eq!(chain.records.len(), 11, "C0-C10: records");
+    assert_eq!(chain.head.sequence, 10, "C0-C10: head sequence");
     assert_eq!(
         chain.head.id.as_bytes().as_slice(),
         hex(
-            "C6_key_epoch_1",
-            &suite.case("C6_key_epoch_1")["expected"]["record_id"]
+            "C10_revoke_grandchild",
+            &suite.case("C10_revoke_grandchild")["expected"]["record_id"]
         ),
-        "C0-C6: head is C6"
+        "C0-C10: head is C10"
     );
 }
 

@@ -1,45 +1,72 @@
-//! LFCP-TEST-VECTORS-01 cases for HPKE Key Packages: KP0, KPI, KPC and
-//! hpke_recipient_mismatch_KP0.
+//! LFCP-TEST-VECTORS-01 cases for HPKE Key Packages: KP0, KPI, KPC,
+//! hpke_recipient_mismatch_KP0 and kp_enc_wrong_size_KP0.
 //!
-//! The `hpke` crate derives the ephemeral key from random input
-//! (DeriveKeyPair), while the vectors publish the raw ephemeral private
-//! key. Re-sealing, and the HPKE intermediates, therefore cannot be
-//! reproduced through the crate's API. They are listed per field in
-//! `NOT_CHECKABLE_PENDING_G_KP2` rather than dropped, and the guard test
-//! requires every vector field to be either checked or listed there.
+//! The vectors publish the HPKE ephemeral input keying material `ikmE`;
+//! the ephemeral key is `DeriveKeyPair(ikmE)` (RFC 9180 §7.1.3, G-KP2).
+//! A random source that yields `ikmE` therefore reproduces every package
+//! byte for byte through [`KeyPackage::seal_with_rng`], the `hpke` crate's
+//! deterministic path. The HPKE intermediates are checked with the same
+//! crate: the ephemeral key pair and the KEM shared secret directly, the
+//! AEAD key and base nonce by opening the ciphertext under exactly those
+//! values. Every expected field is checked; the guard test enforces it.
 //! Every assertion names its case.
 
 mod support;
 
 use std::collections::BTreeMap;
 
+use hpke::danger::streaming_enc::{create_receiver_context, AeadKey, AeadNonce, ExporterSecret};
+use hpke::{Deserializable as _, Kem as _, Serializable as _};
 use lfcp::base::{Error, Hash32};
 use lfcp::cose;
 use lfcp::crypto::{self, X25519PrivateKey};
 use lfcp::principal::PrincipalKeys;
 use lfcp::wire::control::body::ControlBody;
 use lfcp::wire::control::ReceivedControlRecord;
-use lfcp::wire::key_package::ReceivedKeyPackage;
+use lfcp::wire::key_package::{KeyPackage, ReceivedKeyPackage};
+use lfcp::wire::keys::Dek;
 use support::vectors::{hex, hex32, principal_by_id, Suite};
+
+type Kem = hpke::kem::X25519HkdfSha256;
+type Kdf = hpke::kdf::HkdfSha256;
+type Aead = hpke::aead::ChaCha20Poly1305;
 
 const PACKAGES: [&str; 3] = ["KP0_bob_epoch0", "KPI_invite_epoch0", "KPC_carol_epoch1"];
 
-/// Expected fields each package test compares byte for byte.
+/// Every expected field of a package case; each is compared byte for byte.
 const CHECKED: &[&str] = &[
+    "hpke_ephemeral_private",
     "hpke_info_cbor",
     "hpke_aad_cbor",
     "hpke_enc",
+    "hpke_shared_secret",
+    "hpke_key",
+    "hpke_base_nonce",
     "hpke_ciphertext",
     "payload_cbor",
     "cose_sign1",
     "package_id",
 ];
 
-/// Expected fields the crate API cannot reproduce from the raw ephemeral
-/// private key: the HPKE intermediates. A ciphertext re-seal is equally
-/// impossible; the published ciphertext is instead checked by opening it.
-/// Pending spec gap G-KP2 (publish ikmE).
-const NOT_CHECKABLE_PENDING_G_KP2: &[&str] = &["hpke_shared_secret", "hpke_key", "hpke_base_nonce"];
+/// A random source that yields fixed bytes: the vector's `ikmE`.
+struct FixedRng(Vec<u8>);
+
+impl hpke::rand_core::TryRng for FixedRng {
+    type Error = core::convert::Infallible;
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        unimplemented!("HPKE only fills bytes")
+    }
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        unimplemented!("HPKE only fills bytes")
+    }
+    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+        let bytes: Vec<u8> = self.0.drain(..dst.len()).collect();
+        dst.copy_from_slice(&bytes);
+        Ok(())
+    }
+}
+
+impl hpke::rand_core::TryCryptoRng for FixedRng {}
 
 /// The DEK commitment the Control Plane records for each epoch: Genesis
 /// (C0) for epoch 0, the Key Epoch record (C6) for epoch 1.
@@ -68,22 +95,20 @@ fn fixture_dek(suite: &Suite, epoch: u64) -> Vec<u8> {
 }
 
 #[test]
-fn every_package_field_is_checked_or_pending_g_kp2() {
+fn every_package_field_is_checked() {
     let suite = Suite::load();
     for case_id in PACKAGES {
         for name in suite.case(case_id)["expected"].as_object().unwrap().keys() {
-            let checked = CHECKED.contains(&name.as_str());
-            let pending = NOT_CHECKABLE_PENDING_G_KP2.contains(&name.as_str());
             assert!(
-                checked != pending,
-                "{case_id}: field {name} is neither checked nor listed"
+                CHECKED.contains(&name.as_str()),
+                "{case_id}: field {name} is not checked"
             );
         }
     }
 }
 
 #[test]
-fn key_packages_match_and_open() {
+fn key_packages_reproduce_from_ikm_e_and_open() {
     let suite = Suite::load();
     let principals = suite.principals();
     let commitments = recorded_commitments(&suite);
@@ -91,6 +116,7 @@ fn key_packages_match_and_open() {
         let case = suite.case(case_id);
         let expected = &case["expected"];
         let field = |name: &str| hex(case_id, &expected[name]);
+        let ikm_e = hex(case_id, &case["inputs"]["hpke_ephemeral_ikm"]);
 
         let bytes = field("cose_sign1");
         let received = ReceivedKeyPackage::parse(&bytes)
@@ -106,61 +132,163 @@ fn key_packages_match_and_open() {
             field("hpke_aad_cbor"),
             "{case_id}: hpke_aad_cbor"
         );
-
-        // enc is the public key of the published ephemeral private key.
-        let ephemeral =
-            X25519PrivateKey::from_bytes(hex32(case_id, &case["inputs"]["hpke_ephemeral_private"]));
+        let sender = principal_by_id(&principals, case_id, &header.sender);
+        let recipient = principal_by_id(&principals, case_id, &header.recipient);
         assert_eq!(
-            ephemeral.public_key().as_slice(),
+            Some(sender.descriptor()),
+            case["inputs"]["signer"]
+                .as_str()
+                .map(|name| principals[name].descriptor()),
+            "{case_id}: inputs.signer is the sender"
+        );
+
+        // skE, pkE = DeriveKeyPair(ikmE); enc is pkE.
+        let (sk_e, pk_e) = Kem::derive_keypair(&ikm_e);
+        assert_eq!(
+            sk_e.to_bytes().as_slice(),
+            field("hpke_ephemeral_private"),
+            "{case_id}: hpke_ephemeral_private"
+        );
+        assert_eq!(
+            pk_e.to_bytes().as_slice(),
             field("hpke_enc"),
             "{case_id}: hpke_enc"
         );
-
-        // The payload and the signed object re-sign byte-exact.
-        let object = cose::parse(&bytes).unwrap();
         assert_eq!(
-            object.payload_bytes(),
-            field("payload_cbor"),
-            "{case_id}: payload_cbor"
-        );
-        let sender = principal_by_id(&principals, case_id, &header.sender);
-        let resigned = cose::sign(&field("payload_cbor"), sender).unwrap();
-        assert_eq!(resigned.bytes(), bytes, "{case_id}: cose_sign1");
-        assert_eq!(
-            crypto::sha256(&bytes).as_bytes().as_slice(),
-            field("package_id"),
-            "{case_id}: package_id"
+            X25519PrivateKey::from_bytes(hex32(case_id, &expected["hpke_ephemeral_private"]))
+                .public_key()
+                .as_slice(),
+            field("hpke_enc"),
+            "{case_id}: enc is the public key of skE"
         );
 
-        let package = received
-            .verify(sender.descriptor(), |_| Ok(()))
-            .unwrap_or_else(|err| panic!("{case_id}: verify failed: {err}"));
+        // The KEM shared secret of Encap(pkR) with the same ephemeral key.
+        let pk_r =
+            <Kem as hpke::Kem>::PublicKey::from_bytes(recipient.descriptor().x25519_public())
+                .unwrap();
+        let (shared, encapped) =
+            Kem::encap_with_rng(&pk_r, None, &mut FixedRng(ikm_e.clone())).unwrap();
         assert_eq!(
-            package.id().as_bytes().as_slice(),
-            field("package_id"),
-            "{case_id}: id"
+            shared.0.as_slice(),
+            field("hpke_shared_secret"),
+            "{case_id}: hpke_shared_secret"
         );
-        assert_eq!(package.enc(), field("hpke_enc"), "{case_id}: payload enc");
         assert_eq!(
-            package.ciphertext(),
+            encapped.to_bytes().as_slice(),
+            field("hpke_enc"),
+            "{case_id}: encapsulated key"
+        );
+
+        // The key schedule's AEAD key and base nonce: the ciphertext opens
+        // under exactly these values, and not if either changes.
+        let dek = fixture_dek(&suite, header.data_epoch);
+        let open_with = |key: &[u8], nonce: &[u8]| {
+            let key = AeadKey::<Aead>(key.try_into().unwrap());
+            let nonce = AeadNonce::<Aead>(nonce.try_into().unwrap());
+            create_receiver_context::<Aead, Kdf, Kem>(&key, nonce, ExporterSecret::default())
+                .open(&field("hpke_ciphertext"), &field("hpke_aad_cbor"))
+                .ok()
+        };
+        let (key, nonce) = (field("hpke_key"), field("hpke_base_nonce"));
+        assert_eq!(
+            open_with(&key, &nonce),
+            Some(dek.clone()),
+            "{case_id}: hpke_key and hpke_base_nonce"
+        );
+        let flip = |mut bytes: Vec<u8>| {
+            bytes[0] ^= 1;
+            bytes
+        };
+        assert_eq!(
+            open_with(&flip(key.clone()), &nonce),
+            None,
+            "{case_id}: other key"
+        );
+        assert_eq!(
+            open_with(&key, &flip(nonce.clone())),
+            None,
+            "{case_id}: other nonce"
+        );
+
+        // The whole package re-seals byte for byte from ikmE.
+        let resealed = KeyPackage::seal_with_rng(
+            header.resource_id,
+            header.data_epoch,
+            header.control_head,
+            &Dek::from_bytes(dek.clone().try_into().unwrap()),
+            recipient.descriptor(),
+            sender,
+            &mut FixedRng(ikm_e),
+        )
+        .unwrap_or_else(|err| panic!("{case_id}: seal failed: {err}"));
+        assert_eq!(
+            resealed.enc(),
+            field("hpke_enc"),
+            "{case_id}: re-sealed enc"
+        );
+        assert_eq!(
+            resealed.ciphertext(),
             field("hpke_ciphertext"),
             "{case_id}: hpke_ciphertext"
         );
+        assert_eq!(
+            resealed.signed_object().payload_bytes(),
+            field("payload_cbor"),
+            "{case_id}: payload_cbor"
+        );
+        assert_eq!(
+            resealed.signed_object().bytes(),
+            bytes,
+            "{case_id}: cose_sign1"
+        );
+        assert_eq!(
+            resealed.id().as_bytes().as_slice(),
+            field("package_id"),
+            "{case_id}: package_id"
+        );
+        assert_eq!(
+            crypto::sha256(&bytes).as_bytes().as_slice(),
+            field("package_id"),
+            "{case_id}: package_id is SHA-256 of the exact bytes"
+        );
+        assert_eq!(
+            cose::parse(&bytes).unwrap().payload_bytes(),
+            field("payload_cbor"),
+            "{case_id}: published payload"
+        );
 
-        // Opening under the exact info and AAD authenticates them and the
-        // ciphertext, and yields the DEK of the right epoch.
-        let recipient = principal_by_id(&principals, case_id, &header.recipient);
-        let commitment = &commitments[&header.data_epoch];
-        let dek = package
-            .open(recipient, commitment)
+        // Verified as published, the package opens to the DEK of its epoch.
+        let package = received
+            .verify(sender.descriptor(), |_| Ok(()))
+            .unwrap_or_else(|err| panic!("{case_id}: verify failed: {err}"));
+        assert_eq!(package, resealed, "{case_id}: verified package");
+        let opened = package
+            .open(recipient, &commitments[&header.data_epoch])
             .unwrap_or_else(|err| panic!("{case_id}: open failed: {err}"));
         assert_eq!(
-            dek.expose_secret().as_slice(),
-            fixture_dek(&suite, header.data_epoch),
+            opened.expose_secret().as_slice(),
+            dek,
             "{case_id}: DEK of epoch {}",
             header.data_epoch
         );
     }
+}
+
+#[test]
+fn enc_of_the_wrong_size_is_malformed() {
+    // §25 (G-KP3): enc is bstr .size 32.
+    let suite = Suite::load();
+    let case_id = "kp_enc_wrong_size_KP0";
+    let case = suite.case(case_id);
+    let err = ReceivedKeyPackage::parse(&hex(case_id, &case["inputs"]["cose_sign1"]))
+        .expect_err("kp_enc_wrong_size_KP0: parsed");
+    assert_eq!(err, Error::KeyPackageMalformed, "{case_id}");
+    assert_eq!(
+        err.wire_code().map(|c| c.name()),
+        case["expected"]["error"]["code"].as_str(),
+        "{case_id}: code"
+    );
+    assert_eq!(case["expected"]["disposition"], "reject", "{case_id}");
 }
 
 #[test]
