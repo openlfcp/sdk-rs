@@ -455,10 +455,19 @@ fn in_scope_negative_vectors_are_rejected() {
     );
 }
 
-/// Negative vectors whose rule belongs to a later task. None remain: since
-/// LFCP-042b3 every negative vector is decided in scope. A case added here
-/// must still pass parse and verify at the COSE layer.
-const DEFERRED_NEGATIVES: &[(&str, &str)] = &[];
+/// Validation vectors this crate does not decide, with the reason. A case
+/// added here must still pass parse and verify at the COSE layer if it
+/// carries a signed object.
+const DEFERRED_NEGATIVES: &[(&str, &str)] = &[
+    (
+        "invite_uri_unknown_parameter",
+        "sdk-rs has no invitation URI codec; invite_uri checks only the URI's components",
+    ),
+    (
+        "invite_uri_duplicate_grant",
+        "sdk-rs has no invitation URI codec; invite_uri checks only the URI's components",
+    ),
+];
 
 /// Negative vectors this crate decides, in this file,
 /// `data_plane_vectors.rs`, `control_plane_vectors.rs`,
@@ -480,6 +489,8 @@ const IN_SCOPE_NEGATIVES: &[&str] = &[
     "actor_seq_zero_D1",
     "actor_seq1_prev_not_null_D1",
     "actor_equivocation",
+    "chain_gap_linked_seq4",
+    "chain_prev_unknown_seq4",
     "have_empty_extra_list",
     "have_range_reversed",
     "have_range_not_above_contiguous",

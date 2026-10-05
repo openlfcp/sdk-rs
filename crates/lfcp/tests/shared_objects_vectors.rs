@@ -10,7 +10,7 @@
 //!   the corpus' logical state and conflicts.
 //!
 //! The vectors and the corpus are read at the `spec.lock` pin
-//! (mvp-0.1-baseline.4).
+//! (mvp-0.1-baseline.5).
 
 mod support;
 
@@ -924,72 +924,131 @@ fn text_anywhere_in_an_object_is_profile_invalid() {
 }
 
 #[test]
-fn the_corpus_change_actor_negative_is_not_merged() {
-    // SO-SEC1-change-actor-mismatch: on top of S01, a Data Unit signed by
-    // andrey carrying pavel's change.
+fn the_corpus_negatives_are_not_merged() {
+    // On top of S01, Data Units signed by andrey that a receiver rejects:
+    // SO-SEC1-change-actor-mismatch carries pavel's change (§8, §11);
+    // SO-BYTES-change-checksum andrey's own change with a corrupted
+    // checksum, and SO-BYTES-document-chunk S01's full save instead of a
+    // change (§11, §13, §74.1).
     let corpus = corpus();
     let negatives = corpus["negatives"].as_array().unwrap();
-    assert_eq!(negatives.len(), 1);
-    let negative = &negatives[0];
-    let id = negative["id"].as_str().unwrap();
-    assert_eq!(id, "SO-SEC1-change-actor-mismatch");
+    let ids: Vec<&str> = negatives
+        .iter()
+        .map(|n| n["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            "SO-SEC1-change-actor-mismatch",
+            "SO-BYTES-change-checksum",
+            "SO-BYTES-document-chunk"
+        ]
+    );
     let suite = suite();
     let f = Fixtures::load(&suite);
     assert_eq!(
         ResourceId::from_hex(corpus["resource_hex"].as_str().unwrap()).unwrap(),
         f.resource,
-        "{id}: the corpus Resource"
+        "the corpus Resource"
     );
 
-    // The base scenario's changes.
-    let base = negative["base_scenario"].as_str().unwrap();
-    let scenario = corpus["scenarios"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|s| s["id"] == base)
-        .unwrap();
-    let mut receiver = f.doc("masha");
-    for c in scenario["changes"].as_array().unwrap() {
-        let bytes = base::from_hex(c["change_hex"].as_str().unwrap()).unwrap();
-        receiver
-            .apply_changes(vec![framing::decode_change(&framing::encode_change(
-                &bytes,
-            ))
-            .unwrap()])
+    for negative in negatives {
+        let id = negative["id"].as_str().unwrap();
+        // The base scenario's changes.
+        let base = negative["base_scenario"].as_str().unwrap();
+        let scenario = corpus["scenarios"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == base)
             .unwrap();
+        let mut receiver = f.doc("masha");
+        for c in scenario["changes"].as_array().unwrap() {
+            let bytes = base::from_hex(c["change_hex"].as_str().unwrap()).unwrap();
+            receiver
+                .apply_changes(vec![framing::decode_change(&framing::encode_change(
+                    &bytes,
+                ))
+                .unwrap()])
+                .unwrap();
+        }
+        let heads = receiver.heads();
+
+        let plaintext = base::from_hex(negative["plaintext_hex"].as_str().unwrap()).unwrap();
+        let signer = negative["signer"].as_str().unwrap();
+        let (signer_id, signer_actor) = f.principals[signer];
+        assert_eq!(
+            base::to_hex(&signer_actor),
+            negative["signer_actor_hex"].as_str().unwrap(),
+            "{id}: §8 actor of the signer"
+        );
+        let err = receiver
+            .apply_unit_change(&f.resource, &signer_id, &plaintext)
+            .unwrap_err();
+        let expected = &negative["expected"];
+        assert_eq!(expected["disposition"], "reject", "{id}");
+        assert_eq!(err.code(), expected["error"]["code"].as_str(), "{id}");
+        assert_eq!(
+            err.diagnostic().map(Diagnostic::name),
+            expected["error"]["diagnostic"].as_str(),
+            "{id}"
+        );
+        assert_eq!(receiver.heads(), heads, "{id}: nothing merged");
+
+        match id {
+            "SO-SEC1-change-actor-mismatch" => {
+                // The same plaintext signed by its actor's Principal is a
+                // valid change.
+                let change = framing::decode_change(&plaintext).unwrap();
+                let (pavel, pavel_actor) = f.principals["pavel"];
+                assert_eq!(change.actor_id().to_bytes(), pavel_actor, "{id}");
+                assert_eq!(
+                    receiver.apply_unit_change(&f.resource, &pavel, &plaintext),
+                    Ok(())
+                );
+            }
+            "SO-BYTES-change-checksum" => {
+                // The change before corruption is valid and andrey's, and
+                // differs from the framed bytes in the first checksum byte.
+                let good =
+                    base::from_hex(negative["change"]["change_hex"].as_str().unwrap()).unwrap();
+                let framed = framing::snapshot_payload(&plaintext).unwrap();
+                assert_eq!(framed.len(), good.len(), "{id}");
+                let differ: Vec<usize> =
+                    (0..good.len()).filter(|&i| good[i] != framed[i]).collect();
+                assert_eq!(differ, [4], "{id}: only the first checksum byte");
+                let change = Change::from_bytes(good.clone()).unwrap();
+                assert_eq!(
+                    base::to_hex(&change.hash().0),
+                    negative["change"]["hash"].as_str().unwrap(),
+                    "{id}: change hash"
+                );
+                // Automerge alone would parse the corrupted chunk.
+                assert!(Change::from_bytes(framed).is_ok(), "{id}");
+                assert_eq!(
+                    receiver.apply_unit_change(
+                        &f.resource,
+                        &signer_id,
+                        &framing::encode_change(&good)
+                    ),
+                    Ok(()),
+                    "{id}: the uncorrupted change applies"
+                );
+            }
+            "SO-BYTES-document-chunk" => {
+                // The framed bytes are a full save that loads as S01.
+                let save = framing::snapshot_payload(&plaintext).unwrap();
+                assert!(
+                    framing::decode_snapshot(&framing::encode_snapshot(&save)).is_ok(),
+                    "{id}: a valid Snapshot payload"
+                );
+                let mut loaded =
+                    SharedObjects::load(&save, actor_id(&f.resource, &signer_id)).unwrap();
+                assert_eq!(loaded.heads(), heads, "{id}: S01's save");
+            }
+            _ => unreachable!(),
+        }
     }
-    let heads = receiver.heads();
-
-    let plaintext = base::from_hex(negative["plaintext_hex"].as_str().unwrap()).unwrap();
-    let signer = negative["signer"].as_str().unwrap();
-    let (signer_id, signer_actor) = f.principals[signer];
-    assert_eq!(
-        base::to_hex(&signer_actor),
-        negative["signer_actor_hex"].as_str().unwrap(),
-        "{id}: §8 actor of the signer"
-    );
-    let err = receiver
-        .apply_unit_change(&f.resource, &signer_id, &plaintext)
-        .unwrap_err();
-    let expected = &negative["expected"];
-    assert_eq!(expected["disposition"], "reject", "{id}");
-    assert_eq!(err.code(), expected["error"]["code"].as_str(), "{id}");
-    assert_eq!(
-        err.diagnostic().map(Diagnostic::name),
-        expected["error"]["diagnostic"].as_str(),
-        "{id}"
-    );
-    assert_eq!(receiver.heads(), heads, "{id}: nothing merged");
-
-    // The same plaintext signed by its actor's Principal is a valid change.
-    let change = framing::decode_change(&plaintext).unwrap();
-    let (pavel, pavel_actor) = f.principals["pavel"];
-    assert_eq!(change.actor_id().to_bytes(), pavel_actor, "{id}");
-    assert_eq!(
-        receiver.apply_unit_change(&f.resource, &pavel, &plaintext),
-        Ok(())
-    );
 }
 
 #[test]

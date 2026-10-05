@@ -10,10 +10,13 @@ use lfcp::base::{DataUnitId, Error, FrontierRule, ResourceId};
 use lfcp::cbor;
 use lfcp::crypto;
 use lfcp::wire::data_unit::{
-    check_chain, check_equivocation, ChainReport, ChainStatus, DataUnit, ReceivedDataUnit,
+    check_chain, check_equivocation, ActorChain, ChainReport, ChainStatus, DataUnit,
+    ReceivedDataUnit,
 };
 use lfcp::wire::frontier::Frontier;
+use lfcp::wire::have::HaveVector;
 use lfcp::wire::keys::{dek_commitment, sequence_nonce, ActorKey, Dek, SnapshotKey};
+use lfcp::wire::message::WireActorHave;
 use lfcp::wire::snapshot::{ReceivedSnapshot, Snapshot, SnapshotHeader};
 use serde_json::Value as Json;
 use support::vectors::{hex, hex32, id_of, principal_by_id, Suite};
@@ -362,6 +365,90 @@ fn previous_unit_at_sequence_one_is_reported() {
         "{case_id}"
     );
     expect_invalid(case, "report", None);
+}
+
+/// The `actor_chain` cases (§26.2, G-DP1-GAP): receive the two accepted
+/// units, then `cose_sign1`, through an [`ActorChain`].
+fn receive_actor_chain(suite: &Suite, case_id: &str) -> (ActorChain, DataUnit, Vec<DataUnit>) {
+    let case = suite.case(case_id);
+    assert_eq!(case["kind"], "actor_chain", "{case_id}: kind");
+    let inputs = &case["inputs"];
+    let unit = |name: &str| verified_unit(suite, case_id, &hex(case_id, &inputs[name]));
+    let (seq1, seq2, last) = (
+        unit("accepted_seq1_cose"),
+        unit("accepted_seq2_cose"),
+        unit("cose_sign1"),
+    );
+    let signer = &suite.principals()[inputs["signer"].as_str().unwrap()];
+    let dek = case_dek(suite, case, 1);
+    for (name, u) in [("seq1", &seq1), ("seq2", &seq2), ("cose_sign1", &last)] {
+        assert_eq!(
+            &u.header().actor,
+            signer.descriptor().id(),
+            "{case_id}: {name} signer"
+        );
+        u.open(&dek)
+            .unwrap_or_else(|err| panic!("{case_id}: {name} open: {err}"));
+    }
+    let mut chain = ActorChain::new();
+    assert_eq!(
+        chain.receive(seq1.clone()),
+        [seq1],
+        "{case_id}: seq 1 accepted"
+    );
+    assert_eq!(
+        chain.receive(seq2.clone()),
+        [seq2],
+        "{case_id}: seq 2 accepted"
+    );
+    let accepted = chain.receive(last.clone());
+    (chain, last, accepted)
+}
+
+#[test]
+fn a_unit_links_across_an_abandoned_sequence() {
+    let suite = Suite::load();
+    let case_id = "chain_gap_linked_seq4";
+    let (chain, unit, accepted) = receive_actor_chain(&suite, case_id);
+    assert_eq!(unit.header().sequence, 4, "{case_id}: sequence");
+    assert_eq!(accepted, std::slice::from_ref(&unit), "{case_id}: accepted");
+    assert!(chain.held().is_empty(), "{case_id}: nothing held");
+    assert_eq!(
+        suite.case(case_id)["expected"]["valid"],
+        true,
+        "{case_id}: valid"
+    );
+
+    // The Have Vector keeps the hole: CAROL 1..2 plus 4..4.
+    let actor = unit.header().actor;
+    let mut have = HaveVector::new();
+    for sequence in [1, 2, 4] {
+        have.insert(&actor, sequence).unwrap();
+    }
+    assert_eq!(
+        have.to_wire(),
+        [WireActorHave {
+            principal: actor,
+            contiguous: 2,
+            extra: Some(vec![(4, 4)]),
+        }],
+        "{case_id}: Have Vector"
+    );
+}
+
+#[test]
+fn a_unit_naming_an_unknown_previous_is_held() {
+    let suite = Suite::load();
+    let case_id = "chain_prev_unknown_seq4";
+    let (chain, unit, accepted) = receive_actor_chain(&suite, case_id);
+    assert!(accepted.is_empty(), "{case_id}: not merged");
+    assert_eq!(chain.held(), std::slice::from_ref(&unit), "{case_id}: held");
+    assert_eq!(
+        chain.check(&unit),
+        ChainStatus::Report(ChainReport::PreviousNotLatest),
+        "{case_id}: reported"
+    );
+    expect_invalid(suite.case(case_id), "report", None);
 }
 
 #[test]
