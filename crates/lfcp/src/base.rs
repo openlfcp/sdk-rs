@@ -72,6 +72,13 @@ pub enum Error {
     /// An Ed25519 signature does not verify under strict rules, or the
     /// public key is not a usable Ed25519 key.
     SignatureInvalid,
+    /// A Principal Descriptor is not the closed map `{0, 1, 2}` of 32-byte
+    /// byte strings (§7, P1).
+    PrincipalMalformed,
+    /// A Principal Descriptor's ID is not the ID recomputed from its keys
+    /// (§7). On the wire this is `MALFORMED_MESSAGE`, except in session
+    /// context (P2); see [`Error::session_wire_code`].
+    PrincipalIdMismatch,
 }
 
 impl Error {
@@ -97,6 +104,8 @@ impl Error {
             Error::CborDepthExceeded => "CBOR_DEPTH_EXCEEDED",
             Error::CborNotDeterministic => "CBOR_NOT_DETERMINISTIC",
             Error::SignatureInvalid => "SIGNATURE_INVALID",
+            Error::PrincipalMalformed => "PRINCIPAL_MALFORMED",
+            Error::PrincipalIdMismatch => "PRINCIPAL_ID_MISMATCH",
         }
     }
 
@@ -122,8 +131,23 @@ impl Error {
             | Error::CborUnsortedKeys
             | Error::CborInvalidKeyType
             | Error::CborDepthExceeded
-            | Error::CborNotDeterministic => Some(WireCode::MalformedMessage),
+            | Error::CborNotDeterministic
+            | Error::PrincipalMalformed
+            | Error::PrincipalIdMismatch => Some(WireCode::MalformedMessage),
             Error::SignatureInvalid => Some(WireCode::InvalidSignature),
+        }
+    }
+}
+
+impl Error {
+    /// The wire code for this error when it occurs in a `HELLO` or `AUTH`
+    /// message (session context). It differs from [`Error::wire_code`] only
+    /// for [`Error::PrincipalIdMismatch`], which is `AUTH_FAILED` there
+    /// (LFCP-WIRE-01 §7, P2).
+    pub fn session_wire_code(&self) -> Option<WireCode> {
+        match self {
+            Error::PrincipalIdMismatch => Some(WireCode::AuthFailed),
+            other => other.wire_code(),
         }
     }
 }
@@ -156,6 +180,10 @@ impl fmt::Display for Error {
             Error::CborDepthExceeded => f.write_str("CBOR nesting too deep"),
             Error::CborNotDeterministic => f.write_str("not deterministic CBOR"),
             Error::SignatureInvalid => f.write_str("Ed25519 signature does not verify"),
+            Error::PrincipalMalformed => f.write_str("malformed Principal Descriptor"),
+            Error::PrincipalIdMismatch => {
+                f.write_str("Principal ID does not match the descriptor keys")
+            }
         }
     }
 }
