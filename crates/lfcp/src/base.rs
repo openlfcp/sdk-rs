@@ -69,6 +69,9 @@ pub enum Error {
     /// Bytes that decode but are not the deterministic encoding of their
     /// own value (§5.2, N7).
     CborNotDeterministic,
+    /// An Ed25519 signature does not verify under strict rules, or the
+    /// public key is not a usable Ed25519 key.
+    SignatureInvalid,
 }
 
 impl Error {
@@ -93,6 +96,7 @@ impl Error {
             Error::CborInvalidKeyType => "CBOR_INVALID_KEY_TYPE",
             Error::CborDepthExceeded => "CBOR_DEPTH_EXCEEDED",
             Error::CborNotDeterministic => "CBOR_NOT_DETERMINISTIC",
+            Error::SignatureInvalid => "SIGNATURE_INVALID",
         }
     }
 
@@ -119,6 +123,7 @@ impl Error {
             | Error::CborInvalidKeyType
             | Error::CborDepthExceeded
             | Error::CborNotDeterministic => Some(WireCode::MalformedMessage),
+            Error::SignatureInvalid => Some(WireCode::InvalidSignature),
         }
     }
 }
@@ -150,6 +155,7 @@ impl fmt::Display for Error {
             }
             Error::CborDepthExceeded => f.write_str("CBOR nesting too deep"),
             Error::CborNotDeterministic => f.write_str("not deterministic CBOR"),
+            Error::SignatureInvalid => f.write_str("Ed25519 signature does not verify"),
         }
     }
 }
