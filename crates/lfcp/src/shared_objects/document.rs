@@ -265,6 +265,18 @@ impl SharedObjects {
         validate::object_status(&self.doc, &self.objects()?, key)
     }
 
+    /// Every profile problem of the document, per invalid value (§74.1):
+    /// the root's, then each object's.
+    pub fn problems(&self) -> Result<Vec<validate::Problem>, ProfileError> {
+        let mut problems = validate::root_problems(&self.doc)?;
+        if let Ok(objects) = self.objects() {
+            for key in self.doc.keys(&objects) {
+                problems.extend(validate::object_problems(&self.doc, &objects, &key)?);
+            }
+        }
+        Ok(problems)
+    }
+
     /// The whole document as plain data, each conflicted property showing
     /// Automerge's deterministic choice (§45).
     pub fn plain(&self) -> Result<Plain, ProfileError> {

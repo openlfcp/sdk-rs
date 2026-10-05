@@ -2,10 +2,14 @@
 //!
 //! Validation is per object: one invalid object never makes the Resource
 //! or another object unusable (§77). Each failure is `PROFILE_INVALID` with
-//! exactly one [`Diagnostic`] (§74.1). Every rule below is checked, and the
-//! diagnostic reported is the first broken one in the order of the §74.1
-//! table (structure and values first, `IMMUTABLE_FIELD_MUTATED` last,
-//! SOG-2); [`Diagnostic`] is declared in that order. The rules:
+//! exactly one [`Diagnostic`] per invalid value (§74.1, SOG-2):
+//! [`object_problems`] and [`root_problems`] return one [`Problem`] per
+//! broken field, member or key, as a JSON Pointer with the first broken
+//! rule in the order of the §74.1 table (structure and values first,
+//! `IMMUTABLE_FIELD_MUTATED` last; [`Diagnostic`] is declared in that
+//! order). A field with concurrent values gets the earliest diagnostic
+//! over its values. [`object_status`] condenses an object to its first
+//! diagnostic, for callers that only quarantine. The rules:
 //!
 //! | # | Rule | Diagnostic | § |
 //! | --- | --- | --- | --- |
@@ -73,32 +77,93 @@ pub(crate) fn values_of(
         .collect()
 }
 
-/// The root rules (§15, §18, §74): `profile` is the profile identifier,
-/// `objects` and `extensions` are maps (else `INVALID_ROOT`), and every
-/// root `extensions` key is a reverse-domain name (else
-/// `INVALID_EXTENSION_NAMESPACE`).
-pub fn validate_root(doc: &AutoCommit) -> Result<(), ProfileError> {
-    let profile = values_of(doc, &ROOT, "profile")?;
-    let is_map = |key: &str| -> Result<bool, ProfileError> {
-        let all = doc.get_all(ROOT, key)?;
-        Ok(!all.is_empty()
-            && all
-                .iter()
-                .all(|(v, _)| matches!(v, Value::Object(ObjType::Map))))
-    };
-    let profile_ok = !profile.is_empty() && profile.iter().all(|p| p.as_str() == Some(PROFILE));
-    if !(profile_ok && is_map("objects")? && is_map("extensions")?) {
-        return Err(Diagnostic::InvalidRoot.into());
-    }
-    for (_, extensions) in doc.get_all(ROOT, "extensions")? {
-        if !doc.keys(&extensions).all(|k| values::is_reverse_domain(&k)) {
-            return Err(Diagnostic::InvalidExtensionNamespace.into());
-        }
-    }
-    Ok(())
+/// One profile-invalid value (§74.1): where it is, as an RFC 6901 JSON
+/// Pointer into the document, and its diagnostic.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Problem {
+    /// The JSON Pointer of the invalid value (or of the object, for a
+    /// missing field).
+    pub pointer: String,
+    /// The diagnostic: for a value that breaks several rules, or a field
+    /// whose concurrent values break different ones, the first in §74.1
+    /// table order.
+    pub diagnostic: Diagnostic,
 }
 
-/// The profile state of the object stored under `key` in `objects`.
+/// `segments` as an RFC 6901 JSON Pointer.
+fn pointer(segments: &[&str]) -> String {
+    segments
+        .iter()
+        .map(|s| format!("/{}", s.replace('~', "~0").replace('/', "~1")))
+        .collect()
+}
+
+/// Problems gathered for pointers; each pointer keeps its earliest
+/// diagnostic in §74.1 table order (SOG-2).
+#[derive(Default)]
+struct Problems(std::collections::BTreeMap<String, Diagnostic>);
+
+impl Problems {
+    fn add(&mut self, segments: &[&str], diagnostic: Diagnostic) {
+        let entry = self.0.entry(pointer(segments)).or_insert(diagnostic);
+        *entry = (*entry).min(diagnostic);
+    }
+
+    fn into_vec(self) -> Vec<Problem> {
+        self.0
+            .into_iter()
+            .map(|(pointer, diagnostic)| Problem {
+                pointer,
+                diagnostic,
+            })
+            .collect()
+    }
+}
+
+/// The root problems (§15, §18, §74): `profile` that is not the profile
+/// identifier, `objects` or `extensions` missing or not a map
+/// (`INVALID_ROOT`), and every root `extensions` key that is not a
+/// reverse-domain name (`INVALID_EXTENSION_NAMESPACE`).
+pub fn root_problems(doc: &AutoCommit) -> Result<Vec<Problem>, ProfileError> {
+    let mut problems = Problems::default();
+    let profile = values_of(doc, &ROOT, "profile")?;
+    if profile.is_empty() || profile.iter().any(|p| p.as_str() != Some(PROFILE)) {
+        problems.add(&["profile"], Diagnostic::InvalidRoot);
+    }
+    for key in ["objects", "extensions"] {
+        let all = doc.get_all(ROOT, key)?;
+        if all.is_empty()
+            || all
+                .iter()
+                .any(|(v, _)| !matches!(v, Value::Object(ObjType::Map)))
+        {
+            problems.add(&[key], Diagnostic::InvalidRoot);
+        }
+    }
+    for (value, extensions) in doc.get_all(ROOT, "extensions")? {
+        if matches!(value, Value::Object(ObjType::Map)) {
+            for key in doc.keys(&extensions) {
+                if !values::is_reverse_domain(&key) {
+                    problems.add(&["extensions", &key], Diagnostic::InvalidExtensionNamespace);
+                }
+            }
+        }
+    }
+    Ok(problems.into_vec())
+}
+
+/// The root rules as one result: `Ok`, or the first root problem's
+/// diagnostic in §74.1 table order.
+pub fn validate_root(doc: &AutoCommit) -> Result<(), ProfileError> {
+    match root_problems(doc)?.into_iter().map(|p| p.diagnostic).min() {
+        None => Ok(()),
+        Some(diagnostic) => Err(diagnostic.into()),
+    }
+}
+
+/// The profile state of the object stored under `key` in `objects`: a
+/// convenience over [`object_problems`], whose first diagnostic in §74.1
+/// table order it reports.
 pub fn object_status(
     doc: &AutoCommit,
     objects: &ObjId,
@@ -108,36 +173,60 @@ pub fn object_status(
     if entries.len() > 1 {
         return Ok(ObjectStatus::Collision);
     }
+    if entries.is_empty() {
+        return Err(ProfileError::UnknownObject);
+    }
+    Ok(
+        match object_problems(doc, objects, key)?
+            .into_iter()
+            .map(|p| p.diagnostic)
+            .min()
+        {
+            None => ObjectStatus::Ready,
+            Some(diagnostic) => ObjectStatus::Invalid(diagnostic),
+        },
+    )
+}
+
+/// Rules 2–17 for the object stored under `key` in `objects`: one
+/// [`Problem`] per invalid value (SOG-2). Pointers are
+/// `/objects/<key>[/<field>[/<member>]]`; a missing field points at the
+/// object. Concurrent objects under one key (rule 1, `OBJECT_ID_COLLISION`)
+/// are not a diagnostic: use [`object_status`].
+pub fn object_problems(
+    doc: &AutoCommit,
+    objects: &ObjId,
+    key: &str,
+) -> Result<Vec<Problem>, ProfileError> {
+    use Diagnostic::*;
+    let mut problems = Problems::default();
+    let entries = doc.get_all(objects, key)?;
     let Some((value, obj)) = entries.into_iter().next() else {
         return Err(ProfileError::UnknownObject);
     };
-    Ok(match check_object(doc, key, &value, &obj)? {
-        Ok(()) => ObjectStatus::Ready,
-        Err(diagnostic) => ObjectStatus::Invalid(diagnostic),
-    })
-}
+    fn at<'a>(key: &'a str, field: &'a str) -> [&'a str; 3] {
+        ["objects", key, field]
+    }
 
-/// Rules 2–17 for one object. The outer `Result` carries Automerge
-/// failures, the inner one the diagnostic: every failure is collected, and
-/// the one reported is the first in the §74.1 table order, so a value that
-/// breaks several rules, or a field whose concurrent values break
-/// different ones, gets the earliest diagnostic (SOG-2).
-fn check_object(
-    doc: &AutoCommit,
-    key: &str,
-    value: &Value<'_>,
-    obj: &ObjId,
-) -> Result<Result<(), Diagnostic>, ProfileError> {
-    use Diagnostic::*;
-    let mut failures: Vec<Diagnostic> = Vec::new();
+    if ObjectId::parse(key).is_err() {
+        problems.add(&["objects", key], InvalidObjectId);
+    }
+    // §15, §74.1 (SOG-2): an `objects` entry that is not a map.
+    if !matches!(value, Value::Object(ObjType::Map)) {
+        problems.add(&["objects", key], InvalidFieldType);
+        return Ok(problems.into_vec());
+    }
+    let obj = &obj;
+    let present =
+        |field: &str| -> Result<bool, ProfileError> { Ok(!doc.get_all(obj, field)?.is_empty()) };
     // Every value of `field` must pass `check`; an absent field passes.
-    let each = |failures: &mut Vec<Diagnostic>,
+    let each = |problems: &mut Problems,
                 field: &str,
                 check: &dyn Fn(&Plain) -> Result<(), Diagnostic>|
      -> Result<(), ProfileError> {
         for value in values_of(doc, obj, field)? {
             if let Err(d) = check(&value) {
-                failures.push(d);
+                problems.add(&at(key, field), d);
             }
         }
         Ok(())
@@ -153,22 +242,12 @@ fn check_object(
         }
     };
 
-    if ObjectId::parse(key).is_err() {
-        failures.push(InvalidObjectId);
-    }
-    // §15, §74.1 (SOG-2): an `objects` entry that is not a map.
-    if !matches!(value, Value::Object(ObjType::Map)) {
-        failures.push(InvalidFieldType);
-        return Ok(first(failures));
-    }
-    let present =
-        |field: &str| -> Result<bool, ProfileError> { Ok(!doc.get_all(obj, field)?.is_empty()) };
     for field in BASE_FIELDS {
         if !present(field)? {
-            failures.push(MissingRequiredField);
+            problems.add(&["objects", key], MissingRequiredField);
         }
     }
-    each(&mut failures, "id", &|p| {
+    each(&mut problems, "id", &|p| {
         let id = text(p)?;
         ObjectId::parse(&id).map_err(|_| InvalidObjectId)?;
         if id == key {
@@ -177,25 +256,35 @@ fn check_object(
             Err(ObjectIdMismatch)
         }
     })?;
-    each(&mut failures, "type", &|p| text(p).map(|_| ()))?;
-    each(&mut failures, "lifecycle", &|p| {
+    each(&mut problems, "type", &|p| text(p).map(|_| ()))?;
+    each(&mut problems, "lifecycle", &|p| {
         enumerated(p, values::is_lifecycle)
     })?;
-    each(&mut failures, "created_by", &|p| {
+    each(&mut problems, "created_by", &|p| {
         parse_principal_ref(&text(p)?).map(|_| ())
     })?;
     // §28 (SOG-1): a real date and time, for every object type.
-    each(&mut failures, "created_at", &|p| {
+    each(&mut problems, "created_at", &|p| {
         values::is_utc_timestamp(&text(p)?)
             .then_some(())
             .ok_or(InvalidTimestamp)
     })?;
-    // §29 (SOG-2): an object's `extensions` that is not a map.
-    each(&mut failures, "extensions", &|p| match p.as_map() {
-        None => Err(InvalidFieldType),
-        Some(map) if map.keys().all(|k| values::is_reverse_domain(k)) => Ok(()),
-        Some(_) => Err(InvalidExtensionNamespace),
-    })?;
+    // §29 (SOG-2): an object's `extensions` that is not a map; §18: each
+    // key a reverse-domain name, pointed at by key.
+    for (value, extensions) in doc.get_all(obj, "extensions")? {
+        if matches!(value, Value::Object(ObjType::Map)) {
+            for name in doc.keys(&extensions) {
+                if !values::is_reverse_domain(&name) {
+                    problems.add(
+                        &["objects", key, "extensions", &name],
+                        InvalidExtensionNamespace,
+                    );
+                }
+            }
+        } else {
+            problems.add(&at(key, "extensions"), InvalidFieldType);
+        }
+    }
 
     let is_task = values_of(doc, obj, "type")?
         .iter()
@@ -203,37 +292,50 @@ fn check_object(
     if is_task {
         for field in TASK_FIELDS {
             if !present(field)? {
-                failures.push(MissingRequiredField);
+                problems.add(&["objects", key], MissingRequiredField);
             }
         }
-        each(&mut failures, "title", &|p| text(p).map(|_| ()))?;
-        each(&mut failures, "status", &|p| {
+        each(&mut problems, "title", &|p| text(p).map(|_| ()))?;
+        each(&mut problems, "status", &|p| {
             enumerated(p, values::is_status)
         })?;
-        each(&mut failures, "priority", &|p| {
+        each(&mut problems, "priority", &|p| {
             enumerated(p, values::is_priority)
         })?;
         for field in DATE_FIELDS {
             // §35, §36 (SOG-2): null is "no date"; anything but a valid
             // Local Date string, a non-string included, is
             // INVALID_LOCAL_DATE.
-            each(&mut failures, field, &|p| match p {
+            each(&mut problems, field, &|p| match p {
                 Plain::Null => Ok(()),
                 Plain::Str(s) if values::is_local_date(s) => Ok(()),
                 _ => Err(InvalidLocalDate),
             })?;
         }
+        // §39, §40, §42: a collection is a map whose members are `true`
+        // (every concurrent value of a member) and whose keys are valid
+        // tags or Principal references; problems point at the member.
         let tag_ok = |tag: &str| values::is_tag(tag).then_some(()).ok_or(InvalidTag);
         let ref_ok = |r: &str| parse_principal_ref(r).map(|_| ());
-        each(&mut failures, "tags", &|p| collection(p, &tag_ok))?;
-        each(&mut failures, "assignees", &|p| collection(p, &ref_ok))?;
-        // A collection member written concurrently by two peers has two
-        // `true` values; any non-true one is invalid.
-        for field in ["tags", "assignees"] {
-            if let Some((Value::Object(ObjType::Map), map)) = doc.get(obj, field)? {
+        for (field, key_ok) in [
+            ("tags", &tag_ok as &dyn Fn(&str) -> Result<(), Diagnostic>),
+            ("assignees", &ref_ok),
+        ] {
+            for (value, map) in doc.get_all(obj, field)? {
+                if !matches!(value, Value::Object(ObjType::Map)) {
+                    problems.add(&at(key, field), InvalidCollectionRepresentation);
+                    continue;
+                }
                 for member in doc.keys(&map) {
-                    if let Err(d) = each_member(doc, &map, &member)? {
-                        failures.push(d);
+                    let here = ["objects", key, field, member.as_str()];
+                    if let Err(d) = key_ok(&member) {
+                        problems.add(&here, d);
+                    }
+                    if values_of(doc, &map, &member)?
+                        .iter()
+                        .any(|v| *v != Plain::Bool(true))
+                    {
+                        problems.add(&here, InvalidCollectionRepresentation);
                     }
                 }
             }
@@ -249,45 +351,9 @@ fn check_object(
                 .map(|(v, id)| values::read(doc, v, id))
                 .collect::<Result<_, _>>()?;
             if at_creation != values_of(doc, obj, field)? {
-                failures.push(ImmutableFieldMutated);
+                problems.add(&at(key, field), ImmutableFieldMutated);
             }
         }
     }
-    Ok(first(failures))
-}
-
-/// The diagnostic first in the §74.1 table order, if any (SOG-2).
-fn first(failures: Vec<Diagnostic>) -> Result<(), Diagnostic> {
-    failures.into_iter().min().map_or(Ok(()), Err)
-}
-
-/// A collection (§39, §42): a map whose members are `true` and whose keys
-/// pass `key_ok`.
-fn collection(
-    p: &Plain,
-    key_ok: &dyn Fn(&str) -> Result<(), Diagnostic>,
-) -> Result<(), Diagnostic> {
-    let map = p
-        .as_map()
-        .ok_or(Diagnostic::InvalidCollectionRepresentation)?;
-    for (key, member) in map {
-        if *member != Plain::Bool(true) {
-            return Err(Diagnostic::InvalidCollectionRepresentation);
-        }
-        key_ok(key)?;
-    }
-    Ok(())
-}
-
-fn each_member(
-    doc: &AutoCommit,
-    map: &ObjId,
-    member: &str,
-) -> Result<Result<(), Diagnostic>, ProfileError> {
-    let all = values_of(doc, map, member)?;
-    Ok(if all.iter().all(|v| *v == Plain::Bool(true)) {
-        Ok(())
-    } else {
-        Err(Diagnostic::InvalidCollectionRepresentation)
-    })
+    Ok(problems.into_vec())
 }
