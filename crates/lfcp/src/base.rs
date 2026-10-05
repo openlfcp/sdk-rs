@@ -79,6 +79,22 @@ pub enum Error {
     /// (§7). On the wire this is `MALFORMED_MESSAGE`, except in session
     /// context (P2); see [`Error::session_wire_code`].
     PrincipalIdMismatch,
+    /// A signed object carries a CBOR tag, such as tag 18 (§10, N1).
+    CoseTagged,
+    /// A signed object is not a four-element array of the §10 types.
+    CoseMalformed,
+    /// The protected header is not exactly `{1: -8, 4: principal-id}`
+    /// (§10.1).
+    CoseProtectedHeader,
+    /// The unprotected header is not the empty map (§10.2).
+    CoseUnprotectedNotEmpty,
+    /// The payload is absent (`null`, a detached payload; §10.3).
+    CosePayloadAbsent,
+    /// The signature is not 64 bytes long (§10).
+    CoseSignatureLength,
+    /// The `kid` does not name the Principal the object requires as signer
+    /// (§10.5, G1/N2).
+    CoseKidMismatch,
 }
 
 impl Error {
@@ -106,6 +122,13 @@ impl Error {
             Error::SignatureInvalid => "SIGNATURE_INVALID",
             Error::PrincipalMalformed => "PRINCIPAL_MALFORMED",
             Error::PrincipalIdMismatch => "PRINCIPAL_ID_MISMATCH",
+            Error::CoseTagged => "COSE_TAGGED",
+            Error::CoseMalformed => "COSE_MALFORMED",
+            Error::CoseProtectedHeader => "COSE_PROTECTED_HEADER",
+            Error::CoseUnprotectedNotEmpty => "COSE_UNPROTECTED_NOT_EMPTY",
+            Error::CosePayloadAbsent => "COSE_PAYLOAD_ABSENT",
+            Error::CoseSignatureLength => "COSE_SIGNATURE_LENGTH",
+            Error::CoseKidMismatch => "COSE_KID_MISMATCH",
         }
     }
 
@@ -133,8 +156,14 @@ impl Error {
             | Error::CborDepthExceeded
             | Error::CborNotDeterministic
             | Error::PrincipalMalformed
-            | Error::PrincipalIdMismatch => Some(WireCode::MalformedMessage),
-            Error::SignatureInvalid => Some(WireCode::InvalidSignature),
+            | Error::PrincipalIdMismatch
+            | Error::CoseTagged
+            | Error::CoseMalformed
+            | Error::CoseProtectedHeader
+            | Error::CoseUnprotectedNotEmpty
+            | Error::CosePayloadAbsent
+            | Error::CoseSignatureLength => Some(WireCode::MalformedMessage),
+            Error::SignatureInvalid | Error::CoseKidMismatch => Some(WireCode::InvalidSignature),
         }
     }
 }
@@ -184,6 +213,13 @@ impl fmt::Display for Error {
             Error::PrincipalIdMismatch => {
                 f.write_str("Principal ID does not match the descriptor keys")
             }
+            Error::CoseTagged => f.write_str("tagged COSE_Sign1"),
+            Error::CoseMalformed => f.write_str("malformed COSE_Sign1"),
+            Error::CoseProtectedHeader => f.write_str("protected header is not {1: -8, 4: kid}"),
+            Error::CoseUnprotectedNotEmpty => f.write_str("unprotected header is not empty"),
+            Error::CosePayloadAbsent => f.write_str("COSE payload is absent"),
+            Error::CoseSignatureLength => f.write_str("signature is not 64 bytes"),
+            Error::CoseKidMismatch => f.write_str("kid is not the required signer"),
         }
     }
 }
