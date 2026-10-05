@@ -124,8 +124,13 @@ pub enum Error {
     /// field types its CDDL gives (§13–§24).
     ControlRecordMalformed,
     /// A Control Record type in the reserved core range 9–31 (§14:
-    /// "Unknown core Control Record types MUST cause validation failure").
+    /// "Unknown core Control Record types MUST cause validation failure,
+    /// with `INVALID_CONTROL_CHAIN`").
     ControlUnknownCoreType(u64),
+    /// A Control Record whose issuer the receiver cannot resolve to a
+    /// Principal Descriptor, so its signature cannot be checked (§13.1:
+    /// `MISSING_DEPENDENCY`).
+    IssuerUnknown(PrincipalId),
     /// Records do not form a valid Control Chain (§13.1, §15).
     InvalidControlChain(ChainRule),
     /// Two different validly signed records reference the same previous
@@ -280,8 +285,6 @@ pub enum ChainRule {
     GenesisMissing,
     /// Genesis has a previous record (§13.1: `prev_control_id = null`).
     GenesisPrevious,
-    /// Genesis is not issued by the owner its body names (§15).
-    GenesisSigner,
     /// A Genesis record after the start of the chain.
     GenesisNotFirst,
     /// `control_seq` is not the previous sequence plus one.
@@ -290,9 +293,6 @@ pub enum ChainRule {
     PreviousMismatch,
     /// The record names another Resource than the chain.
     ResourceMismatch,
-    /// No descriptor is known for the issuer, so its signature cannot be
-    /// checked.
-    IssuerUnknown,
     /// A Key Epoch's new epoch is not the previous Data Epoch plus one
     /// (§19).
     EpochNotNext,
@@ -364,6 +364,7 @@ impl Error {
             Error::SnapshotMalformed => "SNAPSHOT_MALFORMED",
             Error::ControlRecordMalformed => "CONTROL_RECORD_MALFORMED",
             Error::ControlUnknownCoreType(_) => "CONTROL_UNKNOWN_CORE_TYPE",
+            Error::IssuerUnknown(_) => "ISSUER_UNKNOWN",
             Error::InvalidControlChain(_) => "INVALID_CONTROL_CHAIN",
             Error::ControlConflict => "CONTROL_CONFLICT",
             Error::HpkeOpenFailed => "HPKE_OPEN_FAILED",
@@ -435,35 +436,32 @@ impl Error {
             | Error::MessageMalformed
             | Error::MessageReservedEnvelopeKey(_) => Some(WireCode::MalformedMessage),
             Error::MessageTooLarge { .. } => Some(WireCode::MessageTooLarge),
-            // Provisional: §33 names no code for an unknown or un-negotiated
-            // message type; an open question for the project owner.
+            // §33 (G-MSG1).
             Error::UnsupportedMessageType(_) => Some(WireCode::ProtocolUnsupported),
             Error::AuthFailed(_) => Some(WireCode::AuthFailed),
+            // §34: ERROR(PROTOCOL_UNSUPPORTED), then close (G-MSG7).
             Error::NoCommonWireProfile => Some(WireCode::ProtocolUnsupported),
             Error::ControlHeadMismatch { .. } => Some(WireCode::ControlHeadMismatch),
             Error::IllegalTransition { .. } => None,
-            // Provisional: §64 says the server MUST reject these messages
-            // before READY but names no code; the session is not yet
-            // authorized for them (cf. §41). An open question (G-SM2).
+            // §64 (G-MSG7).
             Error::SessionNotReady(_) => Some(WireCode::AuthorizationFailed),
             Error::AuthorizationFailed(_) => Some(WireCode::AuthorizationFailed),
-            // Provisional: MVP-SCOPE §4 defers these record types and names no
-            // code for refusing them; PROTOCOL_UNSUPPORTED says "not
-            // implemented here" without blaming the signature or the issuer.
+            // .github MVP-0.1-PROTOCOL-SCOPE §4 (DV1).
             Error::UnsupportedInMvp(_) => Some(WireCode::ProtocolUnsupported),
-            // Provisional: no section names a code for an object that
-            // references a Control Head the receiver does not have.
-            Error::UnknownControlHead => Some(WireCode::MissingDependency),
-            // Provisional: §26.3 step 4 requires a recognized epoch but
-            // names no code; the object depends on Control state its
-            // referenced head does not have.
+            // §13.1 (G-CP3): an object referencing a Control Head the
+            // receiver does not have, or an issuer it cannot resolve.
+            Error::UnknownControlHead | Error::IssuerUnknown(_) => {
+                Some(WireCode::MissingDependency)
+            }
+            // PROVISIONAL (unknown epoch code): §26.3 step 4 requires a
+            // recognized epoch but names no code; the object depends on
+            // Control state its referenced head does not have.
             Error::UnknownDataEpoch(_) => Some(WireCode::MissingDependency),
             Error::StaleDataEpoch(_) => Some(WireCode::StaleDataEpoch),
-            // Provisional: whether an unknown core type is MALFORMED_MESSAGE
-            // or INVALID_CONTROL_CHAIN is an open question for the project
-            // owner (§14 names no code).
-            Error::ControlUnknownCoreType(_) => Some(WireCode::MalformedMessage),
-            Error::InvalidControlChain(_) => Some(WireCode::InvalidControlChain),
+            // §14 (W1), §13.1 (G-CP3).
+            Error::ControlUnknownCoreType(_) | Error::InvalidControlChain(_) => {
+                Some(WireCode::InvalidControlChain)
+            }
             Error::ControlConflict => Some(WireCode::ControlConflict),
             Error::ActorEquivocation => Some(WireCode::ActorEquivocation),
             Error::SignatureInvalid | Error::CoseKidMismatch => Some(WireCode::InvalidSignature),
@@ -553,6 +551,7 @@ impl fmt::Display for Error {
             Error::ControlUnknownCoreType(code) => {
                 write!(f, "unknown core Control Record type {code}")
             }
+            Error::IssuerUnknown(issuer) => write!(f, "no descriptor for issuer {issuer:?}"),
             Error::InvalidControlChain(rule) => write!(f, "invalid Control Chain: {rule:?}"),
             Error::ControlConflict => f.write_str("Control Fork"),
             Error::HpkeOpenFailed => f.write_str("HPKE open failed"),

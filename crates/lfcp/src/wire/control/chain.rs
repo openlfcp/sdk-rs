@@ -3,12 +3,14 @@
 //! | Rule | § |
 //! | --- | --- |
 //! | The chain starts with Genesis: type 0, sequence 0, previous `null` | §13.1, §15 |
-//! | Genesis is issued and signed by the owner in its body | §15 |
+//! | Genesis is issued and signed by the owner in its body, else `INVALID_SIGNATURE` | §15 |
 //! | Genesis occurs only at the start | §13.1, §15 |
 //! | `control_seq = previous.control_seq + 1` | §13.1 |
 //! | `prev_control_id = previous.record_id` | §13.1 |
 //! | One Resource ID throughout | §13 |
-//! | Every record parses and is signed by its issuer | §10, §13 (G-RS1) |
+//! | Every record parses and is signed by its issuer (`kid` = field 4), else `INVALID_SIGNATURE` | §10, §13 |
+//! | An issuer with no known descriptor is `MISSING_DEPENDENCY` | §13.1 |
+//! | Any other structure violation is `INVALID_CONTROL_CHAIN` | §13.1 |
 //! | Two valid records with one predecessor are a fork: `CONTROL_CONFLICT`, no winner | §13.2 |
 //!
 //! [`validate_chain`] is a pure function over records in chain order. It
@@ -277,7 +279,9 @@ fn check_placement(
 }
 
 /// Verify the record against its issuer. Genesis is verified against the
-/// owner in its own body, which must be the issuer (§15).
+/// owner in its own body; an issuer other than that owner is not the
+/// signer Genesis requires, [`Error::CoseKidMismatch`] (§15:
+/// `INVALID_SIGNATURE`).
 fn verify(
     record: ReceivedControlRecord,
     directory: &HashMap<PrincipalId, PrincipalDescriptor>,
@@ -287,7 +291,7 @@ fn verify(
     let descriptor = match record.body() {
         ControlBody::Genesis(genesis) => {
             if genesis.owner.id() != &issuer {
-                return Err(Error::InvalidControlChain(ChainRule::GenesisSigner));
+                return Err(Error::CoseKidMismatch);
             }
             genesis.owner.clone()
         }
@@ -296,7 +300,7 @@ fn verify(
             .cloned()
             .or_else(|| policy.resolve_issuer(&issuer))
             .or_else(|| transfer_new_owner(record.body(), &issuer))
-            .ok_or(Error::InvalidControlChain(ChainRule::IssuerUnknown))?,
+            .ok_or(Error::IssuerUnknown(issuer))?,
     };
     record.verify(&descriptor)
 }
@@ -504,7 +508,7 @@ mod tests {
                 ChainStart::Genesis,
                 &mut SignaturesOnly
             )),
-            (1, Error::InvalidControlChain(ChainRule::IssuerUnknown))
+            (1, Error::IssuerUnknown(*stranger.descriptor().id()))
         );
         let known = stranger.descriptor().clone();
         let mut policy = ResolveWith(|id: &PrincipalId| (id == known.id()).then(|| known.clone()));

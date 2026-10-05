@@ -1005,6 +1005,11 @@ mod tests {
                 Err(Error::ControlUnknownCoreType(code))
             );
         }
+        assert_eq!(
+            Error::ControlUnknownCoreType(9).wire_code().unwrap().name(),
+            "INVALID_CONTROL_CHAIN",
+            "§14, W1"
+        );
         assert!(matches!(
             ControlBody::from_value(FIRST_EXTENSION_TYPE, &Value::Null),
             Ok(ControlBody::Extension {

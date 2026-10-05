@@ -336,7 +336,9 @@ mod synthetic {
             ..f.c0.header().clone()
         };
         let c0 = sign(header, &f.c0, &f.bob);
-        assert_eq!(failure(&[&c0]), (0, chain(ChainRule::GenesisSigner)));
+        let (index, err) = failure(&[&c0]);
+        assert_eq!((index, &err), (0, &Error::CoseKidMismatch));
+        assert_eq!(err.wire_code().unwrap().name(), "INVALID_SIGNATURE", "S2");
     }
 
     #[test]
