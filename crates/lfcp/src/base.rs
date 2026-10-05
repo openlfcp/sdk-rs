@@ -386,48 +386,87 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// The LFCP-WIRE-01 §62 error codes this crate produces.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum WireCode {
-    /// `MALFORMED_MESSAGE` (2).
-    MalformedMessage,
-    /// `AUTH_FAILED` (3).
-    AuthFailed,
-    /// `INVALID_SIGNATURE` (7).
-    InvalidSignature,
-    /// `INVALID_CONTROL_CHAIN` (8).
-    InvalidControlChain,
-    /// `CONTROL_CONFLICT` (9).
-    ControlConflict,
-    /// `ACTOR_EQUIVOCATION` (16).
-    ActorEquivocation,
+macro_rules! wire_codes {
+    ($($(#[$doc:meta])* $variant:ident = $number:literal, $name:literal;)*) => {
+        /// The LFCP-WIRE-01 §62 error code registry.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+        #[non_exhaustive]
+        pub enum WireCode {
+            $($(#[$doc])* $variant,)*
+        }
+
+        impl WireCode {
+            /// The numeric code from the §62 registry.
+            pub fn number(self) -> u64 {
+                match self {
+                    $(WireCode::$variant => $number,)*
+                }
+            }
+
+            /// The registry name, such as `MALFORMED_MESSAGE`.
+            pub fn name(self) -> &'static str {
+                match self {
+                    $(WireCode::$variant => $name,)*
+                }
+            }
+
+            /// The code with this number, if the registry defines one. Codes
+            /// 23–127 are reserved for LFCP core and have no name yet.
+            pub fn from_number(number: u64) -> Option<WireCode> {
+                match number {
+                    $($number => Some(WireCode::$variant),)*
+                    _ => None,
+                }
+            }
+        }
+    };
 }
 
-impl WireCode {
-    /// The numeric code from the §62 registry.
-    pub fn number(self) -> u64 {
-        match self {
-            WireCode::MalformedMessage => 2,
-            WireCode::AuthFailed => 3,
-            WireCode::InvalidSignature => 7,
-            WireCode::InvalidControlChain => 8,
-            WireCode::ControlConflict => 9,
-            WireCode::ActorEquivocation => 16,
-        }
-    }
-
-    /// The registry name, such as `MALFORMED_MESSAGE`.
-    pub fn name(self) -> &'static str {
-        match self {
-            WireCode::MalformedMessage => "MALFORMED_MESSAGE",
-            WireCode::AuthFailed => "AUTH_FAILED",
-            WireCode::InvalidSignature => "INVALID_SIGNATURE",
-            WireCode::InvalidControlChain => "INVALID_CONTROL_CHAIN",
-            WireCode::ControlConflict => "CONTROL_CONFLICT",
-            WireCode::ActorEquivocation => "ACTOR_EQUIVOCATION",
-        }
-    }
+wire_codes! {
+    /// `PROTOCOL_UNSUPPORTED` (1).
+    ProtocolUnsupported = 1, "PROTOCOL_UNSUPPORTED";
+    /// `MALFORMED_MESSAGE` (2).
+    MalformedMessage = 2, "MALFORMED_MESSAGE";
+    /// `AUTH_FAILED` (3).
+    AuthFailed = 3, "AUTH_FAILED";
+    /// `AUTHORIZATION_FAILED` (4).
+    AuthorizationFailed = 4, "AUTHORIZATION_FAILED";
+    /// `RESOURCE_NOT_FOUND` (5).
+    ResourceNotFound = 5, "RESOURCE_NOT_FOUND";
+    /// `RESOURCE_NOT_HOSTED` (6).
+    ResourceNotHosted = 6, "RESOURCE_NOT_HOSTED";
+    /// `INVALID_SIGNATURE` (7).
+    InvalidSignature = 7, "INVALID_SIGNATURE";
+    /// `INVALID_CONTROL_CHAIN` (8).
+    InvalidControlChain = 8, "INVALID_CONTROL_CHAIN";
+    /// `CONTROL_CONFLICT` (9).
+    ControlConflict = 9, "CONTROL_CONFLICT";
+    /// `CONTROL_HEAD_MISMATCH` (10).
+    ControlHeadMismatch = 10, "CONTROL_HEAD_MISMATCH";
+    /// `NOT_CONTROL_COORDINATOR` (11).
+    NotControlCoordinator = 11, "NOT_CONTROL_COORDINATOR";
+    /// `PROFILE_UNSUPPORTED` (12).
+    ProfileUnsupported = 12, "PROFILE_UNSUPPORTED";
+    /// `KEY_PACKAGE_UNAVAILABLE` (13).
+    KeyPackageUnavailable = 13, "KEY_PACKAGE_UNAVAILABLE";
+    /// `STALE_DATA_EPOCH` (14).
+    StaleDataEpoch = 14, "STALE_DATA_EPOCH";
+    /// `MISSING_DEPENDENCY` (15).
+    MissingDependency = 15, "MISSING_DEPENDENCY";
+    /// `ACTOR_EQUIVOCATION` (16).
+    ActorEquivocation = 16, "ACTOR_EQUIVOCATION";
+    /// `RATE_LIMITED` (17).
+    RateLimited = 17, "RATE_LIMITED";
+    /// `QUOTA_EXCEEDED` (18).
+    QuotaExceeded = 18, "QUOTA_EXCEEDED";
+    /// `MESSAGE_TOO_LARGE` (19).
+    MessageTooLarge = 19, "MESSAGE_TOO_LARGE";
+    /// `HOSTING_DENIED` (20).
+    HostingDenied = 20, "HOSTING_DENIED";
+    /// `RESOURCE_TOMBSTONED` (21).
+    ResourceTombstoned = 21, "RESOURCE_TOMBSTONED";
+    /// `INTERNAL_ERROR` (22).
+    InternalError = 22, "INTERNAL_ERROR";
 }
 
 /// Copy `bytes` into a fixed-size array, or fail with
@@ -740,6 +779,20 @@ mod tests {
                 expected: 32,
                 actual: 31
             })
+        );
+    }
+
+    #[test]
+    fn wire_codes_cover_the_section_62_registry() {
+        for number in 1..=22 {
+            let code = WireCode::from_number(number).unwrap();
+            assert_eq!(code.number(), number);
+        }
+        assert_eq!(WireCode::from_number(0), None);
+        assert_eq!(WireCode::from_number(23), None);
+        assert_eq!(
+            WireCode::from_number(19).unwrap().name(),
+            "MESSAGE_TOO_LARGE"
         );
     }
 
