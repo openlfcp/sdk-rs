@@ -44,6 +44,11 @@ hpke = { version = "=0.14.1", default-features = false, features = ["x25519", "c
 # features of its own: the defaults are empty and the wasm and indexing
 # features are not needed.
 automerge = { version = "=0.12.0", default-features = false, optional = true }
+# Raw DEFLATE for the Snapshot expansion check (SHARED-OBJECTS-PROFILE-01
+# §13.1): a deflated column is inflated under a running cap before
+# Automerge loads the save. The same version and pure-Rust backend
+# automerge already pulls in (zlib-rs), so nothing new enters the tree.
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"], optional = true }
 # Wipes DEKs, derived keys and HPKE plaintexts on drop; "alloc" covers the
 # Vec-held HPKE plaintext. Already in the tree through the
 # dalek crates; used directly for this crate's own key types.
@@ -55,10 +60,14 @@ zeroize = { version = "1", default-features = false, features = ["alloc"] }
 # (AGENT-OPERATING-GUIDE §6.4).
 default = []
 # lfcp::shared_objects: the Shared Objects profile on Automerge.
-shared-objects = ["dep:automerge"]
+shared-objects = ["dep:automerge", "dep:flate2"]
 
 [[test]]
 name = "shared_objects_vectors"
+required-features = ["shared-objects"]
+
+[[test]]
+name = "expansion"
 required-features = ["shared-objects"]
 
 [[example]]

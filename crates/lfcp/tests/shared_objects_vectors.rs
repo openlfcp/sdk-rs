@@ -1176,8 +1176,8 @@ fn a_change_must_carry_the_signers_actor() {
     let suite = suite();
     let f = Fixtures::load(&suite);
     let mut andrey = f.doc("andrey");
-    let mut change = andrey.initialize().unwrap();
-    let plaintext = framing::encode_change(&change.bytes());
+    let change = andrey.initialize().unwrap();
+    let plaintext = framing::encode_change(change.raw_bytes());
     let (pavel, _) = f.principals["pavel"];
     let (andrey_id, _) = f.principals["andrey"];
 

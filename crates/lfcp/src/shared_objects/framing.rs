@@ -11,17 +11,21 @@
 //! `PROFILE_INVALID` and `INVALID_AUTOMERGE_BYTES` (§74.1). Version 1
 //! carries one change per Data Unit (§12).
 //!
-//! Chunks (SC-CHUNK): a Data Unit carries one change chunk (uncompressed
-//! or compressed) and a Snapshot one document chunk. The chunk checksum (the
-//! header's four bytes, the first four of the chunk's SHA-256 hash) must
-//! match even where Automerge would parse the chunk: automerge 0.12's
-//! `Change::from_bytes` does not check it, so [`decode_change`] compares it
-//! with the decoded change's hash; `AutoCommit::load` checks a document's.
+//! Chunks (SC-CHUNK): a Data Unit carries one uncompressed change chunk
+//! and a Snapshot one document chunk, each checked against its expansion
+//! limits before Automerge sees it (§11.1, §13.1; [`super::expansion`]).
+//! Writers frame a change's raw bytes (`Change::raw_bytes`), never the
+//! compressed form `Change::bytes` makes above 256 bytes. The chunk
+//! checksum (the header's four bytes, the first four of the chunk's
+//! SHA-256 hash) must match even where Automerge would parse the chunk:
+//! automerge 0.12's `Change::from_bytes` does not check it, so
+//! [`decode_change`] compares it with the decoded change's hash;
+//! `AutoCommit::load` checks a document's.
 
 use automerge::Change;
 
 use crate::cbor::{self, Value};
-use crate::shared_objects::{Diagnostic, ProfileError};
+use crate::shared_objects::{expansion, Diagnostic, ProfileError};
 
 /// Every rejection here: `PROFILE_INVALID` with `INVALID_AUTOMERGE_BYTES`.
 const INVALID: ProfileError = ProfileError::Invalid(Diagnostic::InvalidAutomergeBytes);
@@ -57,10 +61,9 @@ pub fn encode_change(change: &[u8]) -> Vec<u8> {
 
 /// The Automerge storage chunk magic bytes.
 const CHUNK_MAGIC: [u8; 4] = [0x85, 0x6f, 0x4a, 0x83];
-/// Chunk types: a document, a change, a compressed change.
+/// Chunk types: a document, a change.
 const DOCUMENT_CHUNK: u8 = 0;
 const CHANGE_CHUNK: u8 = 1;
-const COMPRESSED_CHANGE_CHUNK: u8 = 2;
 
 /// An Automerge chunk header: magic, checksum, type, LEB128 length.
 struct ChunkHeader {
@@ -105,13 +108,15 @@ fn chunk_header(bytes: &[u8]) -> Result<ChunkHeader, ProfileError> {
 }
 
 /// Decode a Data Unit plaintext into one valid Automerge change (§11): a
-/// single change chunk (not a document chunk) whose checksum matches.
+/// single uncompressed change chunk within the §11.1 limits, whose
+/// checksum matches. The limits are checked before Automerge parses it.
 pub fn decode_change(plaintext: &[u8]) -> Result<Change, ProfileError> {
     let bytes = unframe(plaintext)?;
     let header = chunk_header(&bytes)?;
-    if !matches!(header.chunk_type, CHANGE_CHUNK | COMPRESSED_CHANGE_CHUNK) {
+    if header.chunk_type != CHANGE_CHUNK {
         return Err(INVALID);
     }
+    expansion::check_change(&bytes)?;
     let change = Change::from_bytes(bytes).map_err(|_| INVALID)?;
     // The checksum is the first four bytes of the (uncompressed) change's
     // hash, which Automerge computes from the chunk's contents.
@@ -128,19 +133,32 @@ pub fn encode_snapshot(save: &[u8]) -> Vec<u8> {
 }
 
 /// The full-save bytes of a Snapshot plaintext (§13), checked: one
-/// document chunk (not a change chunk) that loads, its checksum verified
-/// by the load.
+/// document chunk (not a change chunk) within the floor limits of §13.1
+/// that loads, its checksum verified by the load.
 pub fn decode_snapshot(plaintext: &[u8]) -> Result<Vec<u8>, ProfileError> {
+    decode_snapshot_within(plaintext, &expansion::SNAPSHOT_LIMITS_FLOOR)
+}
+
+/// [`decode_snapshot`] with a receiver's own limits, at least
+/// [`expansion::SNAPSHOT_LIMITS_FLOOR`] (§13.1). The limits are checked
+/// before Automerge loads the save.
+pub fn decode_snapshot_within(
+    plaintext: &[u8],
+    limits: &expansion::Limits,
+) -> Result<Vec<u8>, ProfileError> {
     let save = unframe(plaintext)?;
     let header = chunk_header(&save)?;
     if header.chunk_type != DOCUMENT_CHUNK || header.end != save.len() {
         return Err(INVALID);
     }
+    expansion::check_snapshot(&save, limits)?;
     crate::shared_objects::document::load_guarded(&save)?;
     Ok(save)
 }
 
-/// The full-save bytes of a Snapshot plaintext, without loading them.
+/// The full-save bytes of a Snapshot plaintext, without checking or
+/// loading them: a caller that loads them checks them first
+/// ([`expansion::check_snapshot`]).
 pub fn snapshot_payload(plaintext: &[u8]) -> Result<Vec<u8>, ProfileError> {
     unframe(plaintext)
 }
@@ -173,7 +191,7 @@ mod tests {
         use automerge::transaction::Transactable;
         let mut doc = AutoCommit::new();
         doc.put(automerge::ROOT, "k", value).unwrap();
-        let change = doc.get_last_local_change().unwrap().bytes().to_vec();
+        let change = doc.get_last_local_change().unwrap().raw_bytes().to_vec();
         (change, doc.save())
     }
 
@@ -197,13 +215,21 @@ mod tests {
         assert_eq!(save[8], DOCUMENT_CHUNK);
         assert!(matches!(decode_change(&encode_change(&save)), Err(INVALID)));
 
-        // A compressed change chunk is a change too.
-        let (big, _) = sample(&"x".repeat(4096));
-        assert_eq!(big[8], COMPRESSED_CHANGE_CHUNK);
-        assert!(decode_change(&encode_change(&big)).is_ok());
-        let mut corrupt = big.clone();
-        corrupt[5] ^= 0xff;
-        assert!(decode_change(&encode_change(&corrupt)).is_err());
+        // §11.1: a compressed change chunk (type 2) is refused, even one
+        // that holds a valid change; its raw form is accepted.
+        let mut doc = AutoCommit::new();
+        {
+            use automerge::transaction::Transactable;
+            doc.put(automerge::ROOT, "k", "x".repeat(4096)).unwrap();
+        }
+        let mut big = doc.get_last_local_change().unwrap().clone();
+        let compressed = big.bytes().to_vec();
+        assert_eq!(compressed[8], 2, "Automerge compresses above 256 bytes");
+        assert_eq!(
+            decode_change(&encode_change(&compressed)).unwrap_err(),
+            INVALID
+        );
+        assert!(decode_change(&encode_change(big.raw_bytes())).is_ok());
     }
 
     #[test]

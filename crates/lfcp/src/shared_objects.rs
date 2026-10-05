@@ -33,6 +33,7 @@
 use std::fmt;
 
 pub mod document;
+pub mod expansion;
 pub mod framing;
 pub mod identity;
 pub mod validate;

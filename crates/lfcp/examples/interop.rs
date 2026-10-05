@@ -712,16 +712,15 @@ fn produce_shared_objects(p: &Producer) -> Json {
         .clone();
     let entries: Vec<Json> = changes
         .iter()
-        .map(|c| json!({ "plaintext": hex(&framing::encode_change(c.clone().bytes().as_ref())), "signer": signer_of(c.actor_id()) }))
+        .map(|c| json!({ "plaintext": hex(&framing::encode_change(c.raw_bytes())), "signer": signer_of(c.actor_id()) }))
         .collect();
     // The chunk types this producer emitted (byte 8 of each chunk).
-    let chunk_types: BTreeSet<u8> = changes.iter().map(|c| c.clone().bytes()[8]).collect();
+    let chunk_types: BTreeSet<u8> = changes.iter().map(|c| c.raw_bytes()[8]).collect();
     let expect = view(&owner);
     let snapshot = framing::encode_snapshot(&owner.save());
 
     // Negatives.
-    let mut first_bob = first_bob;
-    let raw = first_bob.bytes().to_vec();
+    let raw = first_bob.raw_bytes().to_vec();
     let mut corrupt = raw.clone();
     corrupt[4] ^= 0xff;
     let mut invalid = owner.fork(actor("owner"));
@@ -738,7 +737,7 @@ fn produce_shared_objects(p: &Producer) -> Json {
         .changes()
         .iter()
         .skip(changes.len())
-        .map(|c| json!({ "plaintext": hex(&framing::encode_change(c.clone().bytes().as_ref())), "signer": "owner" }))
+        .map(|c| json!({ "plaintext": hex(&framing::encode_change(c.raw_bytes())), "signer": "owner" }))
         .collect();
     let t1p = format!("/objects/{}", t1.as_str());
     json!({
@@ -753,7 +752,7 @@ fn produce_shared_objects(p: &Producer) -> Json {
               "expect": "INVALID_AUTOMERGE_BYTES" },
             { "name": "snapshot_change_chunk", "kind": "snapshot", "plaintext": hex(&framing::encode_snapshot(&raw)),
               "expect": "INVALID_AUTOMERGE_BYTES" },
-            { "name": "change_equivocation", "kind": "change", "plaintext": hex(&framing::encode_change(twin.clone().bytes().as_ref())), "signer": "bob",
+            { "name": "change_equivocation", "kind": "change", "plaintext": hex(&framing::encode_change(twin.raw_bytes())), "signer": "bob",
               "expect": "ACTOR_EQUIVOCATION" },
             { "name": "state_problems", "kind": "state", "changes": invalid_changes,
               "expect": [ { "pointer": format!("{t1p}/status"), "diagnostic": "INVALID_ENUM_VALUE" },
