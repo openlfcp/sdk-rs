@@ -10,13 +10,15 @@
 //! - [`frontier`]: Actor Have entries and canonical frontiers.
 //! - [`snapshot`]: Snapshots: payload, key, AAD, seal and open.
 //! - [`control`]: typed Control Records and Control Chain validation.
+//! - [`key_package`]: HPKE Key Packages that deliver a DEK.
 //!
-//! Capability evaluation arrives in LFCP-042b2, epoch cutoff in LFCP-042b3,
-//! Key Packages in LFCP-042c and session messages in LFCP-043.
+//! Capability evaluation arrives in LFCP-042b2, epoch cutoff in LFCP-042b3
+//! and session messages in LFCP-043.
 
 pub mod control;
 pub mod data_unit;
 pub mod frontier;
+pub mod key_package;
 pub mod keys;
 pub mod snapshot;
 

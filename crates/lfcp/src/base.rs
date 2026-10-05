@@ -132,6 +132,15 @@ pub enum Error {
     HpkeOpenFailed,
     /// HPKE sealing failed: the recipient's X25519 key is unusable.
     HpkeSealFailed,
+    /// A Key Package payload is not the closed §25 map with the field types
+    /// the CDDL gives.
+    KeyPackageMalformed,
+    /// The opening Principal is not the recipient a Key Package names, so
+    /// the package cannot open for it. Client-local (§25.2, N5).
+    KeyPackageRecipientMismatch,
+    /// A Key Package opened, but its plaintext is not a 32-byte DEK matching
+    /// the commitment of its epoch. Client-local (§25.2, N5).
+    DekCommitmentMismatch,
 }
 
 /// The Control Chain rule a record breaks (LFCP-WIRE-01 §13.1, §15).
@@ -225,6 +234,9 @@ impl Error {
             Error::ControlConflict => "CONTROL_CONFLICT",
             Error::HpkeOpenFailed => "HPKE_OPEN_FAILED",
             Error::HpkeSealFailed => "HPKE_SEAL_FAILED",
+            Error::KeyPackageMalformed => "KEY_PACKAGE_MALFORMED",
+            Error::KeyPackageRecipientMismatch => "KEY_PACKAGE_RECIPIENT_MISMATCH",
+            Error::DekCommitmentMismatch => "DEK_COMMITMENT_MISMATCH",
         }
     }
 
@@ -237,7 +249,11 @@ impl Error {
             | Error::InvalidHex
             | Error::InvalidBase64Url
             | Error::InvalidObjectId => None,
-            Error::AeadFailure | Error::HpkeOpenFailed | Error::HpkeSealFailed => None,
+            Error::AeadFailure
+            | Error::HpkeOpenFailed
+            | Error::HpkeSealFailed
+            | Error::KeyPackageRecipientMismatch
+            | Error::DekCommitmentMismatch => None,
             Error::CborTruncated
             | Error::CborTrailingBytes
             | Error::CborNonShortest
@@ -265,7 +281,8 @@ impl Error {
             | Error::FrontierMalformed
             | Error::FrontierNotCanonical(_)
             | Error::SnapshotMalformed
-            | Error::ControlRecordMalformed => Some(WireCode::MalformedMessage),
+            | Error::ControlRecordMalformed
+            | Error::KeyPackageMalformed => Some(WireCode::MalformedMessage),
             // Provisional: whether an unknown core type is MALFORMED_MESSAGE
             // or INVALID_CONTROL_CHAIN is an open question for the project
             // owner (§14 names no code).
@@ -283,7 +300,13 @@ impl Error {
     /// the object and should surface it to the application, but it has no
     /// wire code because the server cannot detect it (N3, N5).
     pub fn is_client_local(&self) -> bool {
-        matches!(self, Error::AeadFailure | Error::HpkeOpenFailed)
+        matches!(
+            self,
+            Error::AeadFailure
+                | Error::HpkeOpenFailed
+                | Error::KeyPackageRecipientMismatch
+                | Error::DekCommitmentMismatch
+        )
     }
 
     /// The wire code for this error when it occurs in a `HELLO` or `AUTH`
@@ -352,6 +375,11 @@ impl fmt::Display for Error {
             Error::ControlConflict => f.write_str("Control Fork"),
             Error::HpkeOpenFailed => f.write_str("HPKE open failed"),
             Error::HpkeSealFailed => f.write_str("HPKE seal failed"),
+            Error::KeyPackageMalformed => f.write_str("malformed Key Package payload"),
+            Error::KeyPackageRecipientMismatch => {
+                f.write_str("Key Package names another recipient")
+            }
+            Error::DekCommitmentMismatch => f.write_str("DEK does not match its commitment"),
         }
     }
 }
