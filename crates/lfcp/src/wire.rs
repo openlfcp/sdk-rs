@@ -8,6 +8,7 @@
 //! - [`data_unit`]: Data Units: payload, AAD, seal and open, actor hash
 //!   chain and equivocation.
 //! - [`frontier`]: Actor Have entries and canonical frontiers.
+//! - [`have`]: Have Vectors, their difference and Control sync decisions.
 //! - [`snapshot`]: Snapshots: payload, key, AAD, seal and open.
 //! - [`control`]: typed Control Records and Control Chain validation.
 //! - [`key_package`]: HPKE Key Packages that deliver a DEK.
@@ -20,6 +21,7 @@
 pub mod control;
 pub mod data_unit;
 pub mod frontier;
+pub mod have;
 pub mod key_package;
 pub mod keys;
 pub mod message;
