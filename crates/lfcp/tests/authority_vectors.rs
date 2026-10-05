@@ -621,7 +621,7 @@ mod synthetic {
         let epoch = ControlBody::KeyEpoch(KeyEpochBody {
             epoch: 1,
             dek_commitment: Hash32::from_bytes([1; 32]),
-            final_frontier: vec![],
+            final_frontier: lfcp::wire::frontier::Frontier::new(vec![]).unwrap(),
             reason: 0,
         });
         denied(

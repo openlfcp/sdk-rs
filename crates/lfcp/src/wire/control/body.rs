@@ -24,7 +24,7 @@ use crate::base::{ControlRecordId, Error, Hash32, PrincipalId, ResourceId};
 use crate::cbor::Value;
 use crate::cose::{self, SignedObject};
 use crate::principal::PrincipalDescriptor;
-use crate::wire::frontier::ActorHave;
+use crate::wire::frontier::Frontier;
 use crate::wire::{
     bytes_field, check_closed_map, hash_field, principal_field, resource_field, text_field,
     uint_array, uint_array_field, uint_field,
@@ -131,7 +131,7 @@ pub struct KeyEpochBody {
     /// Field 1: the new DEK commitment.
     pub dek_commitment: Hash32,
     /// Field 2: the accepted final frontier of the previous epoch.
-    pub final_frontier: Vec<ActorHave>,
+    pub final_frontier: Frontier,
     /// Field 3: the reason code.
     pub reason: u64,
 }
@@ -273,17 +273,11 @@ impl ControlBody {
             }
             4 => {
                 check_closed_map(body, &[0, 1, 2, 3], &[], MALFORMED)?;
-                // The CDDL types the final frontier as [* actor-have], not
-                // canonical-frontier: each entry is held to §28.1 (it is
-                // inside a persistent object), but entry order and duplicate
-                // Principals are not checked. See spec gap G-CP1.
-                let final_frontier = body
-                    .get_uint(2)
-                    .and_then(Value::as_array)
-                    .ok_or(MALFORMED)?
-                    .iter()
-                    .map(ActorHave::from_value)
-                    .collect::<Result<_, _>>()?;
+                // PROVISIONAL (G-CP1): the CDDL types the final frontier as
+                // [* actor-have]; it is held to the full canonical-frontier
+                // rules (§28.1, §28.2 order, no duplicate Principal), and a
+                // violation is MALFORMED_MESSAGE (N6).
+                let final_frontier = Frontier::from_value(body.get_uint(2).ok_or(MALFORMED)?)?;
                 ControlBody::KeyEpoch(KeyEpochBody {
                     epoch: uint_field(body, 0, m)?,
                     dek_commitment: hash_field(body, 1, m)?,
@@ -368,10 +362,7 @@ impl ControlBody {
             ControlBody::KeyEpoch(b) => vec![
                 (0, uint(b.epoch)),
                 (1, bytes32(b.dek_commitment.as_bytes())),
-                (
-                    2,
-                    Value::Array(b.final_frontier.iter().map(ActorHave::to_value).collect()),
-                ),
+                (2, b.final_frontier.to_value()),
                 (3, uint(b.reason)),
             ],
             ControlBody::RouteUpdate(b) => vec![
@@ -570,8 +561,10 @@ impl OwnerTransferCommitBody {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::base::FrontierRule;
     use crate::cbor;
     use crate::principal::PrincipalKeys;
+    use crate::wire::frontier::ActorHave;
 
     fn descriptor() -> PrincipalDescriptor {
         PrincipalKeys::from_secrets(&[1; 32], [2; 32])
@@ -623,11 +616,12 @@ mod tests {
         round_trip(ControlBody::KeyEpoch(KeyEpochBody {
             epoch: 1,
             dek_commitment: Hash32::from_bytes([6; 32]),
-            final_frontier: vec![ActorHave {
+            final_frontier: Frontier::new(vec![ActorHave {
                 principal: *descriptor().id(),
                 contiguous: 2,
                 extra: vec![(4, 5)],
-            }],
+            }])
+            .unwrap(),
             reason: 1,
         }));
         round_trip(ControlBody::RouteUpdate(RouteUpdateBody {
@@ -701,6 +695,47 @@ mod tests {
             ControlBody::from_value(5, &route.to_value()),
             Err(MALFORMED)
         );
+    }
+
+    #[test]
+    fn key_epoch_final_frontier_is_canonical() {
+        let entry = |n: u8| {
+            ActorHave {
+                principal: PrincipalId::from_bytes([n; 32]),
+                contiguous: 2,
+                extra: vec![],
+            }
+            .to_value()
+        };
+        let body = |entries: Vec<Value>| {
+            Value::Map(vec![
+                (Value::Unsigned(0), Value::Unsigned(1)),
+                (Value::Unsigned(1), Value::bytes(vec![6; 32])),
+                (Value::Unsigned(2), Value::Array(entries)),
+                (Value::Unsigned(3), Value::Unsigned(0)),
+            ])
+        };
+        assert!(ControlBody::from_value(4, &body(vec![entry(1), entry(2)])).is_ok());
+        for (label, entries, rule) in [
+            (
+                "unsorted",
+                vec![entry(2), entry(1)],
+                FrontierRule::EntriesUnsorted,
+            ),
+            (
+                "duplicate",
+                vec![entry(1), entry(1)],
+                FrontierRule::DuplicatePrincipal,
+            ),
+        ] {
+            let err = ControlBody::from_value(4, &body(entries)).unwrap_err();
+            assert_eq!(err, Error::FrontierNotCanonical(rule), "{label}");
+            assert_eq!(
+                err.wire_code().unwrap().name(),
+                "MALFORMED_MESSAGE",
+                "{label}"
+            );
+        }
     }
 
     #[test]
