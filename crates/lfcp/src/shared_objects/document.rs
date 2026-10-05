@@ -475,12 +475,26 @@ impl SharedObjects {
     }
 
     /// Merge another replica's changes into this one.
+    ///
+    /// The other replica's changes go through the same §14.1 admission and
+    /// guarded engine call as [`SharedObjects::apply_changes`]: two
+    /// histories each sound on their own can still disagree, such as two
+    /// changes of one actor at one sequence. Such a change stops the merge
+    /// with its error ([`ProfileError::SequenceTaken`]); changes admitted
+    /// before it stay merged.
     pub fn merge(&mut self, other: &mut SharedObjects) -> Result<(), ProfileError> {
-        // Both histories passed §14.1 on their way in; the merge adds the
-        // other's changes in dependency order.
-        self.doc.merge(&mut other.doc)?;
-        self.seqs = seqs_of(&mut self.doc);
-        Ok(())
+        let new: Vec<Change> = other
+            .doc
+            .get_changes(&[])
+            .into_iter()
+            .filter(|c| self.doc.get_change_by_hash(&c.hash()).is_none())
+            .collect();
+        let waiting = self.apply_changes(new)?;
+        // A whole history has every dependency; anything left is not one.
+        match waiting.first() {
+            None => Ok(()),
+            Some(change) => Err(ProfileError::MissingDependencies(change.deps().to_vec())),
+        }
     }
 
     /// The current heads.
@@ -1133,6 +1147,38 @@ mod admission_tests {
         assert_eq!(err, ProfileError::SequenceTaken { seq: 2, latest: 2 });
         assert_eq!(err.code(), Some("ACTOR_EQUIVOCATION"));
         assert_eq!(state(&mut receiver), before);
+    }
+
+    #[test]
+    fn merge_goes_through_admission() {
+        // M8: a replica whose history equivocates with ours is refused by
+        // merge as by apply_changes, and the document stays as it was.
+        let (first, second, _) = crafted();
+        let mut twin = SharedObjects::new(actor(1));
+        twin.apply_changes(vec![first.clone()]).unwrap();
+        put_root(&mut twin, "note", "other");
+        let mut receiver = SharedObjects::new(actor(2));
+        receiver
+            .apply_changes(vec![first.clone(), second.clone()])
+            .unwrap();
+        let before = state(&mut receiver);
+        let err = receiver.merge(&mut twin).unwrap_err();
+        assert_eq!(err, ProfileError::SequenceTaken { seq: 2, latest: 2 });
+        assert_eq!(state(&mut receiver), before);
+        put_root(&mut receiver, "after", "ok");
+        SharedObjects::load(&receiver.save(), actor(2)).unwrap();
+
+        // A sound replica merges: its changes, ours, and a later write.
+        let mut peer = SharedObjects::new(actor(3));
+        peer.apply_changes(vec![first, second]).unwrap();
+        let theirs = put_root(&mut peer, "theirs", "yes");
+        receiver.merge(&mut peer).unwrap();
+        assert!(receiver.changes().iter().any(|c| c.hash() == theirs.hash()));
+        assert_eq!(put_root(&mut receiver, "next", "ok").seq(), 2);
+        // Merging again changes nothing.
+        let heads = receiver.heads();
+        receiver.merge(&mut peer).unwrap();
+        assert_eq!(receiver.heads(), heads);
     }
 
     #[test]
