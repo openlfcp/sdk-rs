@@ -365,20 +365,14 @@ fn in_scope_negative_vectors_are_rejected() {
     expect_rejected(case, err);
 }
 
-/// Negative vectors whose rule belongs to a later task: the epoch cutoff
-/// needs Control Plane state. Their signed objects are canonical, so they
-/// must pass parse and verify here.
-const DEFERRED_NEGATIVES: &[(&str, &str)] = &[
-    ("stale_epoch", "042b3: previous-epoch cutoff (§19.1)"),
-    (
-        "stale_epoch_absent_actor",
-        "042b3: previous-epoch cutoff (§19.1)",
-    ),
-];
+/// Negative vectors whose rule belongs to a later task. None remain: since
+/// LFCP-042b3 every negative vector is decided in scope. A case added here
+/// must still pass parse and verify at the COSE layer.
+const DEFERRED_NEGATIVES: &[(&str, &str)] = &[];
 
 /// Negative vectors this crate decides, in this file,
 /// `data_plane_vectors.rs`, `control_plane_vectors.rs`,
-/// `key_package_vectors.rs` or `message_vectors.rs`.
+/// `key_package_vectors.rs`, `message_vectors.rs` or `epoch_vectors.rs`.
 const IN_SCOPE_NEGATIVES: &[&str] = &[
     // Primitives (this file).
     "tagged_cose_D1",
@@ -407,6 +401,9 @@ const IN_SCOPE_NEGATIVES: &[&str] = &[
     "hpke_recipient_mismatch_KP0",
     // Messages (message_vectors.rs).
     "stale_control_head_put",
+    // Epochs (epoch_vectors.rs).
+    "stale_epoch",
+    "stale_epoch_absent_actor",
 ];
 
 #[test]
