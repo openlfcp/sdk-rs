@@ -366,7 +366,7 @@ fn in_scope_negative_vectors_are_rejected() {
 }
 
 /// Negative vectors whose rule belongs to a later task: Control Plane
-/// state, HPKE or the session. Their signed objects are canonical, so they
+/// state or the session. Their signed objects are canonical, so they
 /// must pass parse and verify here.
 const DEFERRED_NEGATIVES: &[(&str, &str)] = &[
     ("stale_epoch", "042b3: previous-epoch cutoff (§19.1)"),
@@ -375,17 +375,14 @@ const DEFERRED_NEGATIVES: &[(&str, &str)] = &[
         "042b3: previous-epoch cutoff (§19.1)",
     ),
     (
-        "hpke_recipient_mismatch_KP0",
-        "042c: HPKE (§25.1, §25.2), client-local",
-    ),
-    (
         "stale_control_head_put",
         "043: CONTROL_PUT compare-and-swap (§47)",
     ),
 ];
 
 /// Negative vectors this crate decides, in this file,
-/// `data_plane_vectors.rs` or `control_plane_vectors.rs`.
+/// `data_plane_vectors.rs`, `control_plane_vectors.rs` or
+/// `key_package_vectors.rs`.
 const IN_SCOPE_NEGATIVES: &[&str] = &[
     // Primitives (this file).
     "tagged_cose_D1",
@@ -410,6 +407,8 @@ const IN_SCOPE_NEGATIVES: &[&str] = &[
     "frontier_unsorted",
     // Control Plane (control_plane_vectors.rs).
     "control_fork_C6",
+    // Key Packages (key_package_vectors.rs).
+    "hpke_recipient_mismatch_KP0",
 ];
 
 #[test]
