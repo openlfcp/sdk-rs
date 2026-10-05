@@ -12,6 +12,7 @@
 //! - [`control`]: typed Control Records and Control Chain validation.
 //! - [`key_package`]: HPKE Key Packages that deliver a DEK.
 //! - [`message`]: the message envelope and every typed body.
+//! - [`session`]: the HELLO / CHALLENGE / AUTH / READY handshake.
 //!
 //! Capability evaluation arrives in LFCP-042b2 and epoch cutoff in
 //! LFCP-042b3.
@@ -22,6 +23,7 @@ pub mod frontier;
 pub mod key_package;
 pub mod keys;
 pub mod message;
+pub mod session;
 pub mod snapshot;
 
 use crate::base::{Error, Hash32, PrincipalId, ResourceId};

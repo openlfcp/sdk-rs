@@ -156,6 +156,23 @@ pub enum Error {
     /// A message type that is unassigned in the core range, or an
     /// extension type that was not negotiated (§33).
     UnsupportedMessageType(u64),
+    /// The session handshake failed authentication (§34–§36).
+    AuthFailed(AuthFailure),
+    /// No wire profile is supported by both peers (§34, §35).
+    NoCommonWireProfile,
+}
+
+/// Why an `AUTH` did not authenticate the session Principal (§36).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthFailure {
+    /// The auth proof is not a canonical signed object.
+    ProofMalformed,
+    /// The proof's `kid` is not the Principal of `HELLO`.
+    WrongSigner,
+    /// The proof's payload is not the transcript of this session.
+    TranscriptMismatch,
+    /// The proof's signature does not verify.
+    BadSignature,
 }
 
 /// The Control Chain rule a record breaks (LFCP-WIRE-01 §13.1, §15).
@@ -256,6 +273,8 @@ impl Error {
             Error::MessageMalformed => "MESSAGE_MALFORMED",
             Error::MessageReservedEnvelopeKey(_) => "MESSAGE_RESERVED_ENVELOPE_KEY",
             Error::UnsupportedMessageType(_) => "UNSUPPORTED_MESSAGE_TYPE",
+            Error::AuthFailed(_) => "AUTH_FAILED",
+            Error::NoCommonWireProfile => "NO_COMMON_WIRE_PROFILE",
         }
     }
 
@@ -308,6 +327,8 @@ impl Error {
             // Provisional: §33 names no code for an unknown or un-negotiated
             // message type; an open question for the project owner.
             Error::UnsupportedMessageType(_) => Some(WireCode::ProtocolUnsupported),
+            Error::AuthFailed(_) => Some(WireCode::AuthFailed),
+            Error::NoCommonWireProfile => Some(WireCode::ProtocolUnsupported),
             // Provisional: whether an unknown core type is MALFORMED_MESSAGE
             // or INVALID_CONTROL_CHAIN is an open question for the project
             // owner (§14 names no code).
@@ -336,11 +357,16 @@ impl Error {
 
     /// The wire code for this error when it occurs in a `HELLO` or `AUTH`
     /// message (session context). It differs from [`Error::wire_code`] only
-    /// for [`Error::PrincipalIdMismatch`], which is `AUTH_FAILED` there
-    /// (LFCP-WIRE-01 §7, P2).
+    /// for descriptor errors: [`Error::PrincipalIdMismatch`] is
+    /// `AUTH_FAILED` there (LFCP-WIRE-01 §7, P2), and so is
+    /// [`Error::PrincipalMalformed`].
     pub fn session_wire_code(&self) -> Option<WireCode> {
         match self {
             Error::PrincipalIdMismatch => Some(WireCode::AuthFailed),
+            // P1 names no code for a malformed descriptor; in the session
+            // handshake it fails authentication like an ID mismatch
+            // (orchestrator decision for LFCP-043a, reported as a gap).
+            Error::PrincipalMalformed => Some(WireCode::AuthFailed),
             other => other.wire_code(),
         }
     }
@@ -413,6 +439,8 @@ impl fmt::Display for Error {
                 write!(f, "unknown envelope key {key} in the reserved range 0-15")
             }
             Error::UnsupportedMessageType(code) => write!(f, "unsupported message type {code}"),
+            Error::AuthFailed(reason) => write!(f, "authentication failed: {reason:?}"),
+            Error::NoCommonWireProfile => f.write_str("no common wire profile"),
         }
     }
 }
