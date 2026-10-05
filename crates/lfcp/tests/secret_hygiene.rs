@@ -12,6 +12,8 @@ use lfcp::wire::data_unit::{DataUnit, DataUnitHeader, ReceivedDataUnit};
 use lfcp::wire::frontier::Frontier;
 use lfcp::wire::key_package::{KeyPackage, ReceivedKeyPackage};
 use lfcp::wire::keys::{dek_commitment, ActorKey, Dek, SnapshotKey};
+use lfcp::wire::message::{Body, ChallengeBody, HelloBody, HostingCredential, Message};
+use lfcp::wire::session::{auth, verify_auth};
 use lfcp::wire::snapshot::{Snapshot, SnapshotHeader};
 
 const DEK: [u8; 32] = [0xd1; 32];
@@ -19,6 +21,7 @@ const ED25519_SEED: [u8; 32] = [0x5e; 32];
 const X25519_PRIVATE: [u8; 32] = [0x7a; 32];
 const RECIPIENT_ED25519_SEED: [u8; 32] = [0x6b; 32];
 const RECIPIENT_X25519_PRIVATE: [u8; 32] = [0x8c; 32];
+const HOSTING_CREDENTIAL: [u8; 32] = [0x9d; 32];
 
 /// The forms in which a 32-byte secret could appear in formatted output.
 fn forms(secret: &[u8; 32]) -> Vec<String> {
@@ -55,6 +58,7 @@ fn formatted_output_contains_no_secret() {
         X25519_PRIVATE,
         RECIPIENT_ED25519_SEED,
         RECIPIENT_X25519_PRIVATE,
+        HOSTING_CREDENTIAL,
         *actor_key.expose_secret(),
         *snapshot_key.expose_secret(),
     ];
@@ -93,6 +97,33 @@ fn formatted_output_contains_no_secret() {
     let package = KeyPackage::seal(resource, 0, head, &dek, recipient.descriptor(), &keys).unwrap();
     let received_package = ReceivedKeyPackage::parse(package.signed_object().bytes()).unwrap();
     let opened = package.open(&recipient, &commitment).unwrap();
+    let hello = HelloBody {
+        wire_profiles: vec!["LFCP-WIRE-01".into()],
+        principal: keys.descriptor().clone(),
+        client_nonce: [1; 16],
+        data_profiles: None,
+    };
+    let challenge = ChallengeBody {
+        wire_profile: "LFCP-WIRE-01".into(),
+        server_nonce: [2; 16],
+        session_id: [3; 16],
+        server_id: [4; 32],
+    };
+    let credential = || Some(HostingCredential::new(HOSTING_CREDENTIAL.to_vec()));
+    let auth_body = auth(&keys, &hello, &challenge, credential()).unwrap();
+    let auth_message = Message::new([5; 16], Body::Auth(auth_body.clone()));
+    let host_message = Message::new(
+        [6; 16],
+        Body::ResourceHost {
+            genesis: vec![0x80],
+            hosting_credential: credential(),
+        },
+    );
+    let session = verify_auth(&hello, &challenge, auth_body.clone()).unwrap();
+    let other_session = ChallengeBody {
+        session_id: [7; 16],
+        ..challenge.clone()
+    };
 
     let debug_outputs = [
         ("Dek", format!("{dek:?}")),
@@ -111,6 +142,9 @@ fn formatted_output_contains_no_secret() {
         ("KeyPackage", format!("{package:?}")),
         ("ReceivedKeyPackage", format!("{received_package:?}")),
         ("opened Dek", format!("{opened:?}")),
+        ("AUTH message", format!("{auth_message:?}")),
+        ("RESOURCE_HOST message", format!("{host_message:?}")),
+        ("AuthenticatedSession", format!("{session:?}")),
         ("DataUnit", format!("{unit:?}")),
         ("ReceivedDataUnit", format!("{received:?}")),
         ("Snapshot", format!("{snapshot:?}")),
@@ -153,6 +187,7 @@ fn formatted_output_contains_no_secret() {
             .clone()
             .verify(other.descriptor(), |_| Ok(()))
             .unwrap_err(),
+        verify_auth(&hello, &other_session, auth_body).unwrap_err(),
     ];
     for err in &errors {
         assert_clean("error Debug", &format!("{err:?}"), &secrets);
