@@ -11,10 +11,9 @@
 //! - [`cbor`]: the deterministic CBOR codec;
 //! - [`principal`]: Principal IDs, descriptors and keys;
 //! - [`cose`]: canonical COSE structures;
-//! - [`wire`]: LFCP Wire structures and messages.
-//!
-//! `wire` is still empty: Control Plane, Data Plane and session code arrive
-//! in LFCP-042 and LFCP-043.
+//! - [`wire`]: LFCP Wire structures and messages;
+//! - [`shared_objects`]: the Shared Objects profile on Automerge
+//!   (SHARED-OBJECTS-PROFILE-01), carried in Data Units and Snapshots.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -24,4 +23,5 @@ pub mod cbor;
 pub mod cose;
 pub mod crypto;
 pub mod principal;
+pub mod shared_objects;
 pub mod wire;

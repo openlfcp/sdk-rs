@@ -37,6 +37,12 @@ chacha20poly1305 = { version = "0.11", default-features = false, features = ["al
 # SHAKE and NIST-curve features stay off. Pinned exactly: the tests use its
 # `danger` module, whose docs ask for a patch-version pin.
 hpke = { version = "=0.14.1", default-features = false, features = ["x25519", "chacha", "alloc", "getrandom"] }
+# Automerge, the CRDT engine of the Shared Objects profile
+# (SHARED-OBJECTS-PROFILE-01 §7). Pinned exactly: 0.12.0 is the Rust core of
+# @automerge/automerge 3.5.0, the profile's reference target; pre-1.0 minor
+# releases break the API. No features: the defaults are empty and the wasm
+# and indexing features are not needed.
+automerge = { version = "=0.12.0", default-features = false }
 # Wipes DEKs, derived keys and HPKE plaintexts on drop; "alloc" covers the
 # Vec-held HPKE plaintext. Already in the tree through the
 # dalek crates; used directly for this crate's own key types.
