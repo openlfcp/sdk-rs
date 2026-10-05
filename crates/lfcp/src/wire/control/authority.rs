@@ -528,6 +528,7 @@ fn check_transfer(
 pub struct CapabilityEngine {
     base: Option<ControlState>,
     history: Vec<ControlState>,
+    known: Vec<PrincipalDescriptor>,
 }
 
 impl CapabilityEngine {
@@ -541,7 +542,16 @@ impl CapabilityEngine {
         CapabilityEngine {
             base: Some(state),
             history: Vec::new(),
+            known: Vec::new(),
         }
+    }
+
+    /// Also resolve issuers from `descriptors`, learned outside the chain.
+    /// A descriptor is self-certifying, so any source will do (§13.1: an
+    /// issuer the receiver cannot resolve is `MISSING_DEPENDENCY`).
+    pub fn knowing(mut self, descriptors: &[PrincipalDescriptor]) -> CapabilityEngine {
+        self.known.extend_from_slice(descriptors);
+        self
     }
 
     /// The state after each record accepted so far, in order.
@@ -556,7 +566,10 @@ impl CapabilityEngine {
 
 impl ChainPolicy for CapabilityEngine {
     fn resolve_issuer(&mut self, issuer: &PrincipalId) -> Option<PrincipalDescriptor> {
-        self.latest()?.principal(issuer).cloned()
+        self.latest()
+            .and_then(|state| state.principal(issuer))
+            .or_else(|| self.known.iter().find(|d| d.id() == issuer))
+            .cloned()
     }
 
     fn authorize(
@@ -585,13 +598,24 @@ pub fn validate_authorized(
     records: &[&[u8]],
     resume: Option<ControlState>,
 ) -> Result<(ChainOutcome, Vec<ControlState>), ChainFailure> {
-    let (start, mut engine) = match resume {
+    validate_authorized_with(records, resume, &[])
+}
+
+/// [`validate_authorized`], also resolving issuers from `known`
+/// descriptors learned outside the chain ([`CapabilityEngine::knowing`]).
+pub fn validate_authorized_with(
+    records: &[&[u8]],
+    resume: Option<ControlState>,
+    known: &[PrincipalDescriptor],
+) -> Result<(ChainOutcome, Vec<ControlState>), ChainFailure> {
+    let (start, engine) = match resume {
         None => (ChainStart::Genesis, CapabilityEngine::new()),
         Some(state) => (
             ChainStart::After(state.head),
             CapabilityEngine::resume(state),
         ),
     };
+    let mut engine = engine.knowing(known);
     let outcome = validate_chain(records, start, &mut engine)?;
     Ok((outcome, engine.history))
 }
