@@ -86,14 +86,30 @@ impl Spec {
         })
     }
 
-    /// `path` at `commit`, a full commit ID of the same checkout, parsed as
-    /// JSON. For spec files newer than the locked baseline; each caller
-    /// names its commit and says why.
-    pub fn read_json_at(&self, commit: &str, path: &str) -> serde_json::Value {
-        let bytes = git(&self.dir, &["show", &format!("{commit}:{path}")])
-            .unwrap_or_else(|err| panic!("cannot read {path} at spec commit {commit}: {err}"));
-        serde_json::from_slice(&bytes)
-            .unwrap_or_else(|err| panic!("{path} at spec commit {commit} is not JSON: {err}"))
+    /// The file names in directory `dir` at the locked commit, sorted.
+    pub fn list(&self, dir: &str) -> Vec<String> {
+        let out = git(
+            &self.dir,
+            &[
+                "ls-tree",
+                "--name-only",
+                &self.lock.commit,
+                &format!("{}/", dir.trim_end_matches('/')),
+            ],
+        )
+        .unwrap_or_else(|err| {
+            panic!(
+                "cannot list {dir} at spec commit {}: {err}",
+                self.lock.commit
+            )
+        });
+        let mut names: Vec<String> = String::from_utf8(out)
+            .unwrap()
+            .lines()
+            .map(|line| line.rsplit('/').next().unwrap().to_owned())
+            .collect();
+        names.sort();
+        names
     }
 
     /// `path` at the locked commit, parsed as JSON.

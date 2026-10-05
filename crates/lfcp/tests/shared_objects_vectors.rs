@@ -9,10 +9,8 @@
 //! - the corpus: every change applies and every save image loads, giving
 //!   the corpus' logical state and conflicts.
 //!
-//! The vectors are read at the `spec.lock` pin (mvp-0.1-baseline.3). The
-//! corpus is not in that baseline: it is read from spec commit
-//! [`CORPUS_COMMIT`] (SPEC-CORPUS, to be part of mvp-0.1-baseline.4) until
-//! baseline.4 is tagged and pinned.
+//! The vectors and the corpus are read at the `spec.lock` pin
+//! (mvp-0.1-baseline.4).
 
 mod support;
 
@@ -34,16 +32,13 @@ use support::vectors::{hex, id_of};
 
 const SUITE: &str = "test-vectors/shared-objects-01/SHARED-OBJECTS-TEST-VECTORS-01.json";
 const CORPUS: &str = "test-vectors/shared-objects-01/SHARED-OBJECTS-AUTOMERGE-REFERENCE-01.json";
-/// The spec commit that added the corpus (SPEC-CORPUS). Replace with the
-/// `spec.lock` pin once mvp-0.1-baseline.4 is tagged.
-const CORPUS_COMMIT: &str = "e25b1eaab4dc6ace873309bff688f29bc9d38db8";
 
 fn suite() -> Json {
     Spec::open().read_json(SUITE)
 }
 
 fn corpus() -> Json {
-    Spec::open().read_json_at(CORPUS_COMMIT, CORPUS)
+    Spec::open().read_json(CORPUS)
 }
 
 fn case<'a>(suite: &'a Json, id: &str) -> &'a Json {
@@ -366,22 +361,26 @@ fn apply_branch(doc: &mut SharedObjects, branch: &Json, task: &str, label: &str)
         ("task.set_due", _) => doc.set_date(task, "due", w("due")).map(|_| ()),
         ("task.delete", _) => doc.delete(task).map(|_| ()),
         ("task.restore", _) => doc.restore(task).map(|_| ()),
-        // §69 (vectors: task.resolve_status_conflict).
-        ("task.resolve_status_conflict", _) => doc
-            .resolve_field_conflict(task, "status", w("status"))
-            .map(|_| ()),
+        // §69: the field is the one the branch writes.
+        ("task.resolve_field_conflict", _) => {
+            let fields = writes.as_object().unwrap();
+            assert_eq!(fields.len(), 1, "{label}: one field");
+            let field = fields.keys().next().unwrap();
+            doc.resolve_field_conflict(task, field, w(field))
+                .map(|_| ())
+        }
         ("task.add_tag", _) => doc
             .add_tag(task, branch["tag"].as_str().unwrap())
             .map(|_| ()),
         ("task.remove_tag", _) => doc
             .remove_tag(task, branch["tag"].as_str().unwrap())
             .map(|_| ()),
-        // §68 (vectors: task.assign, task.unassign).
-        ("task.assign", _) => {
+        // §68.
+        ("task.add_assignee", _) => {
             let p = parse_principal_ref(branch["principal"].as_str().unwrap()).unwrap();
             doc.add_assignee(task, &p).map(|_| ())
         }
-        ("task.unassign", _) => {
+        ("task.remove_assignee", _) => {
             let p = parse_principal_ref(branch["principal"].as_str().unwrap()).unwrap();
             doc.remove_assignee(task, &p).map(|_| ())
         }
@@ -852,7 +851,7 @@ fn tombstones_keep_the_object_and_can_be_restored() {
 
 #[test]
 fn text_strings_are_profile_invalid() {
-    // PROVISIONAL (G-SC3): a field held as collaborative Text is
+    // §30 (G-SC3): a field held as collaborative Text is
     // INVALID_FIELD_TYPE.
     let suite = suite();
     let f = Fixtures::load(&suite);
@@ -866,8 +865,77 @@ fn text_strings_are_profile_invalid() {
 }
 
 #[test]
+fn the_corpus_change_actor_negative_is_not_merged() {
+    // SO-SEC1-change-actor-mismatch: on top of S01, a Data Unit signed by
+    // andrey carrying pavel's change.
+    let corpus = corpus();
+    let negatives = corpus["negatives"].as_array().unwrap();
+    assert_eq!(negatives.len(), 1);
+    let negative = &negatives[0];
+    let id = negative["id"].as_str().unwrap();
+    assert_eq!(id, "SO-SEC1-change-actor-mismatch");
+    let suite = suite();
+    let f = Fixtures::load(&suite);
+    assert_eq!(
+        ResourceId::from_hex(corpus["resource_hex"].as_str().unwrap()).unwrap(),
+        f.resource,
+        "{id}: the corpus Resource"
+    );
+
+    // The base scenario's changes.
+    let base = negative["base_scenario"].as_str().unwrap();
+    let scenario = corpus["scenarios"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == base)
+        .unwrap();
+    let mut receiver = f.doc("masha");
+    for c in scenario["changes"].as_array().unwrap() {
+        let bytes = base::from_hex(c["change_hex"].as_str().unwrap()).unwrap();
+        receiver
+            .apply_changes(vec![framing::decode_change(&framing::encode_change(
+                &bytes,
+            ))
+            .unwrap()])
+            .unwrap();
+    }
+    let heads = receiver.heads();
+
+    let plaintext = base::from_hex(negative["plaintext_hex"].as_str().unwrap()).unwrap();
+    let signer = negative["signer"].as_str().unwrap();
+    let (signer_id, signer_actor) = f.principals[signer];
+    assert_eq!(
+        base::to_hex(&signer_actor),
+        negative["signer_actor_hex"].as_str().unwrap(),
+        "{id}: §8 actor of the signer"
+    );
+    let err = receiver
+        .apply_unit_change(&f.resource, &signer_id, &plaintext)
+        .unwrap_err();
+    let expected = &negative["expected"];
+    assert_eq!(expected["disposition"], "reject", "{id}");
+    assert_eq!(err.code(), expected["error"]["code"].as_str(), "{id}");
+    assert_eq!(
+        err.diagnostic().map(Diagnostic::name),
+        expected["error"]["diagnostic"].as_str(),
+        "{id}"
+    );
+    assert_eq!(receiver.heads(), heads, "{id}: nothing merged");
+
+    // The same plaintext signed by its actor's Principal is a valid change.
+    let change = framing::decode_change(&plaintext).unwrap();
+    let (pavel, pavel_actor) = f.principals["pavel"];
+    assert_eq!(change.actor_id().to_bytes(), pavel_actor, "{id}");
+    assert_eq!(
+        receiver.apply_unit_change(&f.resource, &pavel, &plaintext),
+        Ok(())
+    );
+}
+
+#[test]
 fn a_change_must_carry_the_signers_actor() {
-    // PROVISIONAL (SO-SEC1): ANDREY writes a change; a Data Unit signed by
+    // §8, §11 (SO-SEC1): ANDREY writes a change; a Data Unit signed by
     // PAVEL carrying it must not enter the document.
     let suite = suite();
     let f = Fixtures::load(&suite);
@@ -880,12 +948,12 @@ fn a_change_must_carry_the_signers_actor() {
     let mut receiver = f.doc("masha");
     assert_eq!(
         receiver.apply_unit_change(&f.resource, &pavel, &plaintext),
-        Err(ProfileError::ActorMismatch)
+        Err(ProfileError::Invalid(Diagnostic::ChangeActorMismatch))
     );
     assert!(receiver.heads().is_empty(), "nothing applied");
     assert_eq!(
         lfcp::shared_objects::document::check_change_actor(&f.resource, &pavel, &change),
-        Err(ProfileError::ActorMismatch)
+        Err(ProfileError::Invalid(Diagnostic::ChangeActorMismatch))
     );
 
     assert_eq!(
@@ -899,6 +967,6 @@ fn a_change_must_carry_the_signers_actor() {
     assert_eq!(
         f.doc("masha")
             .apply_unit_change(&other, &andrey_id, &plaintext),
-        Err(ProfileError::ActorMismatch)
+        Err(ProfileError::Invalid(Diagnostic::ChangeActorMismatch))
     );
 }

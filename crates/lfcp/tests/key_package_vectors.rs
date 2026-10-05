@@ -21,6 +21,7 @@ use lfcp::base::{Error, Hash32};
 use lfcp::cose;
 use lfcp::crypto::{self, X25519PrivateKey};
 use lfcp::principal::PrincipalKeys;
+use lfcp::wire::control::authority::{key_package_policy, validate_authorized};
 use lfcp::wire::control::body::ControlBody;
 use lfcp::wire::control::ReceivedControlRecord;
 use lfcp::wire::key_package::{KeyPackage, ReceivedKeyPackage};
@@ -308,10 +309,28 @@ fn recipient_mismatch_is_client_local() {
         carol.descriptor().id(),
         "{case_id}: names CAROL"
     );
+    // KP-1: the package names CAROL at C3, where she holds data/read and
+    // OWNER may distribute, so every §25.2 check passes.
+    let chain: Vec<Vec<u8>> = [
+        "C0_genesis",
+        "C1_grant_bob",
+        "C2_invite_grant",
+        "C3_invite_claim_carol",
+    ]
+    .iter()
+    .map(|id| hex(id, &suite.case(id)["expected"]["cose_sign1"]))
+    .collect();
+    let refs: Vec<&[u8]> = chain.iter().map(Vec::as_slice).collect();
+    let (_, history) = validate_authorized(&refs, None).unwrap();
+    assert_eq!(
+        header.control_head.as_bytes(),
+        history.last().unwrap().head.id.as_bytes(),
+        "{case_id}: at C3"
+    );
     let sender = principal_by_id(&principals, case_id, &header.sender);
     let package = received
-        .verify(sender.descriptor(), |_| Ok(()))
-        .unwrap_or_else(|err| panic!("{case_id}: verify failed: {err}"));
+        .verify(sender.descriptor(), key_package_policy(&history))
+        .unwrap_or_else(|err| panic!("{case_id}: §25.2: {err}"));
     let commitment = &commitments[&header.data_epoch];
 
     // The context names CAROL's X25519 key as the one to try.

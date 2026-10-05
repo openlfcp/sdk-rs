@@ -26,11 +26,11 @@
 //! ownership transfer the former owner keeps no implicit authority, and
 //! the grants it issued stay active (§23.3).
 //!
-//! Unauthorized records are `AUTHORIZATION_FAILED` where the text names
-//! it (§17.3 revoking a revoked grant, §23.3 transfers). Where it names
-//! no code (escalation, a revoke the issuer's authority does not cover,
-//! a non-owner extension record, a route version that does not increase)
-//! the same code is used provisionally; see the `PROVISIONAL` markers.
+//! Unauthorized records are `AUTHORIZATION_FAILED`: §14 (a non-owner
+//! extension record), §17.2 (grant rules, escalation), §17.3 (revocation,
+//! in order: target exists, authority covers it, not already revoked),
+//! §20 (route update ability and version), §23.3 (transfers) and the §62
+//! general rule for authority failures.
 //!
 //! [`CapabilityEngine`] is the [`ChainPolicy`] for full validation: it
 //! derives a [`ControlState`] after every accepted record, so authority can
@@ -204,7 +204,9 @@ impl ControlState {
     }
 
     /// Whether `grant` is active and still confers `invite/claim`: what
-    /// makes its subject an Invitation Principal for §25.2.
+    /// makes its subject an Invitation Principal for §25.2. A grant without
+    /// `claim_limit` is not claimable but still confers it (§18, INVITE);
+    /// one whose claims are used up does not (§18.1).
     pub fn confers_invite(&self, grant: &Grant) -> bool {
         self.is_active(&grant.id) && self.conferred(grant).contains(&ability::INVITE_CLAIM)
     }
@@ -308,21 +310,21 @@ pub fn apply(
             );
         }
         ControlBody::CapabilityRevoke(revoke) => {
+            // §17.3, in order, each AUTHORIZATION_FAILED: 1. the target
+            // names a grant of this chain;
             let target = state
                 .grant(&revoke.grant)
                 .ok_or(deny(AuthorityRule::RevokeTargetUnknown))?;
-            // PROVISIONAL (unknown revoke target code): §17.3 names no code
-            // for a revoke naming no grant; AUTHORIZATION_FAILED is used.
+            // 2. the issuer is the owner, or holds capability/revoke that
+            // covers the target (a grant it issued, or one delegated from a
+            // grant it issued);
             if !is_owner {
                 state.require(&issuer, ability::CAPABILITY_REVOKE)?;
-                // §17.3: revoke authority covers a grant the revoker issued,
-                // or one delegated from a grant it issued.
-                // PROVISIONAL (revoke not covered code): §17.3 names no code.
                 if !state.issued_in_line(target, &issuer) {
                     return Err(deny(AuthorityRule::RevokeNotCovered));
                 }
             }
-            // §17.3: revoking an already revoked grant is AUTHORIZATION_FAILED.
+            // 3. the target is not already revoked.
             if target.revoked {
                 return Err(deny(AuthorityRule::RevokeAlreadyRevoked));
             }
@@ -386,10 +388,8 @@ pub fn apply(
         }
         ControlBody::KeyEpoch(epoch) => {
             state.require(&issuer, ability::KEY_ROTATE)?;
-            // §19: "exactly the previous Data Epoch plus one".
-            // PROVISIONAL (epoch not next code): §19 names no code; a
-            // skipped or repeated epoch breaks the chain's epoch sequence,
-            // so INVALID_CONTROL_CHAIN.
+            // §19: exactly the previous Data Epoch plus one, else the
+            // record breaks the chain: INVALID_CONTROL_CHAIN (G-EP3).
             if state.current_epoch.checked_add(1) != Some(epoch.epoch) {
                 return Err(Error::InvalidControlChain(
                     crate::base::ChainRule::EpochNotNext,
@@ -406,8 +406,8 @@ pub fn apply(
         ControlBody::RouteUpdate(route) => {
             state.require(&issuer, ability::ROUTE_UPDATE)?;
             // §20: each Route Update strictly increases the route version,
-            // from Genesis's implied 0 (§15).
-            // PROVISIONAL (route version code): §20 names no code.
+            // from Genesis's implied 0 (§15); a version that does not is
+            // AUTHORIZATION_FAILED.
             if route.version <= state.route_version {
                 return Err(deny(AuthorityRule::RouteVersionNotIncreasing));
             }
@@ -423,9 +423,8 @@ pub fn apply(
         }
         ControlBody::Extension { .. } => {
             // §14: an extension record requires owner authority, whether or
-            // not the extension is supported; it is retained, not
-            // interpreted.
-            // PROVISIONAL (extension authority code): §14 names no code.
+            // not the extension is supported (AUTHORIZATION_FAILED); it is
+            // retained, not interpreted.
             if !is_owner {
                 return Err(deny(AuthorityRule::NotOwner));
             }
@@ -442,9 +441,8 @@ fn check_grant(
     grant: &CapabilityGrantBody,
 ) -> Result<(), Error> {
     // §17.2: the owner may grant without a parent; a non-owner must hold
-    // capability/grant and reference a parent it is the subject of.
-    // PROVISIONAL (grant escalation code): §17.2 names no code for any of
-    // these rules; AUTHORIZATION_FAILED is used.
+    // capability/grant and reference a parent it is the subject of. Any
+    // failure, escalation included, is AUTHORIZATION_FAILED.
     let Some(parent_id) = &grant.parent else {
         return if is_owner {
             Ok(())
@@ -699,8 +697,11 @@ pub fn data_unit_policy(
 }
 
 /// A Snapshot hook for [`crate::wire::snapshot::ReceivedSnapshot::verify_with`]:
-/// the Snapshot's epoch is known at its Control Head, and the publisher
-/// holds `snapshot/publish` there (§29, §29.2).
+/// the Snapshot's epoch is known at its Control Head, the publisher holds
+/// `snapshot/publish` there (§29, §29.2), and, when the latest known state
+/// has closed the Snapshot's epoch, every sequence its frontier covers lies
+/// within that epoch's final frontier (§29, §19.1, G-EP4): otherwise
+/// `STALE_DATA_EPOCH`.
 pub fn snapshot_policy(
     history: &[ControlState],
 ) -> impl FnOnce(&crate::wire::snapshot::SnapshotHeader) -> Result<(), Error> + '_ {
@@ -710,7 +711,41 @@ pub fn snapshot_policy(
         if !state.dek_commitments.contains_key(&header.data_epoch) {
             return Err(Error::UnknownDataEpoch(header.data_epoch));
         }
-        state.require(&header.publisher, ability::SNAPSHOT_PUBLISH)
+        state.require(&header.publisher, ability::SNAPSHOT_PUBLISH)?;
+        let latest = history.last().ok_or(Error::UnknownControlHead)?;
+        snapshot_within_cutoff(latest, header)
+    }
+}
+
+/// §29 (G-EP4): a Snapshot of an epoch that `latest` has closed must not
+/// cover any unit beyond the epoch's final frontier.
+pub fn snapshot_within_cutoff(
+    latest: &ControlState,
+    header: &crate::wire::snapshot::SnapshotHeader,
+) -> Result<(), Error> {
+    use crate::base::QuarantineReason;
+    use crate::wire::have::{difference, HaveVector};
+    let Some(cutoff) = latest.closed_frontiers.get(&header.data_epoch) else {
+        return Ok(());
+    };
+    let beyond = difference(
+        &HaveVector::from_frontier(cutoff),
+        &HaveVector::from_frontier(&header.frontier),
+    )
+    .request;
+    match beyond.first() {
+        None => Ok(()),
+        Some(range) => Err(Error::StaleDataEpoch(
+            if cutoff
+                .entries()
+                .iter()
+                .any(|e| e.principal == range.principal)
+            {
+                QuarantineReason::BeyondCutoff
+            } else {
+                QuarantineReason::ActorAbsent
+            },
+        )),
     }
 }
 

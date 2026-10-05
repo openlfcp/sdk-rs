@@ -499,6 +499,8 @@ const IN_SCOPE_NEGATIVES: &[&str] = &[
     "grant_escalation_C9",
     "revoke_received_grant",
     "revoke_already_revoked",
+    "revoke_unknown_grant",
+    "route_version_not_increasing_C5",
     "genesis_signer_not_owner",
     "genesis_competing_root",
     "genesis_http_endpoint",
@@ -515,6 +517,18 @@ const IN_SCOPE_NEGATIVES: &[&str] = &[
     // Epochs (epoch_vectors.rs).
     "stale_epoch",
     "stale_epoch_absent_actor",
+    "snapshot_beyond_cutoff",
+    // Strict Ed25519 (ed25519_vectors.rs).
+    "ed25519_rfc8032_test1",
+    "ed25519_s_equals_l",
+    "ed25519_s_plus_l",
+    "ed25519_a_y_ge_p",
+    "ed25519_r_y_ge_p",
+    "ed25519_a_x0_sign_bit",
+    "ed25519_r_x0_sign_bit",
+    "ed25519_small_order_a",
+    "ed25519_mixed_order_a",
+    "ed25519_small_order_r",
 ];
 
 #[test]

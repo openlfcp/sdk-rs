@@ -448,8 +448,7 @@ impl Error {
             | Error::MessageMalformed
             | Error::MessageReservedEnvelopeKey(_)
             | Error::TextFrame => Some(WireCode::MalformedMessage),
-            // PROVISIONAL (snapshot sequence 0 code): §29 names no code;
-            // like Data Unit sequence 0 (§8), the payload is malformed.
+            // §29: Snapshot Sequence 0 is MALFORMED_MESSAGE.
             Error::SnapshotSequenceZero => Some(WireCode::MalformedMessage),
             Error::MessageTooLarge { .. } => Some(WireCode::MessageTooLarge),
             // §33 (G-MSG1).
@@ -464,14 +463,14 @@ impl Error {
             Error::AuthorizationFailed(_) => Some(WireCode::AuthorizationFailed),
             // .github MVP-0.1-PROTOCOL-SCOPE §4 (DV1).
             Error::UnsupportedInMvp(_) => Some(WireCode::ProtocolUnsupported),
-            // §13.1 (G-CP3): an object referencing a Control Head the
-            // receiver does not have, or an issuer it cannot resolve.
+            // §13.1 (G-CP3), §10.5, §26.3: an object referencing a Control
+            // Head the receiver does not have, or a signer no Control Record
+            // describes.
             Error::UnknownControlHead | Error::IssuerUnknown(_) => {
                 Some(WireCode::MissingDependency)
             }
-            // PROVISIONAL (unknown epoch code): §26.3 step 4 requires a
-            // recognized epoch but names no code; the object depends on
-            // Control state its referenced head does not have.
+            // §26.3 (G-EP2), §25.2 (G-EP6): an epoch not known at the
+            // object's referenced head, including a future one.
             Error::UnknownDataEpoch(_) => Some(WireCode::MissingDependency),
             Error::StaleDataEpoch(_) => Some(WireCode::StaleDataEpoch),
             // §14 (W1), §13.1 (G-CP3).
@@ -487,12 +486,17 @@ impl Error {
 
 impl Error {
     /// Whether the receiver sends `ERROR` with this error's code and then
-    /// closes the connection: a text WebSocket message (§31), no common
-    /// wire profile (§34) and a failed `AUTH` (§64 `WAIT_AUTH → CLOSED`).
+    /// closes the connection: a text WebSocket message (§31), a message
+    /// above the size limit (§31: the stream's framing can no longer be
+    /// trusted), no common wire profile (§34) and a failed `AUTH` (§64
+    /// `WAIT_AUTH → CLOSED`).
     pub fn closes_connection(&self) -> bool {
         matches!(
             self,
-            Error::TextFrame | Error::NoCommonWireProfile | Error::AuthFailed(_)
+            Error::TextFrame
+                | Error::MessageTooLarge { .. }
+                | Error::NoCommonWireProfile
+                | Error::AuthFailed(_)
         )
     }
 

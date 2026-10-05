@@ -490,7 +490,8 @@ fn non_empty<T>(items: Vec<T>) -> Result<Vec<T>, Error> {
 }
 
 /// A text field holding an endpoint or Control Coordinator URL: a
-/// receiver rejects any scheme other than `ws` or `wss` (§16).
+/// receiver rejects any scheme other than `ws` or `wss`, compared
+/// case-insensitively and followed by `://` (§16, URL).
 fn url_field(body: &Value, key: u64) -> Result<String, Error> {
     let url = text_field(body, key, &MALFORMED)?;
     match scheme(url) {

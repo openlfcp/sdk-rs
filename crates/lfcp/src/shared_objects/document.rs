@@ -24,14 +24,14 @@
 //! | [`SharedObjects::resolve_field_conflict`] | the chosen value, after merging | §47, §69 |
 //! | [`SharedObjects::insert_object`] | any object, e.g. of another type | §25, §71 |
 //!
-//! PROVISIONAL (G-SC4): a write always produces an operation. Automerge
+//! §58 (G-SC4): a write always produces an operation. Automerge
 //! implementations may skip an assignment of the value already present, so
 //! a value equal to the current one is deleted and put again in the same
 //! change; a concurrent add then beats a remove (§41, §43) and a restore
 //! conflicts with a concurrent delete (§52).
 //!
-//! PROVISIONAL (G-SC3): every string is written as an Automerge scalar
-//! string, never as Text.
+//! §30 (G-SC3): every string is written as an Automerge scalar string,
+//! never as Text.
 //!
 //! Objects are never removed from `objects` (§54, §56), and fields the
 //! document does not understand are never touched (§70–§72): intents write
@@ -198,10 +198,11 @@ impl SharedObjects {
     /// Apply the change carried by a Data Unit plaintext (§11) of
     /// `resource`, whose verified signer is `signer` (the unit's actor).
     ///
-    /// PROVISIONAL (SO-SEC1): the change's Automerge actor must be the §8
-    /// actor of (`resource`, `signer`), otherwise
-    /// [`ProfileError::ActorMismatch`] and nothing is applied: a Principal
-    /// must not inject changes into another Principal's Automerge history.
+    /// §11 (SC-CHUNK, SO-SEC1): the plaintext must carry one change chunk
+    /// with a valid checksum, and the change's Automerge actor must be the
+    /// §8 actor of (`resource`, `signer`); otherwise `PROFILE_INVALID` with
+    /// `CHANGE_ACTOR_MISMATCH` and nothing is applied: a Principal must not
+    /// write into another Principal's Automerge history.
     pub fn apply_unit_change(
         &mut self,
         resource: &ResourceId,
@@ -618,10 +619,11 @@ impl SharedObjects {
     }
 }
 
-/// PROVISIONAL (SO-SEC1): whether `change` was written by the §8 actor of
+/// §8, §11 (SO-SEC1): whether `change` was written by the §8 actor of
 /// (`resource`, `signer`), the Principal that signed the Data Unit carrying
-/// it. Any path that accepts a change together with its LFCP signer must
-/// call this before applying it.
+/// it; otherwise `PROFILE_INVALID` with `CHANGE_ACTOR_MISMATCH`. Any path
+/// that accepts a change together with its LFCP signer must call this
+/// before applying it.
 pub fn check_change_actor(
     resource: &ResourceId,
     signer: &PrincipalId,
@@ -630,11 +632,11 @@ pub fn check_change_actor(
     if change.actor_id().to_bytes() == actor_id_bytes(resource, signer) {
         Ok(())
     } else {
-        Err(ProfileError::ActorMismatch)
+        Err(Diagnostic::ChangeActorMismatch.into())
     }
 }
 
-/// Put `value` at `obj[field]` as a real operation. PROVISIONAL (G-SC4):
+/// Put `value` at `obj[field]` as a real operation. §58 (G-SC4):
 /// when the single current value already equals `value`, delete it first so
 /// the write is a new operation rather than nothing.
 fn write_scalar(

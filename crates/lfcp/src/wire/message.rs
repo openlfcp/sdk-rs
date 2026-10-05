@@ -1291,6 +1291,15 @@ mod tests {
         // §34: no common profile is ERROR(PROTOCOL_UNSUPPORTED), then close.
         assert!(Error::NoCommonWireProfile.closes_connection());
         assert!(!Error::MessageMalformed.closes_connection());
+        // §31 (SM-SIZE): a message above the limit closes the connection.
+        let small = DecodeOptions {
+            max_message_bytes: ping.len() - 1,
+            ..DecodeOptions::default()
+        };
+        let err = Message::decode_frame(FrameKind::Binary, &ping, &small).unwrap_err();
+        assert!(matches!(err, Error::MessageTooLarge { .. }), "{err:?}");
+        assert_eq!(err.wire_code().unwrap().name(), "MESSAGE_TOO_LARGE");
+        assert!(err.closes_connection());
     }
 
     #[test]

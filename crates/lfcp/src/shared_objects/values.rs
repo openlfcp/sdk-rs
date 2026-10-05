@@ -12,7 +12,7 @@ use crate::shared_objects::ProfileError;
 /// A value of the document as plain data.
 ///
 /// Scalar strings and collaborative Text stay distinct: the profile writes
-/// every string as a scalar (PROVISIONAL, G-SC3), so a [`Plain::Text`] is a
+/// every string as a scalar (§30, G-SC3), so a [`Plain::Text`] is a
 /// representation the validator reports.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Plain {

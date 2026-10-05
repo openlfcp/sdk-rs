@@ -200,7 +200,7 @@ impl ResourceSync {
             (S::Live, E::MissingRanges) => Ok(S::DataSync),
             (S::Live, E::NewControlRecord) => Ok(S::ControlSync),
             // §65: every state moves to CLOSED on RESOURCE_CLOSE or when the
-            // connection is lost. The diagram draws no CLOSED → CLOSED edge.
+            // connection is lost; CLOSED → CLOSED is illegal (SM-CLOSED).
             (S::Closed, E::CloseOrConnectionLost) => Err(illegal(S::Closed, event)),
             (_, E::CloseOrConnectionLost) => Ok(S::Closed),
             (S::ControlConflict, E::ManualClose) => Ok(S::Closed),

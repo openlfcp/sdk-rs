@@ -357,6 +357,16 @@ fn control_record_negatives() -> Vec<(&'static str, Outcome)> {
             "revoke_already_revoked",
             denied(AuthorityRule::RevokeAlreadyRevoked),
         ),
+        // §17.3 rule 1 (CODE-REVOKE): a target that names no grant.
+        (
+            "revoke_unknown_grant",
+            denied(AuthorityRule::RevokeTargetUnknown),
+        ),
+        // §20 (CODE): route version 0 does not advance past Genesis.
+        (
+            "route_version_not_increasing_C5",
+            denied(AuthorityRule::RouteVersionNotIncreasing),
+        ),
         // §15 (S2).
         ("genesis_signer_not_owner", Rejected(Error::CoseKidMismatch)),
         // §13.2 (G-CP5): a second Genesis is a root fork.
@@ -403,15 +413,17 @@ fn control_record_negatives_are_rejected() {
         };
         let mut records: Vec<&[u8]> = prefix.iter().map(Vec::as_slice).collect();
         records.push(&candidate);
-        // Principals are known from the vector fixtures: descriptors are
-        // self-certifying, so a receiver may learn them from anywhere
-        // (§13.1); without that, an issuer not yet described by the chain
-        // is MISSING_DEPENDENCY.
-        let known: Vec<PrincipalDescriptor> = f
-            .principals
-            .values()
-            .map(|keys| keys.descriptor().clone())
-            .collect();
+        // An issuer the chain does not describe yet comes with the case's
+        // context (C1-CONTEXT): descriptors are self-certifying, so a
+        // receiver may learn them from anywhere (§13.1, §10.5); without one
+        // it is MISSING_DEPENDENCY.
+        let known: Vec<PrincipalDescriptor> = match context["issuer_descriptor"]["case"].as_str() {
+            Some(principal_case) => {
+                let field = &f.suite.case(principal_case)["expected"]["descriptor_cbor"];
+                vec![PrincipalDescriptor::decode(&hex(principal_case, field)).unwrap()]
+            }
+            None => Vec::new(),
+        };
         let result = validate_authorized_with(&records, None, &known);
 
         let expected = &case["expected"];
@@ -434,26 +446,28 @@ fn control_record_negatives_are_rejected() {
             }
             (_, other) => panic!("{case_id}: unexpected {other:?}"),
         };
-        // Where the vector names a code it must match; where it names
-        // none, the code used is provisional (see authority.rs).
-        if let Some(code) = expected["error"]["code"].as_str() {
-            assert_eq!(
-                error.wire_code().map(|c| c.name()),
-                Some(code),
-                "{case_id}: code for {error:?}"
-            );
-        }
+        // Every negative names its code at baseline.4 (§62 general rule).
+        let code = expected["error"]["code"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{case_id}: no code"));
+        assert_eq!(
+            error.wire_code().map(|c| c.name()),
+            Some(code),
+            "{case_id}: code for {error:?}"
+        );
     }
 }
 
 /// The Control Record negatives this file decides.
-pub const CONTROL_RECORD_NEGATIVES: [&str; 11] = [
+pub const CONTROL_RECORD_NEGATIVES: [&str; 13] = [
     "key_epoch_frontier_unsorted",
     "key_epoch_frontier_duplicate",
     "grant_duplicate_ability_C1",
     "grant_escalation_C9",
     "revoke_received_grant",
     "revoke_already_revoked",
+    "revoke_unknown_grant",
+    "route_version_not_increasing_C5",
     "genesis_signer_not_owner",
     "genesis_competing_root",
     "genesis_http_endpoint",
@@ -713,6 +727,11 @@ mod synthetic {
             AuthorityRule::ClaimNotClaimable,
             "claim on a grant without claim_limit",
         );
+        // §18 (INVITE): not being claimable affects claims only; the grant
+        // still confers invite/claim, so its subject qualifies for the
+        // §25.2 Key Package exception.
+        let unlimited_grant = unlimited.grant(&unlimited_id).unwrap();
+        assert!(unlimited.confers_invite(unlimited_grant));
 
         // §18.1: C2 confers invite/claim until its one claim is used (C3).
         let c3 = f.state("C3_invite_claim_carol");

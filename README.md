@@ -82,7 +82,7 @@ builds on the stable Rust toolchain; no older minimum version is promised.
 `spec.lock` pins the specification this SDK implements:
 
 ```json
-{ "tag": "mvp-0.1-baseline.3", "commit": "4a558fb39ebb13da5b479989491c18ecaf9258da" }
+{ "tag": "mvp-0.1-baseline.4", "commit": "5310bb0643f96069fbe9d43a381fbf523374d9ed" }
 ```
 
 Vectors are never copied into this repository. The tests read them from a

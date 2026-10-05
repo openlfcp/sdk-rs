@@ -255,6 +255,53 @@ fn snapshots_need_a_known_epoch() {
     }
 }
 
+#[test]
+fn a_snapshot_beyond_a_closed_epochs_cutoff_is_stale() {
+    // §29 (G-EP4): an epoch-0 Snapshot at C5 whose frontier covers BOB
+    // 1..3, beyond C6's cutoff (BOB 2).
+    let f = Fixture::load();
+    let case_id = "snapshot_beyond_cutoff";
+    let case = f.suite.case(case_id);
+    assert_eq!(case["context"]["closed_epoch"], 0, "{case_id}");
+    assert_eq!(
+        case["context"]["cutoff_record"]["case"], "C6_key_epoch_1",
+        "{case_id}"
+    );
+    let bytes = hex(case_id, &case["inputs"]["cose_sign1"]);
+    let publisher = |received: &ReceivedSnapshot| {
+        principal_by_id(&f.principals, case_id, &received.header().publisher)
+            .descriptor()
+            .clone()
+    };
+    let received = ReceivedSnapshot::parse(&bytes).unwrap();
+    let signer = publisher(&received);
+    let err = received
+        .verify_with(&signer, snapshot_policy(&f.history))
+        .unwrap_err();
+    assert_eq!(
+        err,
+        Error::StaleDataEpoch(QuarantineReason::BeyondCutoff),
+        "{case_id}"
+    );
+    assert_eq!(
+        err.wire_code().map(|c| c.name()),
+        case["expected"]["error"]["code"].as_str(),
+        "{case_id}"
+    );
+    assert_eq!(case["expected"]["disposition"], "reject", "{case_id}");
+
+    // G-EP1: the latest known state decides. A verifier that knows the
+    // chain only up to C5, where epoch 0 is still current, accepts it.
+    let c5 = CHAIN
+        .iter()
+        .position(|id| *id == "C5_route_update")
+        .unwrap();
+    let received = ReceivedSnapshot::parse(&bytes).unwrap();
+    assert!(received
+        .verify_with(&signer, snapshot_policy(&f.history[..=c5]))
+        .is_ok());
+}
+
 /// Synthetic Key Epoch records on top of the published chain.
 mod synthetic {
     use super::*;

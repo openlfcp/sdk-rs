@@ -3,18 +3,21 @@
 //!
 //! | Data Unit | Outcome | § |
 //! | --- | --- | --- |
-//! | epoch not known at the unit's Control Head | reject: [`Error::UnknownDataEpoch`] | §26.3 step 4 |
+//! | Control Head unknown, or epoch not known at it (a future one included) | reject: `MISSING_DEPENDENCY` ([`Error::UnknownControlHead`], [`Error::UnknownDataEpoch`]) | §26.3 (G-EP2) |
 //! | current epoch | accept | §19.1 |
 //! | closed epoch, sequence within the actor's final-frontier entry | accept | §19.1 |
 //! | closed epoch, sequence beyond the actor's entry | quarantine: [`QuarantineReason::BeyondCutoff`] | §19.1 |
 //! | closed epoch, actor absent from the final frontier | quarantine: [`QuarantineReason::ActorAbsent`] | §19.1 |
 //!
-//! The cutoff applied is the one the latest known Control state records:
-//! once a Key Epoch is committed, every replica holds closed-epoch units to
-//! it, whatever head the unit observed. A quarantined unit is never merged
-//! automatically; a client keeps it and should surface it as stale offline
-//! work, and a server answers `DATA_PUT` with `NACK(STALE_DATA_EPOCH)`
-//! (§19.1, §75, §88 step 7, ADR 0001).
+//! The cutoff applied is the one the latest known Control state records
+//! (§19.1, §26.3, G-EP1): once a Key Epoch is known, every closed-epoch unit
+//! is held to it, whatever head the unit observed. A quarantined unit is
+//! never merged automatically; a client keeps it and should surface it as
+//! stale offline work, and a server answers `DATA_PUT` with
+//! `NACK(STALE_DATA_EPOCH)` (§19.1, §75, §88 step 7). Stale work an
+//! application keeps is re-applied as a new unit of the current epoch
+//! (§19.1, G-EP5); rebuilding a replica that had merged a unit now beyond
+//! the cutoff (§19.1, G-EP7) is the replica's, not this module's.
 
 use crate::base::{ControlRecordId, Error, QuarantineReason};
 use crate::wire::control::authority::{state_at, ControlState};

@@ -12,18 +12,19 @@
 //! The profile's errors are application-level codes, not LFCP Wire codes
 //! (§74.1), so they have their own [`ProfileError`] type.
 //!
-//! Two rules below are PROVISIONAL, pending the project owner (SPEC-CORPUS
-//! findings G-SC3 and G-SC4):
+//! Three rules bind the profile to Automerge (baseline.4, ADR 0003):
 //!
 //! - every profile string is written as an Automerge scalar string, and a
 //!   field found as collaborative Text is `PROFILE_INVALID` with
-//!   `INVALID_FIELD_TYPE`;
+//!   `INVALID_FIELD_TYPE` (§30, G-SC3);
 //! - an intent that writes always produces a real operation: a value equal
-//!   to the current one is deleted and put again in the same change.
-//!
-//! And one more (SO-SEC1): a received change is applied only when its
-//! Automerge actor is the §8 actor of the Principal that signed the Data
-//! Unit carrying it ([`document::SharedObjects::apply_unit_change`]).
+//!   to the current one is deleted and put again in the same change (§58,
+//!   G-SC4);
+//! - a received change is applied only when it is a change chunk with a
+//!   valid checksum whose Automerge actor is the §8 actor of the Principal
+//!   that signed the Data Unit carrying it; another actor is
+//!   `PROFILE_INVALID` with `CHANGE_ACTOR_MISMATCH` (§8, §11, SO-SEC1,
+//!   [`document::SharedObjects::apply_unit_change`]).
 
 use std::fmt;
 
@@ -37,7 +38,9 @@ pub mod values;
 pub const PROFILE: &str = "org.openlfcp.shared-objects.v1";
 
 /// A `PROFILE_INVALID` diagnostic (§74.1): exactly one names what is wrong.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// Declared in the order of the §74.1 table, which is the precedence when a
+/// value breaks several rules (SOG-2): `Ord` follows it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Diagnostic {
     /// `profile` differs, or `objects` or `extensions` is missing or not a
     /// map (§15).
@@ -68,6 +71,9 @@ pub enum Diagnostic {
     InvalidTag,
     /// `id`, `type` or `created_by` changed (§75).
     ImmutableFieldMutated,
+    /// A Data Unit's Automerge change is not a change of the §8 actor of
+    /// the unit's signer; it is not merged (§8, §11, SO-SEC1).
+    ChangeActorMismatch,
 }
 
 impl Diagnostic {
@@ -87,6 +93,7 @@ impl Diagnostic {
             Diagnostic::InvalidCollectionRepresentation => "INVALID_COLLECTION_REPRESENTATION",
             Diagnostic::InvalidTag => "INVALID_TAG",
             Diagnostic::ImmutableFieldMutated => "IMMUTABLE_FIELD_MUTATED",
+            Diagnostic::ChangeActorMismatch => "CHANGE_ACTOR_MISMATCH",
         }
     }
 }
@@ -108,10 +115,6 @@ pub enum ProfileError {
     Automerge(String),
     /// No object with this ID in the document.
     UnknownObject,
-    /// An Automerge change whose actor is not the §8 actor of the Principal
-    /// that signed the Data Unit carrying it (PROVISIONAL, SO-SEC1): it
-    /// would put the signer's change into another Principal's history.
-    ActorMismatch,
     /// The object is not a Task.
     NotATask,
 }
@@ -159,9 +162,6 @@ impl fmt::Display for ProfileError {
             ProfileError::Automerge(message) => write!(f, "Automerge: {message}"),
             ProfileError::UnknownObject => f.write_str("no such object"),
             ProfileError::NotATask => f.write_str("the object is not a Task"),
-            ProfileError::ActorMismatch => {
-                f.write_str("the change's actor is not the signing Principal's actor")
-            }
         }
     }
 }

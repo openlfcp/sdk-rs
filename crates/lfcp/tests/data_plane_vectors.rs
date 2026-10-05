@@ -423,15 +423,16 @@ fn non_canonical_frontiers_are_malformed() {
 
 #[test]
 fn snapshot_sequence_zero_is_rejected() {
-    // §29 (W5): Snapshot Sequences begin at 1. The vector names no code;
-    // this crate uses MALFORMED_MESSAGE provisionally.
+    // §29 (W5): Snapshot Sequences begin at 1; sequence 0 is
+    // MALFORMED_MESSAGE.
     let suite = Suite::load();
     let case_id = "snapshot_sequence_zero";
     let case = suite.case(case_id);
     let err = ReceivedSnapshot::parse(&hex(case_id, &case["inputs"]["cose_sign1"]))
         .expect_err("snapshot_sequence_zero: parsed");
     assert_eq!(err, Error::SnapshotSequenceZero, "{case_id}");
-    expect_invalid(case, "reject", None);
+    expect_invalid(case, "reject", Some("MALFORMED_MESSAGE"));
+    assert_eq!(err.wire_code().unwrap().name(), "MALFORMED_MESSAGE");
 }
 
 #[test]
