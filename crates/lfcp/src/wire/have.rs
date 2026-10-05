@@ -141,6 +141,7 @@ impl HaveVector {
     /// the non-existent sequence 0, is not a set of sequences and is
     /// rejected as `MALFORMED_MESSAGE`.
     pub fn from_wire(entries: &[WireActorHave]) -> Result<HaveVector, Error> {
+        // PROVISIONAL (G-MSG6): accept unnormalized live Haves and merge them.
         let mut vector = HaveVector::new();
         for entry in entries {
             let mut ranges = Vec::new();
