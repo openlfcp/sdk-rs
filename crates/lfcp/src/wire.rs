@@ -8,6 +8,7 @@
 //! - [`data_unit`]: Data Units: payload, AAD, seal and open, actor hash
 //!   chain and equivocation.
 //! - [`frontier`]: Actor Have entries and canonical frontiers.
+//! - [`snapshot`]: Snapshots: payload, key, AAD, seal and open.
 //!
 //! Control Records arrive in LFCP-042b, Key Packages in LFCP-042c and
 //! session messages in LFCP-043.
@@ -15,6 +16,7 @@
 pub mod data_unit;
 pub mod frontier;
 pub mod keys;
+pub mod snapshot;
 
 use crate::base::{Error, Hash32, PrincipalId, ResourceId};
 use crate::cbor::Value;

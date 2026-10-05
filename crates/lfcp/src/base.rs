@@ -112,6 +112,9 @@ pub enum Error {
     /// An `actor-have` or frontier breaks a canonical-form rule (§28.1,
     /// §28.2, N6).
     FrontierNotCanonical(FrontierRule),
+    /// A Snapshot payload is not the closed §29 map with the field types
+    /// the CDDL gives.
+    SnapshotMalformed,
 }
 
 /// The canonical-form rule a frontier breaks (LFCP-WIRE-01 §28.1, §28.2).
@@ -175,6 +178,7 @@ impl Error {
             Error::ActorEquivocation => "ACTOR_EQUIVOCATION",
             Error::FrontierMalformed => "FRONTIER_MALFORMED",
             Error::FrontierNotCanonical(_) => "FRONTIER_NOT_CANONICAL",
+            Error::SnapshotMalformed => "SNAPSHOT_MALFORMED",
         }
     }
 
@@ -213,7 +217,8 @@ impl Error {
             | Error::DataUnitMalformed
             | Error::DataUnitSequenceZero
             | Error::FrontierMalformed
-            | Error::FrontierNotCanonical(_) => Some(WireCode::MalformedMessage),
+            | Error::FrontierNotCanonical(_)
+            | Error::SnapshotMalformed => Some(WireCode::MalformedMessage),
             Error::ActorEquivocation => Some(WireCode::ActorEquivocation),
             Error::SignatureInvalid | Error::CoseKidMismatch => Some(WireCode::InvalidSignature),
         }
@@ -285,6 +290,7 @@ impl fmt::Display for Error {
             Error::ActorEquivocation => f.write_str("actor equivocation"),
             Error::FrontierMalformed => f.write_str("malformed actor-have or frontier"),
             Error::FrontierNotCanonical(rule) => write!(f, "non-canonical frontier: {rule:?}"),
+            Error::SnapshotMalformed => f.write_str("malformed Snapshot payload"),
         }
     }
 }
