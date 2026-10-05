@@ -120,6 +120,8 @@ pub enum Error {
     /// A Snapshot payload is not the closed §29 map with the field types
     /// the CDDL gives.
     SnapshotMalformed,
+    /// A Snapshot has Snapshot Sequence 0; sequences begin at 1 (§29, W5).
+    SnapshotSequenceZero,
     /// A Control Record payload or body is not the closed map with the
     /// field types its CDDL gives (§13–§24).
     ControlRecordMalformed,
@@ -370,6 +372,7 @@ impl Error {
             Error::FrontierMalformed => "FRONTIER_MALFORMED",
             Error::FrontierNotCanonical(_) => "FRONTIER_NOT_CANONICAL",
             Error::SnapshotMalformed => "SNAPSHOT_MALFORMED",
+            Error::SnapshotSequenceZero => "SNAPSHOT_SEQUENCE_ZERO",
             Error::ControlRecordMalformed => "CONTROL_RECORD_MALFORMED",
             Error::ControlUnknownCoreType(_) => "CONTROL_UNKNOWN_CORE_TYPE",
             Error::IssuerUnknown(_) => "ISSUER_UNKNOWN",
@@ -445,6 +448,9 @@ impl Error {
             | Error::MessageMalformed
             | Error::MessageReservedEnvelopeKey(_)
             | Error::TextFrame => Some(WireCode::MalformedMessage),
+            // PROVISIONAL (snapshot sequence 0 code): §29 names no code;
+            // like Data Unit sequence 0 (§8), the payload is malformed.
+            Error::SnapshotSequenceZero => Some(WireCode::MalformedMessage),
             Error::MessageTooLarge { .. } => Some(WireCode::MessageTooLarge),
             // §33 (G-MSG1).
             Error::UnsupportedMessageType(_) => Some(WireCode::ProtocolUnsupported),
@@ -567,6 +573,7 @@ impl fmt::Display for Error {
             Error::FrontierMalformed => f.write_str("malformed actor-have or frontier"),
             Error::FrontierNotCanonical(rule) => write!(f, "non-canonical frontier: {rule:?}"),
             Error::SnapshotMalformed => f.write_str("malformed Snapshot payload"),
+            Error::SnapshotSequenceZero => f.write_str("Snapshot Sequence 0"),
             Error::ControlRecordMalformed => f.write_str("malformed Control Record"),
             Error::ControlUnknownCoreType(code) => {
                 write!(f, "unknown core Control Record type {code}")

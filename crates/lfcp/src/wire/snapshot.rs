@@ -88,6 +88,10 @@ impl SnapshotHeader {
             control_head: hash_field(payload, 4, &err)?,
             frontier: Frontier::from_value(payload.get_uint(5).ok_or(err.clone())?)?,
         };
+        // §29: Snapshot Sequences begin at 1.
+        if header.sequence == 0 {
+            return Err(Error::SnapshotSequenceZero);
+        }
         let ciphertext = bytes_field(payload, 6, &err)?.to_vec();
         Ok((header, ciphertext))
     }
@@ -168,6 +172,9 @@ impl Snapshot {
     ) -> Result<Snapshot, Error> {
         if signer.descriptor().id() != &header.publisher {
             return Err(Error::CoseKidMismatch);
+        }
+        if header.sequence == 0 {
+            return Err(Error::SnapshotSequenceZero);
         }
         let ciphertext = crypto::aead_seal(
             header.key(dek).expose_secret(),
@@ -270,6 +277,25 @@ mod tests {
             received.verify(other.descriptor()),
             Err(Error::CoseKidMismatch)
         );
+    }
+
+    #[test]
+    fn snapshot_sequences_begin_at_1() {
+        // §29 (W5): sealing refuses 0 and a received 0 is rejected.
+        let dek = Dek::from_bytes([3; 32]);
+        let zero = SnapshotHeader {
+            sequence: 0,
+            ..header()
+        };
+        assert_eq!(
+            Snapshot::seal(zero.clone(), b"x", &dek, &publisher()),
+            Err(Error::SnapshotSequenceZero)
+        );
+        let payload = cbor::encode(&zero.payload(vec![0; 17])).unwrap();
+        let object = cose::sign(&payload, &publisher()).unwrap();
+        let err = ReceivedSnapshot::parse(object.bytes()).unwrap_err();
+        assert_eq!(err, Error::SnapshotSequenceZero);
+        assert_eq!(err.wire_code().unwrap().name(), "MALFORMED_MESSAGE");
     }
 
     #[test]
