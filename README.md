@@ -8,9 +8,10 @@ test vectors in `openlfcp/spec`, not ported from `sdk-ts`.
 
 ## Status
 
-Bootstrapped (LFCP-040): the crate layout, lints, CI and access to the
-official vectors are in place. The modules are documented placeholders;
-the protocol primitives arrive in LFCP-041.
+The protocol primitives are implemented and checked against the official
+vectors (LFCP-041): identifiers, deterministic CBOR, Principals and
+canonical COSE_Sign1. Control Plane, Data Plane, AEAD, HKDF and HPKE are
+LFCP-042; the wire session is LFCP-043.
 
 ## Independence rule
 
@@ -27,14 +28,17 @@ uses the modules listed above it.
 
 | Module | Responsibility |
 | --- | --- |
-| `base` | Identifiers (Resource, Principal, …), errors, byte helpers |
-| `crypto` | Thin wrappers over established cryptographic crates; no primitive is implemented here |
-| `cbor` | Hand-written deterministic CBOR codec |
-| `cose` | Canonical COSE structures |
-| `wire` | LFCP Wire structures, messages and validation |
+| `base` | 32-byte ID types, UUIDv7 Object IDs, hex and base64url, the error type with wire codes |
+| `crypto` | SHA-256, Ed25519 (strict verification) and X25519 wrappers; no primitive is implemented here |
+| `cbor` | Hand-written deterministic CBOR codec (WIRE §5.2) |
+| `principal` | Principal IDs, descriptors and keys (WIRE §7) |
+| `cose` | Canonical untagged COSE_Sign1: sign, parse, verify (WIRE §10) |
+| `wire` | LFCP Wire structures, messages and validation (empty until LFCP-042) |
 
 The crate has no application or editor dependency, and it forbids `unsafe`
-code. It builds on the stable Rust toolchain; no older minimum version is
+code. Its runtime dependencies are `sha2`, `ed25519-dalek` and
+`x25519-dalek`, with default features off; `Cargo.toml` justifies each
+enabled feature. There is no CBOR dependency. It builds on the stable Rust toolchain; no older minimum version is
 promised.
 
 ## Specification pin
