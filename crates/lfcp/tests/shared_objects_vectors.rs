@@ -865,6 +865,65 @@ fn text_strings_are_profile_invalid() {
 }
 
 #[test]
+fn text_anywhere_in_an_object_is_profile_invalid() {
+    // §30 (SO-STRINGS): the scalar-string rule covers every string in an
+    // object: `extensions`, unknown fields, nested maps and lists, and
+    // fields with rules of their own (§74.1 order: INVALID_FIELD_TYPE
+    // first). Each Text is one failing value, at its own pointer.
+    let suite = suite();
+    let f = Fixtures::load(&suite);
+    let (mut doc, key) = s01_document(&suite, &f);
+    let text = |s: &str| Plain::Text(s.into());
+    let map = |entries: Vec<(&str, Plain)>| {
+        Plain::Map(
+            entries
+                .into_iter()
+                .map(|(k, v)| (k.to_owned(), v))
+                .collect(),
+        )
+    };
+    doc.write_field(
+        "mutation",
+        &key,
+        "extensions",
+        &map(vec![(
+            "org.example.app",
+            map(vec![
+                ("note", text("n")),
+                ("ok", Plain::Str("scalar".into())),
+                ("list", Plain::List(vec![Plain::Str("s".into()), text("l")])),
+            ]),
+        )]),
+    )
+    .unwrap();
+    doc.write_field("mutation", &key, "x_unknown", &text("u"))
+        .unwrap();
+    doc.write_field("mutation", &key, "status", &text("todo"))
+        .unwrap();
+    doc.write_field("mutation", &key, "due", &text("2026-10-05"))
+        .unwrap();
+    let at = |rest: &str| format!("/objects/{key}{rest}");
+    let problems: Vec<(String, &str)> = doc
+        .problems()
+        .unwrap()
+        .into_iter()
+        .map(|p| (p.pointer, p.diagnostic.name()))
+        .collect();
+    let mut expected = vec![
+        (at("/due"), "INVALID_FIELD_TYPE"),
+        (
+            at("/extensions/org.example.app/list/1"),
+            "INVALID_FIELD_TYPE",
+        ),
+        (at("/extensions/org.example.app/note"), "INVALID_FIELD_TYPE"),
+        (at("/status"), "INVALID_FIELD_TYPE"),
+        (at("/x_unknown"), "INVALID_FIELD_TYPE"),
+    ];
+    expected.sort();
+    assert_eq!(problems, expected);
+}
+
+#[test]
 fn the_corpus_change_actor_negative_is_not_merged() {
     // SO-SEC1-change-actor-mismatch: on top of S01, a Data Unit signed by
     // andrey carrying pavel's change.

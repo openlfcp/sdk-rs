@@ -31,8 +31,10 @@
 //! | 16 | Task: `assignees` a map of `true`, keys Principal references | `INVALID_COLLECTION_REPRESENTATION`, `INVALID_PRINCIPAL_REF` | §42 |
 //! | 17 | `id`, `type`, `created_by` equal their values at creation | `IMMUTABLE_FIELD_MUTATED` | §75 |
 //!
-//! "Text" means an Automerge scalar string. A field held as collaborative
-//! Text is `INVALID_FIELD_TYPE` (§30, G-SC3). A conflicted field is valid
+//! "Text" means an Automerge scalar string. A value held as collaborative
+//! Text anywhere in an object (any field, `extensions`, nested maps and
+//! lists) is `INVALID_FIELD_TYPE` at its own pointer (§30, G-SC3,
+//! SO-STRINGS); by §74.1 order it comes before the field's other rules. A conflicted field is valid
 //! only if every concurrent value is (§74.1). An object of an unknown type
 //! gets rules 1–10 and 17 (§71). The immutability check compares the
 //! current values with those written by the change that created the object
@@ -118,6 +120,41 @@ impl Problems {
             })
             .collect()
     }
+}
+
+/// `INVALID_FIELD_TYPE` for every value under the map or list `obj` (at
+/// `path`) that is collaborative Text, however deep (§30, SO-STRINGS).
+fn text_problems(
+    doc: &AutoCommit,
+    obj: &ObjId,
+    path: &mut Vec<String>,
+    problems: &mut Problems,
+) -> Result<(), ProfileError> {
+    let entries: Vec<(String, Vec<(Value<'_>, ObjId)>)> = match doc.object_type(obj) {
+        Ok(ObjType::List) => (0..doc.length(obj))
+            .map(|i| Ok((i.to_string(), doc.get_all(obj, i)?)))
+            .collect::<Result<_, ProfileError>>()?,
+        Ok(ObjType::Map | ObjType::Table) => doc
+            .keys(obj)
+            .map(|k| Ok((k.clone(), doc.get_all(obj, k.as_str())?)))
+            .collect::<Result<_, ProfileError>>()?,
+        _ => return Ok(()),
+    };
+    for (segment, values) in entries {
+        path.push(segment);
+        for (value, child) in values {
+            match value {
+                Value::Object(ObjType::Text) => {
+                    let segments: Vec<&str> = path.iter().map(String::as_str).collect();
+                    problems.add(&segments, Diagnostic::InvalidFieldType);
+                }
+                Value::Object(_) => text_problems(doc, &child, path, problems)?,
+                Value::Scalar(_) => {}
+            }
+        }
+        path.pop();
+    }
+    Ok(())
 }
 
 /// The root problems (§15, §18, §74): `profile` that is not the profile
@@ -341,6 +378,15 @@ pub fn object_problems(
             }
         }
     }
+
+    // §30 (SO-STRINGS): a string anywhere in the object, unknown fields,
+    // `extensions` and nested maps and lists included, held as Text.
+    text_problems(
+        doc,
+        obj,
+        &mut vec!["objects".into(), key.into()],
+        &mut problems,
+    )?;
 
     // Rule 17: immutable fields keep the values the creating change wrote.
     if let Some(created) = doc.hash_for_opid(obj) {
