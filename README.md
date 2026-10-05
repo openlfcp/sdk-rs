@@ -6,6 +6,14 @@ It exists to prove that LFCP is an interoperable protocol rather than a
 TypeScript convention, so it is written against the specifications and
 test vectors in `openlfcp/spec`, not ported from `sdk-ts`.
 
+## Scope
+
+sdk-rs implements the OpenLFCP MVP 0.1 subset of LFCP-WIRE-01
+at `mvp-0.1-baseline.6`, not every deferred WIRE-01 feature; it has no
+invitation URI codec yet. See
+`.github: docs/release/deferred-wire-01-features.md` (in [openlfcp/.github](https://github.com/openlfcp/.github)). It does not claim
+full LFCP-WIRE-01 conformance.
+
 ## Status
 
 Implemented and checked against the official vectors:
