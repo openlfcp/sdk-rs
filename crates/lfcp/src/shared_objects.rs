@@ -119,6 +119,18 @@ pub enum ProfileError {
     /// message. Received bytes that are not valid are
     /// [`Diagnostic::InvalidAutomergeBytes`] instead.
     Automerge(String),
+    /// §14.1: the change's dependencies (listed) are not in the document
+    /// yet. It was not applied; hold it and offer it again once they are.
+    MissingDependencies(Vec<automerge::ChangeHash>),
+    /// §14.1: the actor already has a change at this sequence number
+    /// (equivocation, §26.2 of LFCP-WIRE-01, or a reused sequence). Not
+    /// applied.
+    SequenceTaken {
+        /// The change's sequence number.
+        seq: u64,
+        /// The actor's latest sequence number in the document.
+        latest: u64,
+    },
     /// No object with this ID in the document.
     UnknownObject,
     /// The object is not a Task.
@@ -162,6 +174,16 @@ impl fmt::Display for ProfileError {
             ProfileError::Invalid(d) => write!(f, "PROFILE_INVALID: {}", d.name()),
             ProfileError::ObjectIdCollision => f.write_str("OBJECT_ID_COLLISION"),
             ProfileError::Automerge(message) => write!(f, "Automerge: {message}"),
+            ProfileError::MissingDependencies(missing) => {
+                write!(
+                    f,
+                    "{} dependencies are not in the document yet",
+                    missing.len()
+                )
+            }
+            ProfileError::SequenceTaken { seq, latest } => {
+                write!(f, "actor sequence {seq} is taken (latest {latest})")
+            }
             ProfileError::UnknownObject => f.write_str("no such object"),
             ProfileError::NotATask => f.write_str("the object is not a Task"),
         }

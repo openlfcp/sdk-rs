@@ -37,7 +37,8 @@
 //! document does not understand are never touched (§70–§72): intents write
 //! single properties, not whole objects.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use automerge::transaction::{CommitOptions, Transactable};
 use automerge::{
@@ -152,10 +153,50 @@ fn require(ok: bool, diagnostic: Diagnostic) -> Result<(), ProfileError> {
 }
 
 /// The Automerge document of one Resource under this profile.
+///
+/// §14.1 (baseline.6): a change reaches the Automerge engine only when
+/// every dependency is in the document and its sequence number is exactly
+/// one more than its actor's latest change here (or 1). Automerge keeps no
+/// pending changes for this document: a change with a missing dependency is
+/// handed back ([`ProfileError::MissingDependencies`]) for the caller to
+/// hold, and a sequence gap is `INVALID_AUTOMERGE_BYTES` before the engine
+/// sees it (automerge 0.12 aborts on one, and a JavaScript engine corrupts
+/// the document). As defense in depth, an engine error or panic during an
+/// apply restores the document as it was before the apply.
 #[derive(Debug)]
 pub struct SharedObjects {
     doc: AutoCommit,
     time: i64,
+    /// The latest sequence number of each actor in `doc`.
+    seqs: HashMap<ActorId, u64>,
+}
+
+/// `AutoCommit::load`, with an engine abort reported as
+/// `INVALID_AUTOMERGE_BYTES`. Sound: on a panic the half-built document is
+/// dropped, never used.
+pub(crate) fn load_guarded(save: &[u8]) -> Result<AutoCommit, ProfileError> {
+    match catch_unwind(|| AutoCommit::load(save)) {
+        Ok(Ok(doc)) => Ok(doc),
+        Ok(Err(_)) | Err(_) => Err(ProfileError::Invalid(Diagnostic::InvalidAutomergeBytes)),
+    }
+}
+
+/// The latest sequence number of every actor of `doc`.
+fn seqs_of(doc: &mut AutoCommit) -> HashMap<ActorId, u64> {
+    let mut seqs = HashMap::new();
+    for change in doc.get_changes(&[]) {
+        let latest = seqs.entry(change.actor_id().clone()).or_insert(0);
+        *latest = (*latest).max(change.seq());
+    }
+    seqs
+}
+
+/// What the §14.1 check decides for one received change.
+enum Admission {
+    /// Every dependency is here and the sequence is the actor's next one.
+    Apply,
+    /// The document already holds this change.
+    Duplicate,
 }
 
 impl SharedObjects {
@@ -166,19 +207,22 @@ impl SharedObjects {
         SharedObjects {
             doc: AutoCommit::new().with_actor(actor),
             time: 0,
+            seqs: HashMap::new(),
         }
     }
 
+    fn with_doc(mut doc: AutoCommit, time: i64) -> SharedObjects {
+        let seqs = seqs_of(&mut doc);
+        SharedObjects { doc, time, seqs }
+    }
+
     /// Load a full-save image (§13) and continue writing as `actor`. A
-    /// save that does not load is `PROFILE_INVALID` with
-    /// `INVALID_AUTOMERGE_BYTES`.
+    /// save that does not load, or that makes the engine abort, is
+    /// `PROFILE_INVALID` with `INVALID_AUTOMERGE_BYTES`; the half-built
+    /// document is dropped.
     pub fn load(save: &[u8], actor: ActorId) -> Result<SharedObjects, ProfileError> {
-        Ok(SharedObjects {
-            doc: AutoCommit::load(save)
-                .map_err(|_| ProfileError::Invalid(Diagnostic::InvalidAutomergeBytes))?
-                .with_actor(actor),
-            time: 0,
-        })
+        let doc = load_guarded(save)?.with_actor(actor);
+        Ok(SharedObjects::with_doc(doc, 0))
     }
 
     /// Set the time recorded in the changes this document writes.
@@ -195,8 +239,94 @@ impl SharedObjects {
     /// as changes from a trusted local store. Changes received in Data Units
     /// go through [`SharedObjects::apply_unit_change`], which checks their
     /// actor against the signer.
-    pub fn apply_changes(&mut self, changes: Vec<Change>) -> Result<(), ProfileError> {
-        Ok(self.doc.apply_changes(changes)?)
+    ///
+    /// The changes may come in any order: each is applied once its
+    /// dependencies are in the document. Those still missing a dependency
+    /// are returned, never handed to the engine (§14.1). A change that
+    /// fails the §14.1 sequence check stops the call with its error;
+    /// changes applied before it stay applied.
+    pub fn apply_changes(&mut self, changes: Vec<Change>) -> Result<Vec<Change>, ProfileError> {
+        let mut waiting = changes;
+        loop {
+            let mut progress = false;
+            let mut still = Vec::new();
+            for change in waiting {
+                match self.admit(&change) {
+                    Ok(Admission::Duplicate) => progress = true,
+                    Ok(Admission::Apply) => {
+                        self.engine_apply(change)?;
+                        progress = true;
+                    }
+                    Err(ProfileError::MissingDependencies(_)) => still.push(change),
+                    Err(err) => return Err(err),
+                }
+            }
+            if !progress || still.is_empty() {
+                return Ok(still);
+            }
+            waiting = still;
+        }
+    }
+
+    /// §14.1: whether `change` may enter the engine now.
+    fn admit(&mut self, change: &Change) -> Result<Admission, ProfileError> {
+        let hash = change.hash();
+        if self.doc.get_change_by_hash(&hash).is_some() {
+            return Ok(Admission::Duplicate);
+        }
+        let missing: Vec<ChangeHash> = change
+            .deps()
+            .iter()
+            .filter(|d| self.doc.get_change_by_hash(d).is_none())
+            .copied()
+            .collect();
+        if !missing.is_empty() {
+            return Err(ProfileError::MissingDependencies(missing));
+        }
+        let latest = self.seqs.get(change.actor_id()).copied().unwrap_or(0);
+        if change.seq() <= latest {
+            // Another change already holds this actor sequence: equivocation
+            // (LFCP-WIRE-01 §26.2) or a reused sequence (§9).
+            return Err(ProfileError::SequenceTaken {
+                seq: change.seq(),
+                latest,
+            });
+        }
+        // A gap, or an author on a change other than the actor's first: the
+        // engine would abort (automerge 0.12 change_graph asserts both).
+        if change.seq() != latest + 1 || (change.author().is_some() && change.seq() != 1) {
+            return Err(ProfileError::Invalid(Diagnostic::InvalidAutomergeBytes));
+        }
+        Ok(Admission::Apply)
+    }
+
+    /// Apply one admitted change; a duplicate changes nothing.
+    fn apply_one(&mut self, change: Change) -> Result<(), ProfileError> {
+        match self.admit(&change)? {
+            Admission::Duplicate => Ok(()),
+            Admission::Apply => self.engine_apply(change),
+        }
+    }
+
+    /// Hand `change` to the engine. Defense in depth: on an engine error or
+    /// panic the document is restored as it was before, and the change is
+    /// `INVALID_AUTOMERGE_BYTES`. The admission check makes this
+    /// unreachable for the known abort; a panicked document is never kept.
+    fn engine_apply(&mut self, change: Change) -> Result<(), ProfileError> {
+        let backup = self.doc.clone();
+        let (actor, seq) = (change.actor_id().clone(), change.seq());
+        let doc = &mut self.doc;
+        let outcome = catch_unwind(AssertUnwindSafe(|| doc.apply_changes(vec![change])));
+        match outcome {
+            Ok(Ok(())) => {
+                self.seqs.insert(actor, seq);
+                Ok(())
+            }
+            Ok(Err(_)) | Err(_) => {
+                self.doc = backup;
+                Err(ProfileError::Invalid(Diagnostic::InvalidAutomergeBytes))
+            }
+        }
     }
 
     /// Apply the change carried by a Data Unit plaintext (§11) of
@@ -207,6 +337,12 @@ impl SharedObjects {
     /// §8 actor of (`resource`, `signer`); otherwise `PROFILE_INVALID` with
     /// `CHANGE_ACTOR_MISMATCH` and nothing is applied: a Principal must not
     /// write into another Principal's Automerge history.
+    ///
+    /// §14.1: a change missing a dependency is
+    /// [`ProfileError::MissingDependencies`] (hold the unit and offer it
+    /// again); a sequence gap is `INVALID_AUTOMERGE_BYTES`; a sequence its
+    /// actor already used is [`ProfileError::SequenceTaken`]. None of them
+    /// reaches the engine. A change already here is a no-op.
     pub fn apply_unit_change(
         &mut self,
         resource: &ResourceId,
@@ -215,7 +351,7 @@ impl SharedObjects {
     ) -> Result<(), ProfileError> {
         let change = decode_change(plaintext)?;
         check_change_actor(resource, signer, &change)?;
-        self.apply_changes(vec![change])
+        self.apply_one(change)
     }
 
     /// A copy writing as `actor`, sharing this document's history.
@@ -223,12 +359,16 @@ impl SharedObjects {
         SharedObjects {
             doc: self.doc.fork().with_actor(actor),
             time: self.time,
+            seqs: self.seqs.clone(),
         }
     }
 
     /// Merge another replica's changes into this one.
     pub fn merge(&mut self, other: &mut SharedObjects) -> Result<(), ProfileError> {
+        // Both histories passed §14.1 on their way in; the merge adds the
+        // other's changes in dependency order.
         self.doc.merge(&mut other.doc)?;
+        self.seqs = seqs_of(&mut self.doc);
         Ok(())
     }
 
@@ -363,10 +503,14 @@ impl SharedObjects {
         let options = CommitOptions::default()
             .with_message(intent.to_owned())
             .with_time(self.time);
-        Ok(match self.doc.commit_with(options) {
+        let change = match self.doc.commit_with(options) {
             Some(hash) => self.doc.get_change_by_hash(&hash),
             None => None,
-        })
+        };
+        if let Some(c) = &change {
+            self.seqs.insert(c.actor_id().clone(), c.seq());
+        }
+        Ok(change)
     }
 
     /// §16: the initial document, in one change.
@@ -746,5 +890,147 @@ fn scalar_of(value: &Plain) -> ScalarValue {
         Plain::Map(_) | Plain::List(_) | Plain::Text(_) => {
             unreachable!("objects are written by put_plain")
         }
+    }
+}
+
+#[cfg(test)]
+mod admission_tests {
+    //! §14.1 (baseline.6) and the E4 crash: a change whose sequence skips
+    //! its actor's next number, with every dependency present, makes
+    //! automerge 0.12 abort (change_graph assert). It must be refused
+    //! before the engine, and the document must stay usable.
+
+    use super::*;
+
+    fn put_root(doc: &mut SharedObjects, key: &str, value: &str) -> Change {
+        doc.transact("test", |d| {
+            d.put(ROOT, key, value)?;
+            Ok(())
+        })
+        .unwrap()
+        .unwrap()
+    }
+
+    fn actor(n: u8) -> ActorId {
+        ActorId::from(vec![n; 16])
+    }
+
+    /// A writer's first change (init) and a second one, re-encoded with
+    /// sequence 3: its only dependency is the first change, so a receiver
+    /// holding the first has every dependency and sees a gap.
+    fn crafted() -> (Change, Change, Change) {
+        let mut writer = SharedObjects::new(actor(1));
+        let first = writer.initialize().unwrap();
+        let second = put_root(&mut writer, "note", "hello");
+        let mut expanded = second.decode();
+        expanded.seq = 3;
+        expanded.hash = None;
+        let gapped = Change::from(expanded);
+        assert_eq!(gapped.deps(), &[first.hash()]);
+        assert_eq!(gapped.seq(), 3);
+        (first, second, gapped)
+    }
+
+    fn state(doc: &mut SharedObjects) -> (Vec<ChangeHash>, Vec<u8>) {
+        (doc.heads(), doc.save())
+    }
+
+    #[test]
+    fn a_sequence_gap_is_refused_before_the_engine() {
+        let (first, second, gapped) = crafted();
+        let mut receiver = SharedObjects::new(actor(2));
+        assert!(receiver
+            .apply_changes(vec![first.clone()])
+            .unwrap()
+            .is_empty());
+        let before = state(&mut receiver);
+
+        assert_eq!(
+            receiver.apply_changes(vec![gapped.clone()]),
+            Err(ProfileError::Invalid(Diagnostic::InvalidAutomergeBytes))
+        );
+        // Nothing changed; the document still takes the real change, a local
+        // write, and saves and loads.
+        assert_eq!(state(&mut receiver), before);
+        assert!(receiver.apply_changes(vec![second]).unwrap().is_empty());
+        put_root(&mut receiver, "mine", "ok");
+        let save = receiver.save();
+        let mut loaded = SharedObjects::load(&save, actor(2)).unwrap();
+        assert_eq!(loaded.heads(), receiver.heads());
+    }
+
+    #[test]
+    fn the_engine_path_restores_the_document_if_it_ever_fails() {
+        // The admission check bypassed: the engine's abort is caught and the
+        // document as it was before is kept, never the half-applied one.
+        let (first, _, gapped) = crafted();
+        // The crafted change really aborts the bare engine (E4).
+        let raw = catch_unwind(AssertUnwindSafe(|| {
+            let mut doc = AutoCommit::new();
+            doc.apply_changes(vec![first.clone()]).unwrap();
+            doc.apply_changes(vec![gapped.clone()])
+        }));
+        assert!(raw.is_err(), "automerge 0.12 aborts on a sequence gap");
+        let mut receiver = SharedObjects::new(actor(2));
+        receiver.apply_changes(vec![first]).unwrap();
+        let before = state(&mut receiver);
+        assert_eq!(
+            receiver.engine_apply(gapped),
+            Err(ProfileError::Invalid(Diagnostic::InvalidAutomergeBytes))
+        );
+        assert_eq!(state(&mut receiver), before);
+        put_root(&mut receiver, "after", "ok");
+        SharedObjects::load(&receiver.save(), actor(2)).unwrap();
+    }
+
+    #[test]
+    fn missing_dependencies_never_enter_the_engine() {
+        let (first, second, _) = crafted();
+        let mut receiver = SharedObjects::new(actor(2));
+        // Alone, the second change waits outside the document.
+        assert_eq!(
+            receiver.apply_changes(vec![second.clone()]).unwrap(),
+            vec![second.clone()]
+        );
+        assert!(receiver.heads().is_empty());
+        assert!(receiver.changes().is_empty());
+        // In any order, both apply once the dependency is there.
+        assert!(receiver
+            .apply_changes(vec![second.clone(), first.clone()])
+            .unwrap()
+            .is_empty());
+        assert_eq!(receiver.heads(), vec![second.hash()]);
+        // Again: duplicates change nothing.
+        assert!(receiver
+            .apply_changes(vec![first, second])
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn a_taken_sequence_is_refused_before_the_engine() {
+        let (first, second, _) = crafted();
+        // Another sequence-2 change by the same actor: equivocation.
+        let mut twin = SharedObjects::new(actor(1));
+        twin.apply_changes(vec![first.clone()]).unwrap();
+        let other = put_root(&mut twin, "note", "other");
+        assert_eq!(other.seq(), 2);
+        let mut receiver = SharedObjects::new(actor(2));
+        receiver.apply_changes(vec![first, second]).unwrap();
+        let before = state(&mut receiver);
+        assert_eq!(
+            receiver.apply_changes(vec![other]),
+            Err(ProfileError::SequenceTaken { seq: 2, latest: 2 })
+        );
+        assert_eq!(state(&mut receiver), before);
+    }
+
+    #[test]
+    fn a_save_that_aborts_the_engine_is_invalid_bytes() {
+        // Loading is guarded the same way (a Snapshot carries a save image).
+        assert_eq!(
+            load_guarded(&[0x85, 0x6f, 0x4a, 0x83, 0, 0, 0, 0, 0, 1, 0]).map(|_| ()),
+            Err(ProfileError::Invalid(Diagnostic::InvalidAutomergeBytes))
+        );
     }
 }

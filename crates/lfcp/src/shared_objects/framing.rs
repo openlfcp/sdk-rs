@@ -18,7 +18,7 @@
 //! `Change::from_bytes` does not check it, so [`decode_change`] compares it
 //! with the decoded change's hash; `AutoCommit::load` checks a document's.
 
-use automerge::{AutoCommit, Change};
+use automerge::Change;
 
 use crate::cbor::{self, Value};
 use crate::shared_objects::{Diagnostic, ProfileError};
@@ -136,7 +136,7 @@ pub fn decode_snapshot(plaintext: &[u8]) -> Result<Vec<u8>, ProfileError> {
     if header.chunk_type != DOCUMENT_CHUNK || header.end != save.len() {
         return Err(INVALID);
     }
-    AutoCommit::load(&save).map_err(|_| INVALID)?;
+    crate::shared_objects::document::load_guarded(&save)?;
     Ok(save)
 }
 
@@ -148,6 +148,7 @@ pub fn snapshot_payload(plaintext: &[u8]) -> Result<Vec<u8>, ProfileError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use automerge::AutoCommit;
 
     #[test]
     fn framing_rejects_other_shapes() {
