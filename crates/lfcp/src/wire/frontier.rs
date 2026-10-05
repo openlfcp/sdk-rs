@@ -35,10 +35,11 @@ impl ActorHave {
             if start > end {
                 return violation(FrontierRule::RangeReversed);
             }
-            // Rule 5 as written: start > contiguous. Whether a range
-            // starting at contiguous + 1 is canonical is an open question
-            // for the project owner; it is deliberately not decided here.
-            if start <= self.contiguous {
+            // Rule 5: strictly above contiguous, and the first range starts
+            // at or above contiguous + 2; a range at contiguous + 1 extends
+            // the contiguous prefix (§28.1, W3). Later ranges are further
+            // up, so checking every range is the same rule.
+            if start <= self.contiguous.saturating_add(1) {
                 return violation(FrontierRule::RangeNotAboveContiguous);
             }
             if let Some((prev_start, prev_end)) = previous {
@@ -215,10 +216,11 @@ mod tests {
     #[test]
     fn range_rules() {
         use FrontierRule::*;
-        let cases: [(&[(u64, u64)], FrontierRule); 6] = [
+        let cases: [(&[(u64, u64)], FrontierRule); 7] = [
             (&[(107, 105)], RangeReversed),
             (&[(95, 107)], RangeNotAboveContiguous),
             (&[(100, 107)], RangeNotAboveContiguous),
+            (&[(101, 107)], RangeNotAboveContiguous),
             (&[(110, 112), (105, 107)], RangesUnsorted),
             (&[(105, 107), (106, 110)], RangesOverlapping),
             (&[(105, 107), (108, 110)], RangesAdjacent),
@@ -230,9 +232,12 @@ mod tests {
                 "{extra:?}"
             );
         }
-        // Rule 5 literally: 101 is above contiguous 100.
-        assert!(rule(vec![have(1, 100, &[(101, 101)])]).is_ok());
+        // Rule 5 (W3): contiguous + 2 is the lowest start.
         assert!(rule(vec![have(1, 100, &[(102, 103), (105, 105)])]).is_ok());
+        assert_eq!(
+            rule(vec![have(1, u64::MAX, &[(u64::MAX, u64::MAX)])]),
+            Err(Error::FrontierNotCanonical(RangeNotAboveContiguous))
+        );
     }
 
     #[test]

@@ -307,7 +307,8 @@ pub enum FrontierRule {
     EmptyExtraList,
     /// §28.1 rule 4: each range must have start ≤ end.
     RangeReversed,
-    /// §28.1 rule 5: ranges must be strictly above `contiguous`.
+    /// §28.1 rule 5: ranges must be strictly above `contiguous`, starting
+    /// at or above `contiguous + 2`.
     RangeNotAboveContiguous,
     /// §28.1 rule 6: ranges must be sorted by start, then end.
     RangesUnsorted,
