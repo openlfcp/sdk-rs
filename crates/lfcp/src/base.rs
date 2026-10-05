@@ -79,6 +79,11 @@ pub enum Error {
     /// (§7). On the wire this is `MALFORMED_MESSAGE`, except in session
     /// context (P2); see [`Error::session_wire_code`].
     PrincipalIdMismatch,
+    /// A Principal Descriptor's Ed25519 key is not a canonical point
+    /// encoding, or is of small order (§7, §10.5.1). On the wire this is
+    /// `MALFORMED_MESSAGE`, except in session context; see
+    /// [`Error::session_wire_code`].
+    PrincipalKeyInvalid,
     /// A signed object carries a CBOR tag, such as tag 18 (§10, N1).
     CoseTagged,
     /// A signed object is not a four-element array of the §10 types.
@@ -341,6 +346,7 @@ impl Error {
             Error::SignatureInvalid => "SIGNATURE_INVALID",
             Error::PrincipalMalformed => "PRINCIPAL_MALFORMED",
             Error::PrincipalIdMismatch => "PRINCIPAL_ID_MISMATCH",
+            Error::PrincipalKeyInvalid => "PRINCIPAL_KEY_INVALID",
             Error::CoseTagged => "COSE_TAGGED",
             Error::CoseMalformed => "COSE_MALFORMED",
             Error::CoseProtectedHeader => "COSE_PROTECTED_HEADER",
@@ -411,6 +417,7 @@ impl Error {
             | Error::CborNotDeterministic
             | Error::PrincipalMalformed
             | Error::PrincipalIdMismatch
+            | Error::PrincipalKeyInvalid
             | Error::CoseTagged
             | Error::CoseMalformed
             | Error::CoseProtectedHeader
@@ -479,16 +486,14 @@ impl Error {
 
     /// The wire code for this error when it occurs in a `HELLO` or `AUTH`
     /// message (session context). It differs from [`Error::wire_code`] only
-    /// for descriptor errors: [`Error::PrincipalIdMismatch`] is
-    /// `AUTH_FAILED` there (LFCP-WIRE-01 §7, P2), and so is
-    /// [`Error::PrincipalMalformed`].
+    /// for descriptor errors: an ID mismatch and every invalid descriptor
+    /// are `AUTH_FAILED` there and `MALFORMED_MESSAGE` elsewhere
+    /// (LFCP-WIRE-01 §7).
     pub fn session_wire_code(&self) -> Option<WireCode> {
         match self {
-            Error::PrincipalIdMismatch => Some(WireCode::AuthFailed),
-            // P1 names no code for a malformed descriptor; in the session
-            // handshake it fails authentication like an ID mismatch
-            // (orchestrator decision for LFCP-043a, reported as a gap).
-            Error::PrincipalMalformed => Some(WireCode::AuthFailed),
+            Error::PrincipalIdMismatch | Error::PrincipalMalformed | Error::PrincipalKeyInvalid => {
+                Some(WireCode::AuthFailed)
+            }
             other => other.wire_code(),
         }
     }
@@ -525,6 +530,9 @@ impl fmt::Display for Error {
             Error::PrincipalMalformed => f.write_str("malformed Principal Descriptor"),
             Error::PrincipalIdMismatch => {
                 f.write_str("Principal ID does not match the descriptor keys")
+            }
+            Error::PrincipalKeyInvalid => {
+                f.write_str("Principal Ed25519 key is not canonical or is of small order")
             }
             Error::CoseTagged => f.write_str("tagged COSE_Sign1"),
             Error::CoseMalformed => f.write_str("malformed COSE_Sign1"),

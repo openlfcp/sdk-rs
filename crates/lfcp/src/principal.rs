@@ -45,8 +45,9 @@ impl PrincipalDescriptor {
     }
 
     /// Validate a received descriptor value: exactly the keys `0`, `1` and
-    /// `2`, each a 32-byte byte string, and an ID equal to the one
-    /// recomputed from the keys.
+    /// `2`, each a 32-byte byte string, an Ed25519 key that passes
+    /// [`crypto::ed25519_public_key_check`], and an ID equal to the one
+    /// recomputed from the keys (§7).
     pub fn from_value(value: &Value) -> Result<PrincipalDescriptor, Error> {
         let entries = value.as_map().ok_or(Error::PrincipalMalformed)?;
         if entries.len() != 3 {
@@ -61,7 +62,12 @@ impl PrincipalDescriptor {
         };
         // Three entries with keys 0, 1 and 2 present means no other key.
         let claimed = PrincipalId::from_bytes(field(0)?);
-        let descriptor = PrincipalDescriptor::from_public_keys(field(1)?, field(2)?);
+        let ed25519_public = field(1)?;
+        // §7: the Ed25519 key must be canonical and not of small order
+        // (§10.5.1).
+        crypto::ed25519_public_key_check(&ed25519_public)
+            .map_err(|_| Error::PrincipalKeyInvalid)?;
+        let descriptor = PrincipalDescriptor::from_public_keys(ed25519_public, field(2)?);
         if descriptor.id != claimed {
             return Err(Error::PrincipalIdMismatch);
         }
@@ -215,5 +221,20 @@ mod tests {
         assert_eq!(err, Error::PrincipalIdMismatch);
         assert_eq!(err.wire_code().unwrap().name(), "MALFORMED_MESSAGE");
         assert_eq!(err.session_wire_code().unwrap().name(), "AUTH_FAILED");
+    }
+
+    #[test]
+    fn descriptor_keys_must_be_canonical_and_not_of_small_order() {
+        // An order-4 point (y = 0) with its ID recomputed, and the
+        // neutral element: both fail §10.5.1 rule 3.
+        let mut neutral = [0u8; 32];
+        neutral[0] = 1;
+        for key in [[0u8; 32], neutral] {
+            let weak = PrincipalDescriptor::from_public_keys(key, [2; 32]);
+            let err = PrincipalDescriptor::decode(&weak.encode()).unwrap_err();
+            assert_eq!(err, Error::PrincipalKeyInvalid);
+            assert_eq!(err.wire_code().unwrap().name(), "MALFORMED_MESSAGE");
+            assert_eq!(err.session_wire_code().unwrap().name(), "AUTH_FAILED");
+        }
     }
 }

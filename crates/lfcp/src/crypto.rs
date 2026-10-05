@@ -10,12 +10,10 @@
 //! which wipe their memory on drop, so they cannot leak through logs or
 //! diagnostics.
 //!
-//! Ed25519 verification is strict ([`ed25519_verify_strict`]). LFCP-WIRE-01
-//! §10.5 asks for an Ed25519 signature per RFC 8032 and states nothing
-//! stricter; RFC 8032 §5.1.7 already requires rejecting a non-canonical
-//! `S`. Strict verification additionally rejects small-order public keys and
-//! `R` values, so a signature cannot be valid for every message, and one
-//! signature has one accepted form.
+//! Ed25519 verification follows LFCP-WIRE-01 §10.5.1
+//! ([`ed25519_verify_strict`]): `S < L`, canonical encodings of `A` and `R`,
+//! neither of small order, and the cofactorless equation. Received public
+//! keys are checked with [`ed25519_public_key_check`] (§7).
 
 use std::fmt;
 
@@ -113,15 +111,33 @@ impl fmt::Debug for Ed25519SigningKey {
     }
 }
 
-/// Verify an Ed25519 signature with strict rules (see the module docs).
+/// Check an Ed25519 public key as §10.5.1 requires of `A`: a canonical
+/// point encoding (it decodes, and re-encoding the point gives the same
+/// bytes, which excludes `y >= p` and `x = 0` with the sign bit set) of a
+/// point that is not of small order. Any failure is
+/// [`Error::SignatureInvalid`].
+pub fn ed25519_public_key_check(public_key: &[u8; 32]) -> Result<(), Error> {
+    let key =
+        ed25519_dalek::VerifyingKey::from_bytes(public_key).map_err(|_| Error::SignatureInvalid)?;
+    if key.to_edwards().compress().to_bytes() != *public_key || key.is_weak() {
+        return Err(Error::SignatureInvalid);
+    }
+    Ok(())
+}
+
+/// Verify an Ed25519 signature by the §10.5.1 rules.
 ///
-/// Every failure, including a public key that is not a valid curve point,
-/// is [`Error::SignatureInvalid`].
+/// Rules 1, 3 (for `R`) and 4 are `verify_strict`'s: it rejects `S >= L`
+/// and small-order `A` and `R`, and accepts only when the cofactorless
+/// recomputation of `R` encodes to exactly the signature's `R` bytes, which
+/// also rejects a non-canonical `R`. [`ed25519_public_key_check`] adds
+/// rule 2 for `A`. Every failure is [`Error::SignatureInvalid`].
 pub fn ed25519_verify_strict(
     public_key: &[u8; 32],
     message: &[u8],
     signature: &[u8; 64],
 ) -> Result<(), Error> {
+    ed25519_public_key_check(public_key)?;
     let key =
         ed25519_dalek::VerifyingKey::from_bytes(public_key).map_err(|_| Error::SignatureInvalid)?;
     let signature = ed25519_dalek::Signature::from_bytes(signature);
@@ -397,12 +413,7 @@ mod tests {
         let key = Ed25519SigningKey::from_seed(&hex(
             "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
         ));
-        let public: [u8; 32] =
-            hex("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a");
-        let signature: [u8; 64] = hex(concat!(
-            "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555",
-            "fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"
-        ));
+        let (public, signature) = rfc8032_test_1();
         assert_eq!(key.public_key(), public);
         assert_eq!(key.sign(b""), signature);
         assert_eq!(ed25519_verify_strict(&public, b"", &signature), Ok(()));
@@ -427,6 +438,79 @@ mod tests {
         ));
         assert_eq!(
             ed25519_verify_strict(&identity, b"any message", &signature),
+            Err(Error::SignatureInvalid)
+        );
+    }
+
+    /// RFC 8032 test 1: secret key, public key and the signature of "".
+    fn rfc8032_test_1() -> ([u8; 32], [u8; 64]) {
+        let public = hex("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a");
+        let signature = hex(concat!(
+            "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555",
+            "fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"
+        ));
+        (public, signature)
+    }
+
+    #[test]
+    fn strict_verification_rejects_s_not_below_l() {
+        // §10.5.1 rule 1: S + L is the same scalar mod L but not < L.
+        let (public, mut signature) = rfc8032_test_1();
+        let l: [u8; 32] = hex("edd3f55c1a631258d69cf7a2def9de1400000000000000000000000000000010");
+        let mut carry = 0u16;
+        for (s, l) in signature[32..].iter_mut().zip(l) {
+            let sum = u16::from(*s) + u16::from(l) + carry;
+            *s = sum as u8;
+            carry = sum >> 8;
+        }
+        assert_eq!(carry, 0);
+        assert_eq!(
+            ed25519_verify_strict(&public, b"", &signature),
+            Err(Error::SignatureInvalid)
+        );
+    }
+
+    #[test]
+    fn public_keys_must_be_canonical_and_not_of_small_order() {
+        let (public, _) = rfc8032_test_1();
+        assert_eq!(ed25519_public_key_check(&public), Ok(()));
+
+        // §10.5.1 rule 2: y + p for a small y encodes the same y modulo p.
+        // At least one such encoding decodes to a point that is not of
+        // small order; the decoder accepts it, the check does not.
+        let mut found = 0;
+        for y in 0u8..19 {
+            // p = 2^255 - 19, so y + p = 2^255 - 19 + y < 2^255.
+            let mut bytes = [0xffu8; 32];
+            bytes[31] = 0x7f;
+            bytes[0] = 0xed + y;
+            let Ok(key) = ed25519_dalek::VerifyingKey::from_bytes(&bytes) else {
+                continue;
+            };
+            if key.is_weak() {
+                continue;
+            }
+            assert_eq!(
+                ed25519_public_key_check(&bytes),
+                Err(Error::SignatureInvalid),
+                "y = p + {y}"
+            );
+            found += 1;
+        }
+        assert!(
+            found > 0,
+            "no non-canonical encoding of a large-order point"
+        );
+
+        // Rule 3: the neutral element and an order-4 point.
+        let mut identity = [0u8; 32];
+        identity[0] = 1;
+        assert_eq!(
+            ed25519_public_key_check(&identity),
+            Err(Error::SignatureInvalid)
+        );
+        assert_eq!(
+            ed25519_public_key_check(&[0; 32]),
             Err(Error::SignatureInvalid)
         );
     }
