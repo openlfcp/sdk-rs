@@ -121,6 +121,34 @@ pub enum Error {
     /// A Control Record type in the reserved core range 9–31 (§14:
     /// "Unknown core Control Record types MUST cause validation failure").
     ControlUnknownCoreType(u64),
+    /// Records do not form a valid Control Chain (§13.1, §15).
+    InvalidControlChain(ChainRule),
+    /// Two different validly signed records reference the same previous
+    /// record: a Control Fork (§13.2).
+    ControlConflict,
+}
+
+/// The Control Chain rule a record breaks (LFCP-WIRE-01 §13.1, §15).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChainRule {
+    /// The chain is empty, or does not start with a Genesis record at
+    /// sequence 0.
+    GenesisMissing,
+    /// Genesis has a previous record (§13.1: `prev_control_id = null`).
+    GenesisPrevious,
+    /// Genesis is not issued by the owner its body names (§15).
+    GenesisSigner,
+    /// A Genesis record after the start of the chain.
+    GenesisNotFirst,
+    /// `control_seq` is not the previous sequence plus one.
+    SequenceGap,
+    /// `prev_control_id` is not the previous record's ID.
+    PreviousMismatch,
+    /// The record names another Resource than the chain.
+    ResourceMismatch,
+    /// No descriptor is known for the issuer, so its signature cannot be
+    /// checked.
+    IssuerUnknown,
 }
 
 /// The canonical-form rule a frontier breaks (LFCP-WIRE-01 §28.1, §28.2).
@@ -187,6 +215,8 @@ impl Error {
             Error::SnapshotMalformed => "SNAPSHOT_MALFORMED",
             Error::ControlRecordMalformed => "CONTROL_RECORD_MALFORMED",
             Error::ControlUnknownCoreType(_) => "CONTROL_UNKNOWN_CORE_TYPE",
+            Error::InvalidControlChain(_) => "INVALID_CONTROL_CHAIN",
+            Error::ControlConflict => "CONTROL_CONFLICT",
         }
     }
 
@@ -232,6 +262,8 @@ impl Error {
             // or INVALID_CONTROL_CHAIN is an open question for the project
             // owner (§14 names no code).
             Error::ControlUnknownCoreType(_) => Some(WireCode::MalformedMessage),
+            Error::InvalidControlChain(_) => Some(WireCode::InvalidControlChain),
+            Error::ControlConflict => Some(WireCode::ControlConflict),
             Error::ActorEquivocation => Some(WireCode::ActorEquivocation),
             Error::SignatureInvalid | Error::CoseKidMismatch => Some(WireCode::InvalidSignature),
         }
@@ -308,6 +340,8 @@ impl fmt::Display for Error {
             Error::ControlUnknownCoreType(code) => {
                 write!(f, "unknown core Control Record type {code}")
             }
+            Error::InvalidControlChain(rule) => write!(f, "invalid Control Chain: {rule:?}"),
+            Error::ControlConflict => f.write_str("Control Fork"),
         }
     }
 }
@@ -324,6 +358,10 @@ pub enum WireCode {
     AuthFailed,
     /// `INVALID_SIGNATURE` (7).
     InvalidSignature,
+    /// `INVALID_CONTROL_CHAIN` (8).
+    InvalidControlChain,
+    /// `CONTROL_CONFLICT` (9).
+    ControlConflict,
     /// `ACTOR_EQUIVOCATION` (16).
     ActorEquivocation,
 }
@@ -335,6 +373,8 @@ impl WireCode {
             WireCode::MalformedMessage => 2,
             WireCode::AuthFailed => 3,
             WireCode::InvalidSignature => 7,
+            WireCode::InvalidControlChain => 8,
+            WireCode::ControlConflict => 9,
             WireCode::ActorEquivocation => 16,
         }
     }
@@ -345,6 +385,8 @@ impl WireCode {
             WireCode::MalformedMessage => "MALFORMED_MESSAGE",
             WireCode::AuthFailed => "AUTH_FAILED",
             WireCode::InvalidSignature => "INVALID_SIGNATURE",
+            WireCode::InvalidControlChain => "INVALID_CONTROL_CHAIN",
+            WireCode::ControlConflict => "CONTROL_CONFLICT",
             WireCode::ActorEquivocation => "ACTOR_EQUIVOCATION",
         }
     }

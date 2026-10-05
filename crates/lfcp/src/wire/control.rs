@@ -9,6 +9,7 @@
 //! The record ID is the object ID of the signed object (§13, §10.6).
 //!
 //! - [`body`]: typed bodies of every core Control Record type.
+//! - [`chain`]: Control Chain validation and fork detection.
 //!
 //! A record is received in two steps, as Data Units are:
 //! [`ReceivedControlRecord::parse`] checks structure and the typed body,
@@ -16,6 +17,7 @@
 //! issuer. Whether the issuer was authorized is evaluated separately.
 
 pub mod body;
+pub mod chain;
 
 use crate::base::{ControlRecordId, Error, PrincipalId, ResourceId};
 use crate::cbor::{self, Value};
