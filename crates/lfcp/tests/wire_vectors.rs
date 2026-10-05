@@ -365,8 +365,8 @@ fn in_scope_negative_vectors_are_rejected() {
     expect_rejected(case, err);
 }
 
-/// Negative vectors whose rule belongs to a later task: Control Plane
-/// state or the session. Their signed objects are canonical, so they
+/// Negative vectors whose rule belongs to a later task: the epoch cutoff
+/// needs Control Plane state. Their signed objects are canonical, so they
 /// must pass parse and verify here.
 const DEFERRED_NEGATIVES: &[(&str, &str)] = &[
     ("stale_epoch", "042b3: previous-epoch cutoff (§19.1)"),
@@ -374,15 +374,11 @@ const DEFERRED_NEGATIVES: &[(&str, &str)] = &[
         "stale_epoch_absent_actor",
         "042b3: previous-epoch cutoff (§19.1)",
     ),
-    (
-        "stale_control_head_put",
-        "043: CONTROL_PUT compare-and-swap (§47)",
-    ),
 ];
 
 /// Negative vectors this crate decides, in this file,
-/// `data_plane_vectors.rs`, `control_plane_vectors.rs` or
-/// `key_package_vectors.rs`.
+/// `data_plane_vectors.rs`, `control_plane_vectors.rs`,
+/// `key_package_vectors.rs` or `message_vectors.rs`.
 const IN_SCOPE_NEGATIVES: &[&str] = &[
     // Primitives (this file).
     "tagged_cose_D1",
@@ -409,6 +405,8 @@ const IN_SCOPE_NEGATIVES: &[&str] = &[
     "control_fork_C6",
     // Key Packages (key_package_vectors.rs).
     "hpke_recipient_mismatch_KP0",
+    // Messages (message_vectors.rs).
+    "stale_control_head_put",
 ];
 
 #[test]
@@ -432,7 +430,7 @@ fn deferred_negatives_pass_the_cose_layer() {
     for (case_id, _) in DEFERRED_NEGATIVES {
         let inputs = &suite.case(case_id)["inputs"];
         let Some(field) = inputs.get("cose_sign1") else {
-            continue; // no signed object (stale_epoch, stale_control_head_put)
+            continue; // no signed object (stale_epoch)
         };
         let object = cose::parse(&hex(case_id, field))
             .unwrap_or_else(|err| panic!("{case_id}: parse failed: {err}"));
