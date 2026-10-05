@@ -61,5 +61,11 @@ shared-objects = ["dep:automerge"]
 name = "shared_objects_vectors"
 required-features = ["shared-objects"]
 
+[[example]]
+name = "interop"
+required-features = ["shared-objects"]
+
 [dev-dependencies]
 serde_json = "1"
+# OS randomness for the interop example's production values (LFCP-070).
+getrandom = "0.4"
