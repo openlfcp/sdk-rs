@@ -140,6 +140,9 @@ pub enum ProfileError {
     /// [`values::MAX_READ_DEPTH`]; nothing was read. The validator reports
     /// such a value as `INVALID_FIELD_TYPE` instead.
     ValueTooDeep,
+    /// §11.1: a local transaction would make a change above the expansion
+    /// limits; nothing was committed. Split it into several changes.
+    ChangeTooLarge,
 }
 
 impl ProfileError {
@@ -196,6 +199,9 @@ impl fmt::Display for ProfileError {
             ProfileError::UnknownObject => f.write_str("no such object"),
             ProfileError::NotATask => f.write_str("the object is not a Task"),
             ProfileError::ValueTooDeep => f.write_str("a value nests too deep to read"),
+            ProfileError::ChangeTooLarge => {
+                f.write_str("the change would exceed the expansion limits")
+            }
         }
     }
 }

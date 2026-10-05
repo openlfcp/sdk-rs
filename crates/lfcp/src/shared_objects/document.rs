@@ -46,6 +46,7 @@ use automerge::{
 };
 
 use crate::base::{ObjectId, PrincipalId, ResourceId};
+use crate::shared_objects::expansion;
 use crate::shared_objects::framing::decode_change;
 use crate::shared_objects::identity::actor_id_bytes;
 use crate::shared_objects::identity::principal_ref;
@@ -634,6 +635,13 @@ impl SharedObjects {
             self.doc.rollback();
             return Err(err);
         }
+        // §11.1: a writer never emits a change above the limits. Every
+        // operation column has one value per operation, so the pending
+        // operations decide the per-column limit before anything commits.
+        if self.doc.pending_ops() as u64 > expansion::CHANGE_LIMITS.max_rows {
+            self.doc.rollback();
+            return Err(ProfileError::ChangeTooLarge);
+        }
         let options = CommitOptions::default()
             .with_message(intent.to_owned())
             .with_time(self.time);
@@ -642,9 +650,32 @@ impl SharedObjects {
             None => None,
         };
         if let Some(c) = &change {
+            // The other limits (predecessors, key bytes) are only known once
+            // the change is encoded; one above them is taken back out.
+            if expansion::check_change(c.raw_bytes()).is_err() {
+                self.remove_change(&c.hash())?;
+                return Err(ProfileError::ChangeTooLarge);
+            }
             self.seqs.insert(c.actor_id().clone(), c.seq());
         }
         Ok(change)
+    }
+
+    /// Rebuild the document without the change `hash`, which has no
+    /// dependents (the last local change). The writer's next change takes
+    /// the same sequence number (§9).
+    fn remove_change(&mut self, hash: &ChangeHash) -> Result<(), ProfileError> {
+        let keep: Vec<Change> = self
+            .doc
+            .get_changes(&[])
+            .into_iter()
+            .filter(|c| c.hash() != *hash)
+            .collect();
+        let mut doc = AutoCommit::new().with_actor(self.doc.get_actor().clone());
+        doc.apply_changes(keep)?;
+        self.doc = doc;
+        self.seqs = seqs_of(&mut self.doc);
+        Ok(())
     }
 
     /// §16: the initial document, in one change.
@@ -1198,6 +1229,41 @@ mod admission_tests {
             Err(ProfileError::Invalid(Diagnostic::InvalidAutomergeBytes))
         );
         assert_eq!(state(&mut receiver), before);
+    }
+
+    #[test]
+    fn a_transaction_above_the_change_limits_fails_locally() {
+        // §11.1: a writer never emits a change above the limits.
+        let mut doc = SharedObjects::new(actor(1));
+        doc.initialize().unwrap();
+        let before = state(&mut doc);
+        // 17,001 operations: refused before anything commits.
+        let many = Plain::Map(
+            (0..17_000)
+                .map(|i| (format!("k{i}"), Plain::Int(i)))
+                .collect(),
+        );
+        assert_eq!(
+            doc.insert_object("big", "many", &many),
+            Err(ProfileError::ChangeTooLarge)
+        );
+        assert_eq!(state(&mut doc), before);
+        // 16,001 operations writing 16,000 keys of 300 bytes: 4.8 MB of
+        // strings, only known once encoded; the change is taken back out.
+        let keys = Plain::Map(
+            (0..16_000)
+                .map(|i| (format!("{i:0>300}"), Plain::Bool(true)))
+                .collect(),
+        );
+        assert_eq!(
+            doc.insert_object("keys", "map", &keys),
+            Err(ProfileError::ChangeTooLarge)
+        );
+        assert_eq!(state(&mut doc), before);
+        // The writer goes on with the next sequence number.
+        let next = put_root(&mut doc, "after", "ok");
+        assert_eq!(next.seq(), 2);
+        SharedObjects::load(&doc.save(), actor(1)).unwrap();
     }
 
     #[test]
