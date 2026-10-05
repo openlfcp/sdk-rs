@@ -383,6 +383,15 @@ impl SharedObjects {
         if change.seq() != latest + 1 || (change.author().is_some() && change.seq() != 1) {
             return Err(ProfileError::Invalid(Diagnostic::InvalidAutomergeBytes));
         }
+        // §11.1: every other actor the change lists is already an actor of
+        // the document (or of a change admitted before it in the batch). A
+        // valid change refers only to its own history; automerge 0.12
+        // panics on an unknown one.
+        let known =
+            |actor: &ActorId| self.seqs.contains_key(actor) || batch.seqs.contains_key(actor);
+        if !change.other_actor_ids().iter().all(known) {
+            return Err(ProfileError::Invalid(Diagnostic::InvalidAutomergeBytes));
+        }
         Ok(Admission::Apply)
     }
 
@@ -1146,6 +1155,48 @@ mod admission_tests {
         let err = receiver.apply_changes(vec![other]).unwrap_err();
         assert_eq!(err, ProfileError::SequenceTaken { seq: 2, latest: 2 });
         assert_eq!(err.code(), Some("ACTOR_EQUIVOCATION"));
+        assert_eq!(state(&mut receiver), before);
+    }
+
+    #[test]
+    fn an_unknown_other_actor_is_refused_before_the_engine() {
+        // §11.1 (SO-UNKNOWN-ACTOR): actor 4 overwrites a key actor 3 wrote,
+        // so its change lists actor 3 among its other actors; re-encoded to
+        // depend on the first change only, it reaches a receiver that has
+        // never seen actor 3, with every dependency present.
+        let (first, _, _) = crafted();
+        let mut third = SharedObjects::new(actor(3));
+        third.apply_changes(vec![first.clone()]).unwrap();
+        let by_third = put_root(&mut third, "note", "three");
+        let mut fourth = SharedObjects::new(actor(4));
+        fourth.apply_changes(vec![first.clone(), by_third]).unwrap();
+        let overwrite = put_root(&mut fourth, "note", "four");
+        assert_eq!(overwrite.other_actor_ids(), [actor(3)]);
+        let mut expanded = overwrite.decode();
+        expanded.deps = vec![first.hash()];
+        expanded.hash = None;
+        let unknown = Change::from(expanded);
+        assert_eq!(unknown.other_actor_ids(), [actor(3)]);
+
+        // The bare engine panics on it.
+        let raw = catch_unwind(AssertUnwindSafe(|| {
+            let mut doc = AutoCommit::new();
+            doc.apply_changes(vec![first.clone()]).unwrap();
+            doc.apply_changes(vec![unknown.clone()])
+        }));
+        assert!(!matches!(raw, Ok(Ok(()))), "automerge 0.12 refuses it");
+
+        let mut receiver = SharedObjects::new(actor(2));
+        receiver.apply_changes(vec![first]).unwrap();
+        let before = state(&mut receiver);
+        assert!(matches!(
+            receiver.admit(&unknown),
+            Err(ProfileError::Invalid(Diagnostic::InvalidAutomergeBytes))
+        ));
+        assert_eq!(
+            receiver.apply_changes(vec![unknown]),
+            Err(ProfileError::Invalid(Diagnostic::InvalidAutomergeBytes))
+        );
         assert_eq!(state(&mut receiver), before);
     }
 
