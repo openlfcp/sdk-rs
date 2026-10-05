@@ -34,8 +34,9 @@ chacha20poly1305 = { version = "0.11", default-features = false, features = ["al
 # x25519-dalek, hkdf, sha2 and chacha20poly1305 versions above; "alloc"
 # provides Vec-returning seal and open; "getrandom" gives sealing a fresh
 # OS-random ephemeral key, which RFC 9180 requires. The default ML-KEM,
-# SHAKE and NIST-curve features stay off.
-hpke = { version = "0.14.1", default-features = false, features = ["x25519", "chacha", "alloc", "getrandom"] }
+# SHAKE and NIST-curve features stay off. Pinned exactly: the tests use its
+# `danger` module, whose docs ask for a patch-version pin.
+hpke = { version = "=0.14.1", default-features = false, features = ["x25519", "chacha", "alloc", "getrandom"] }
 # Wipes DEKs, derived keys and HPKE plaintexts on drop; "alloc" covers the
 # Vec-held HPKE plaintext. Already in the tree through the
 # dalek crates; used directly for this crate's own key types.
