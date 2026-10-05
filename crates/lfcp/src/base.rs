@@ -36,6 +36,39 @@ pub enum Error {
     /// Text is not a canonical UUIDv7 Object ID (SHARED-OBJECTS-PROFILE-01
     /// §19).
     InvalidObjectId,
+    /// CBOR input ended in the middle of an item.
+    CborTruncated,
+    /// Bytes follow the single top-level CBOR item.
+    CborTrailingBytes,
+    /// An integer, length or count does not use its shortest encoding.
+    CborNonShortest,
+    /// An indefinite-length string, array or map.
+    CborIndefiniteLength,
+    /// A CBOR tag (major type 6). LFCP emits none in deterministic
+    /// structures (§5.2, §10).
+    CborTag,
+    /// A floating-point value (§5.2, CB3).
+    CborFloat,
+    /// A simple value other than `false`, `true` or `null`, including
+    /// `undefined` (§5.2, CB3).
+    CborSimpleValue,
+    /// A reserved additional-information value or a stray break byte.
+    CborReserved,
+    /// A text string that is not valid UTF-8.
+    CborInvalidUtf8,
+    /// A map key that occurs twice.
+    CborDuplicateKey,
+    /// Map keys out of deterministic order (length first, then bytewise;
+    /// §5.2 rule 4, CB1).
+    CborUnsortedKeys,
+    /// A map key that is not an integer, text string or byte string (§5.2,
+    /// CB2).
+    CborInvalidKeyType,
+    /// Arrays and maps nested deeper than [`crate::cbor::MAX_DEPTH`].
+    CborDepthExceeded,
+    /// Bytes that decode but are not the deterministic encoding of their
+    /// own value (§5.2, N7).
+    CborNotDeterministic,
 }
 
 impl Error {
@@ -46,6 +79,20 @@ impl Error {
             Error::InvalidHex => "INVALID_HEX",
             Error::InvalidBase64Url => "INVALID_BASE64URL",
             Error::InvalidObjectId => "INVALID_OBJECT_ID",
+            Error::CborTruncated => "CBOR_TRUNCATED",
+            Error::CborTrailingBytes => "CBOR_TRAILING_BYTES",
+            Error::CborNonShortest => "CBOR_NON_SHORTEST",
+            Error::CborIndefiniteLength => "CBOR_INDEFINITE_LENGTH",
+            Error::CborTag => "CBOR_TAG",
+            Error::CborFloat => "CBOR_FLOAT",
+            Error::CborSimpleValue => "CBOR_SIMPLE_VALUE",
+            Error::CborReserved => "CBOR_RESERVED",
+            Error::CborInvalidUtf8 => "CBOR_INVALID_UTF8",
+            Error::CborDuplicateKey => "CBOR_DUPLICATE_KEY",
+            Error::CborUnsortedKeys => "CBOR_UNSORTED_KEYS",
+            Error::CborInvalidKeyType => "CBOR_INVALID_KEY_TYPE",
+            Error::CborDepthExceeded => "CBOR_DEPTH_EXCEEDED",
+            Error::CborNotDeterministic => "CBOR_NOT_DETERMINISTIC",
         }
     }
 
@@ -58,6 +105,20 @@ impl Error {
             | Error::InvalidHex
             | Error::InvalidBase64Url
             | Error::InvalidObjectId => None,
+            Error::CborTruncated
+            | Error::CborTrailingBytes
+            | Error::CborNonShortest
+            | Error::CborIndefiniteLength
+            | Error::CborTag
+            | Error::CborFloat
+            | Error::CborSimpleValue
+            | Error::CborReserved
+            | Error::CborInvalidUtf8
+            | Error::CborDuplicateKey
+            | Error::CborUnsortedKeys
+            | Error::CborInvalidKeyType
+            | Error::CborDepthExceeded
+            | Error::CborNotDeterministic => Some(WireCode::MalformedMessage),
         }
     }
 }
@@ -71,6 +132,24 @@ impl fmt::Display for Error {
             Error::InvalidHex => f.write_str("not lowercase hexadecimal"),
             Error::InvalidBase64Url => f.write_str("not canonical unpadded base64url"),
             Error::InvalidObjectId => f.write_str("not a canonical UUIDv7 Object ID"),
+            Error::CborTruncated => f.write_str("CBOR input is truncated"),
+            Error::CborTrailingBytes => f.write_str("bytes after the CBOR item"),
+            Error::CborNonShortest => f.write_str("CBOR head is not in shortest form"),
+            Error::CborIndefiniteLength => f.write_str("indefinite-length CBOR item"),
+            Error::CborTag => f.write_str("CBOR tag"),
+            Error::CborFloat => f.write_str("CBOR floating-point value"),
+            Error::CborSimpleValue => {
+                f.write_str("CBOR simple value other than false, true or null")
+            }
+            Error::CborReserved => f.write_str("reserved CBOR encoding"),
+            Error::CborInvalidUtf8 => f.write_str("CBOR text string is not UTF-8"),
+            Error::CborDuplicateKey => f.write_str("duplicate CBOR map key"),
+            Error::CborUnsortedKeys => f.write_str("CBOR map keys out of deterministic order"),
+            Error::CborInvalidKeyType => {
+                f.write_str("CBOR map key is not an integer, text or byte string")
+            }
+            Error::CborDepthExceeded => f.write_str("CBOR nesting too deep"),
+            Error::CborNotDeterministic => f.write_str("not deterministic CBOR"),
         }
     }
 }
