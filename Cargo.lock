@@ -336,7 +336,7 @@ checksum = "c83bff1d572d6b9aeef67ddfc8448e4a3737909cb28e81f97c791b9018703e52"
 
 [[package]]
 name = "lfcp"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "automerge",
  "chacha20poly1305",
