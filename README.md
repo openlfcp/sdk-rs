@@ -9,7 +9,7 @@ test vectors in `openlfcp/spec`, not ported from `sdk-ts`.
 ## Scope
 
 sdk-rs implements the OpenLFCP MVP 0.1 subset of LFCP-WIRE-01
-at `mvp-0.1-baseline.7`, not every deferred WIRE-01 feature; it has no
+at `mvp-0.1-baseline.8`, not every deferred WIRE-01 feature; it has no
 invitation URI codec yet. See
 `.github: docs/release/deferred-wire-01-features.md` (in [openlfcp/.github](https://github.com/openlfcp/.github)). It does not claim
 full LFCP-WIRE-01 conformance.
@@ -90,7 +90,7 @@ builds on the stable Rust toolchain; no older minimum version is promised.
 `spec.lock` pins the specification this SDK implements:
 
 ```json
-{ "tag": "mvp-0.1-baseline.7", "commit": "edf9aae56be448d7e5027dadeeed817927009b12" }
+{ "tag": "mvp-0.1-baseline.8", "commit": "da3977f927feaf3e7c5b8f653797d3696ce0613b" }
 ```
 
 Vectors are never copied into this repository. The tests read them from a

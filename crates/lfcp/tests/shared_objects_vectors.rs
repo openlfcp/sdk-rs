@@ -10,7 +10,7 @@
 //!   the corpus' logical state and conflicts.
 //!
 //! The vectors and the corpus are read at the `spec.lock` pin
-//! (mvp-0.1-baseline.7).
+//! (mvp-0.1-baseline.8).
 
 mod support;
 
@@ -1300,4 +1300,100 @@ fn a_change_must_carry_the_signers_actor() {
             .apply_unit_change(&other, &andrey_id, &plaintext),
         Err(ProfileError::Invalid(Diagnostic::ChangeActorMismatch))
     );
+}
+
+#[test]
+fn the_depth_vectors_are_checked_at_admission() {
+    // §11.2 (baseline.8): each case is a list of changes applied in order
+    // to an empty replica, each accepted (merged), rejected before the
+    // engine, or held (its dependency was rejected); each Snapshot is
+    // accepted or rejected before loading.
+    let corpus = corpus();
+    let set = &corpus["depth"];
+    assert_eq!(set["limit"], lfcp::shared_objects::depth::MAX_DEPTH);
+    let suite = suite();
+    let f = Fixtures::load(&suite);
+    let ids: Vec<&str> = set["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            "DEPTH-256",
+            "DEPTH-257",
+            "DEPTH-text-257",
+            "DEPTH-cumulative",
+            "DEPTH-wide"
+        ]
+    );
+    for case in set["cases"].as_array().unwrap() {
+        let id = case["id"].as_str().unwrap();
+        // One change at a time, and the whole list as one batch: the
+        // batch admits the same prefix and stops at the same change.
+        let mut one_by_one = f.doc("masha");
+        let mut changes = Vec::new();
+        let mut accepted = 0;
+        for (i, c) in case["changes"].as_array().unwrap().iter().enumerate() {
+            let bytes = base::from_hex(c["change_hex"].as_str().unwrap()).unwrap();
+            let change = framing::decode_change(&framing::encode_change(&bytes)).unwrap();
+            changes.push(change.clone());
+            let heads = one_by_one.heads();
+            let result = one_by_one.apply_changes(vec![change.clone()]);
+            match c["expected"].as_str().unwrap() {
+                "accept" => {
+                    assert_eq!(result, Ok(vec![]), "{id} #{i}");
+                    accepted += 1;
+                }
+                "reject" => {
+                    assert_eq!(
+                        result,
+                        Err(ProfileError::Invalid(Diagnostic::InvalidAutomergeBytes)),
+                        "{id} #{i}"
+                    );
+                    assert_eq!(one_by_one.heads(), heads, "{id} #{i}: nothing merged");
+                }
+                "held" => assert_eq!(result, Ok(vec![change]), "{id} #{i}"),
+                other => panic!("{id}: {other}"),
+            }
+        }
+        let mut batched = f.doc("masha");
+        let result = batched.apply_changes(changes);
+        let rejects = case["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["expected"] == "reject");
+        assert_eq!(result.is_err(), rejects, "{id}: batch");
+        assert_eq!(batched.heads(), one_by_one.heads(), "{id}: batch heads");
+        assert_eq!(batched.changes().len(), accepted, "{id}: batch changes");
+    }
+
+    for snapshot in set["snapshots"].as_array().unwrap() {
+        let id = snapshot["id"].as_str().unwrap();
+        let save = base::from_hex(snapshot["save_hex"].as_str().unwrap()).unwrap();
+        let floor = expansion::SNAPSHOT_LIMITS_FLOOR;
+        let result = framing::decode_snapshot(&framing::encode_snapshot(&save));
+        match snapshot["expected"].as_str().unwrap() {
+            "accept" => {
+                assert!(
+                    expansion::check_snapshot_depth(&save, &floor).is_ok(),
+                    "{id}"
+                );
+                assert_eq!(result, Ok(save), "{id}");
+            }
+            "reject" => {
+                // Within the expansion limits; only the depth refuses it.
+                assert!(expansion::check_snapshot(&save, &floor).is_ok(), "{id}");
+                assert_eq!(
+                    result,
+                    Err(ProfileError::Invalid(Diagnostic::InvalidAutomergeBytes)),
+                    "{id}"
+                );
+            }
+            other => panic!("{id}: {other}"),
+        }
+    }
 }
