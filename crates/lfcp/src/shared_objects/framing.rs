@@ -134,14 +134,15 @@ pub fn encode_snapshot(save: &[u8]) -> Vec<u8> {
 
 /// The full-save bytes of a Snapshot plaintext (§13), checked: one
 /// document chunk (not a change chunk) within the floor limits of §13.1
-/// that loads, its checksum verified by the load.
+/// and the depth bound of §11.2 that loads, its checksum verified by the
+/// load.
 pub fn decode_snapshot(plaintext: &[u8]) -> Result<Vec<u8>, ProfileError> {
     decode_snapshot_within(plaintext, &expansion::SNAPSHOT_LIMITS_FLOOR)
 }
 
 /// [`decode_snapshot`] with a receiver's own limits, at least
-/// [`expansion::SNAPSHOT_LIMITS_FLOOR`] (§13.1). The limits are checked
-/// before Automerge loads the save.
+/// [`expansion::SNAPSHOT_LIMITS_FLOOR`] (§13.1). The limits and the depth
+/// bound (§11.2) are checked before Automerge loads the save.
 pub fn decode_snapshot_within(
     plaintext: &[u8],
     limits: &expansion::Limits,
@@ -151,14 +152,14 @@ pub fn decode_snapshot_within(
     if header.chunk_type != DOCUMENT_CHUNK || header.end != save.len() {
         return Err(INVALID);
     }
-    expansion::check_snapshot(&save, limits)?;
+    expansion::check_snapshot_depth(&save, limits)?;
     crate::shared_objects::document::load_guarded(&save)?;
     Ok(save)
 }
 
 /// The full-save bytes of a Snapshot plaintext, without checking or
 /// loading them: a caller that loads them checks them first
-/// ([`expansion::check_snapshot`]).
+/// ([`expansion::check_snapshot_depth`]).
 pub fn snapshot_payload(plaintext: &[u8]) -> Result<Vec<u8>, ProfileError> {
     unframe(plaintext)
 }

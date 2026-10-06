@@ -30,9 +30,10 @@
 //! group value above one plus the number of other actors (an operation's
 //! predecessors have distinct actors).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 
+use crate::shared_objects::depth::{self, DocumentOps};
 use crate::shared_objects::{Diagnostic, ProfileError};
 
 /// Every rejection here: `PROFILE_INVALID` with `INVALID_AUTOMERGE_BYTES`.
@@ -436,8 +437,27 @@ fn inflate_capped(data: &[u8], budget: u64) -> Result<Vec<u8>, ProfileError> {
 
 /// §13.1: check a Snapshot's save, exactly one document chunk, against
 /// `limits` (at least [`SNAPSHOT_LIMITS_FLOOR`]) before the engine loads
-/// it, inflating deflated columns under a running cap.
+/// it, inflating deflated columns under a running cap. The expansion check
+/// alone: [`check_snapshot_depth`] also checks the document's depth.
 pub fn check_snapshot(bytes: &[u8], limits: &Limits) -> Result<Expansion, ProfileError> {
+    walk_snapshot(bytes, limits).map(|(expansion, _)| expansion)
+}
+
+/// §13.1 and §11.2: [`check_snapshot`], then no object of the document
+/// deeper than [`depth::MAX_DEPTH`], computed iteratively from its object,
+/// operation ID and action columns. A Snapshot whose depths cannot be
+/// established is rejected.
+pub fn check_snapshot_depth(bytes: &[u8], limits: &Limits) -> Result<Expansion, ProfileError> {
+    let (expansion, columns) = walk_snapshot(bytes, limits)?;
+    check_depth_columns(&columns)?;
+    Ok(expansion)
+}
+
+/// [`check_snapshot`], keeping the inflated operation columns §11.2 reads.
+fn walk_snapshot(
+    bytes: &[u8],
+    limits: &Limits,
+) -> Result<(Expansion, HashMap<u32, Vec<u8>>), ProfileError> {
     let mut c = body(bytes, DOCUMENT_CHUNK)?;
     let actors = c.list(limits.max_actors, None)?;
     c.list(limits.max_deps, Some(32))?; // heads
@@ -448,8 +468,10 @@ pub fn check_snapshot(bytes: &[u8], limits: &Limits) -> Result<Expansion, Profil
     let op_limit = row_limit(&op_metas, limits);
     let mut tally = Tally::new(*limits);
     let mut inflated = 0u64;
+    // The operation columns §11.2 reads, once counted.
+    let mut depth_columns: HashMap<u32, Vec<u8>> = HashMap::new();
     let sections = [(change_metas, &change_limit), (op_metas, &op_limit)];
-    for (metas, limit_of) in sections.iter() {
+    for (section, (metas, limit_of)) in sections.iter().enumerate() {
         for &(spec, len) in metas {
             let raw = c.take(len)?;
             let owned;
@@ -471,9 +493,117 @@ pub fn check_snapshot(bytes: &[u8], limits: &Limits) -> Result<Expansion, Profil
             let rows = count_column(spec & 7, data, &mut tally, &bounds)?;
             tally.out.max_rows = tally.out.max_rows.max(rows);
             tally.out.columns.push((spec, rows));
+            // Matched without the deflate bit: the data is inflated here.
+            if section == 1 && DEPTH_COLUMNS.contains(&(spec & !DEFLATE)) {
+                depth_columns.insert(spec & !DEFLATE, data.to_vec());
+            }
         }
     }
     tally.out.column_bytes = inflated;
     // The rest is the document's head indices: not counted.
-    Ok(tally.out)
+    Ok((tally.out, depth_columns))
+}
+
+/// §11.2: the document's depth, from its object, operation ID and action
+/// columns.
+fn check_depth_columns(depth_columns: &HashMap<u32, Vec<u8>>) -> Result<(), ProfileError> {
+    let column = |spec: u32| depth_columns.get(&spec).map_or(&[][..], Vec::as_slice);
+    // The action column has one value per operation. A shorter column
+    // reads as nulls past its end, as Automerge reads it (an all-null
+    // column, such as the object of a root-only document, is omitted).
+    let actions = uleb_values(column(ACTION))?;
+    let n = actions.len();
+    let rows = |mut values: Vec<Option<u64>>| {
+        values.resize(n, None);
+        values
+    };
+    let obj_actor = rows(uleb_values(column(OBJ_ACTOR))?);
+    let obj_ctr = rows(uleb_values(column(OBJ_CTR))?);
+    let id_actor = rows(uleb_values(column(ID_ACTOR))?);
+    let mut id_ctr = delta_values(column(ID_CTR))?;
+    id_ctr.resize(n, None);
+    let mut ops = DocumentOps {
+        objects: Vec::with_capacity(n),
+        ids: Vec::with_capacity(n),
+        actions: Vec::with_capacity(n),
+    };
+    for i in 0..n {
+        ops.objects.push(match (obj_actor[i], obj_ctr[i]) {
+            (None, None) => None,
+            (Some(actor), Some(ctr)) => Some((actor, ctr)),
+            _ => return Err(INVALID),
+        });
+        let ctr = id_ctr[i].and_then(|c| u64::try_from(c).ok());
+        ops.ids
+            .push((id_actor[i].ok_or(INVALID)?, ctr.ok_or(INVALID)?));
+        ops.actions.push(actions[i].ok_or(INVALID)?);
+    }
+    depth::check_document_depth(&ops)
+}
+
+/// The document operation columns §11.2 reads: the object (id 0: actor,
+/// counter), the operation ID (id 2: actor, delta counter), the action.
+const OBJ_ACTOR: u32 = 1;
+const OBJ_CTR: u32 = 2;
+const ID_ACTOR: u32 = 2 << 4 | 1;
+const ID_CTR: u32 = 2 << 4 | 3;
+const DEPTH_COLUMNS: [u32; 5] = [OBJ_ACTOR, OBJ_CTR, ID_ACTOR, ID_CTR, ACTION];
+
+/// The values of a ULEB128 RLE column, one per row (`None` for a null).
+/// Called only on columns the expansion check has counted.
+fn uleb_values(data: &[u8]) -> Result<Vec<Option<u64>>, ProfileError> {
+    let mut c = Cursor::new(data);
+    let mut out = Vec::new();
+    while !c.done() {
+        match c.sleb()? {
+            n if n > 0 => {
+                let v = c.uleb()?;
+                out.extend(std::iter::repeat_n(Some(v), n as usize));
+            }
+            n if n < 0 => {
+                for _ in 0..n.unsigned_abs() {
+                    out.push(Some(c.uleb()?));
+                }
+            }
+            _ => {
+                let nulls = usize::try_from(c.uleb()?).map_err(|_| INVALID)?;
+                out.extend(std::iter::repeat_n(None, nulls));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The values of a delta column: an RLE column of signed differences,
+/// summed (`None` for a null, which does not move the running value).
+fn delta_values(data: &[u8]) -> Result<Vec<Option<i64>>, ProfileError> {
+    let mut c = Cursor::new(data);
+    let mut out = Vec::new();
+    let mut value = 0i64;
+    let mut push = |out: &mut Vec<Option<i64>>, delta: i64| -> Result<(), ProfileError> {
+        value = value.checked_add(delta).ok_or(INVALID)?;
+        out.push(Some(value));
+        Ok(())
+    };
+    while !c.done() {
+        match c.sleb()? {
+            n if n > 0 => {
+                let delta = c.sleb()?;
+                for _ in 0..n {
+                    push(&mut out, delta)?;
+                }
+            }
+            n if n < 0 => {
+                for _ in 0..n.unsigned_abs() {
+                    let delta = c.sleb()?;
+                    push(&mut out, delta)?;
+                }
+            }
+            _ => {
+                let nulls = usize::try_from(c.uleb()?).map_err(|_| INVALID)?;
+                out.extend(std::iter::repeat_n(None, nulls));
+            }
+        }
+    }
+    Ok(out)
 }

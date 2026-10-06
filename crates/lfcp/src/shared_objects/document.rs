@@ -46,6 +46,7 @@ use automerge::{
 };
 
 use crate::base::{ObjectId, PrincipalId, ResourceId};
+use crate::shared_objects::depth::{self, Depths, ObjKey};
 use crate::shared_objects::expansion;
 use crate::shared_objects::framing::decode_change;
 use crate::shared_objects::identity::actor_id_bytes;
@@ -170,6 +171,8 @@ pub struct SharedObjects {
     time: i64,
     /// The latest sequence number of each actor in `doc`.
     seqs: HashMap<ActorId, u64>,
+    /// The depth of every object in `doc` (§11.2).
+    depths: Depths,
 }
 
 /// `AutoCommit::load`, with an engine abort reported as
@@ -197,12 +200,17 @@ fn seqs_of(doc: &mut AutoCommit) -> HashMap<ActorId, u64> {
 struct Batch {
     hashes: std::collections::HashSet<ChangeHash>,
     seqs: HashMap<ActorId, u64>,
+    depths: Depths,
 }
+
+/// The objects an admitted change creates, with their depths (§11.2).
+type Created = Vec<(ObjKey, u32)>;
 
 /// What the §14.1 check decides for one received change.
 enum Admission {
-    /// Every dependency is here and the sequence is the actor's next one.
-    Apply,
+    /// Every dependency is here and the sequence is the actor's next one;
+    /// the change creates these objects.
+    Apply(Created),
     /// The document already holds this change.
     Duplicate,
 }
@@ -216,12 +224,19 @@ impl SharedObjects {
             doc: AutoCommit::new().with_actor(actor),
             time: 0,
             seqs: HashMap::new(),
+            depths: Depths::new(),
         }
     }
 
-    fn with_doc(mut doc: AutoCommit, time: i64) -> SharedObjects {
+    fn with_doc(mut doc: AutoCommit, time: i64) -> Result<SharedObjects, ProfileError> {
         let seqs = seqs_of(&mut doc);
-        SharedObjects { doc, time, seqs }
+        let depths = depth::depths_of(&mut doc)?;
+        Ok(SharedObjects {
+            doc,
+            time,
+            seqs,
+            depths,
+        })
     }
 
     /// Load a full-save image (§13) and continue writing as `actor`. A
@@ -230,7 +245,7 @@ impl SharedObjects {
     /// document is dropped.
     pub fn load(save: &[u8], actor: ActorId) -> Result<SharedObjects, ProfileError> {
         let doc = load_guarded(save)?.with_actor(actor);
-        Ok(SharedObjects::with_doc(doc, 0))
+        SharedObjects::with_doc(doc, 0)
     }
 
     /// Set the time recorded in the changes this document writes.
@@ -303,10 +318,11 @@ impl SharedObjects {
             let change = &changes[i];
             match self.admit_in(change, &batch) {
                 Ok(Admission::Duplicate) => {}
-                Ok(Admission::Apply) => {
+                Ok(Admission::Apply(created)) => {
                     batch.seqs.insert(change.actor_id().clone(), change.seq());
                     batch.hashes.insert(change.hash());
-                    admitted.push(change.clone());
+                    batch.depths.extend(created.iter().cloned());
+                    admitted.push((change.clone(), created));
                 }
                 Err(ProfileError::MissingDependencies(_)) => {
                     done[i] = false;
@@ -393,28 +409,40 @@ impl SharedObjects {
         if !change.other_actor_ids().iter().all(known) {
             return Err(ProfileError::Invalid(Diagnostic::InvalidAutomergeBytes));
         }
-        Ok(Admission::Apply)
+        // §11.2: no object deeper than 256, counting the objects of the
+        // changes admitted before it in the batch; a change writing into an
+        // object the document lacks is refused too.
+        let known = |key: &ObjKey| {
+            batch
+                .depths
+                .get(key)
+                .or_else(|| self.depths.get(key))
+                .copied()
+        };
+        let created = depth::created_objects(change, known, Some(depth::MAX_DEPTH))?;
+        Ok(Admission::Apply(created))
     }
 
     /// Hand admitted changes to the engine in one call, with one backup. If
     /// the engine fails anyway, the document is restored and the changes
     /// are applied one at a time, so the failing one is isolated and those
     /// before it stay applied.
-    fn engine_apply_all(&mut self, changes: Vec<Change>) -> Result<(), ProfileError> {
+    fn engine_apply_all(&mut self, changes: Vec<(Change, Created)>) -> Result<(), ProfileError> {
         let backup = self.doc.clone();
         let doc = &mut self.doc;
-        let batch = changes.clone();
+        let batch: Vec<Change> = changes.iter().map(|(c, _)| c.clone()).collect();
         match catch_unwind(AssertUnwindSafe(|| doc.apply_changes(batch))) {
             Ok(Ok(())) => {
-                for c in &changes {
+                for (c, created) in changes {
                     self.seqs.insert(c.actor_id().clone(), c.seq());
+                    self.depths.extend(created);
                 }
                 Ok(())
             }
             Ok(Err(_)) | Err(_) => {
                 self.doc = backup;
-                for change in changes {
-                    self.engine_apply(change)?;
+                for (change, created) in changes {
+                    self.engine_apply(change, created)?;
                 }
                 Ok(())
             }
@@ -425,7 +453,7 @@ impl SharedObjects {
     fn apply_one(&mut self, change: Change) -> Result<(), ProfileError> {
         match self.admit(&change)? {
             Admission::Duplicate => Ok(()),
-            Admission::Apply => self.engine_apply(change),
+            Admission::Apply(created) => self.engine_apply(change, created),
         }
     }
 
@@ -433,7 +461,7 @@ impl SharedObjects {
     /// panic the document is restored as it was before, and the change is
     /// `INVALID_AUTOMERGE_BYTES`. The admission check makes this
     /// unreachable for the known abort; a panicked document is never kept.
-    fn engine_apply(&mut self, change: Change) -> Result<(), ProfileError> {
+    fn engine_apply(&mut self, change: Change, created: Created) -> Result<(), ProfileError> {
         let backup = self.doc.clone();
         let (actor, seq) = (change.actor_id().clone(), change.seq());
         let doc = &mut self.doc;
@@ -441,6 +469,7 @@ impl SharedObjects {
         match outcome {
             Ok(Ok(())) => {
                 self.seqs.insert(actor, seq);
+                self.depths.extend(created);
                 Ok(())
             }
             Ok(Err(_)) | Err(_) => {
@@ -481,6 +510,7 @@ impl SharedObjects {
             doc: self.doc.fork().with_actor(actor),
             time: self.time,
             seqs: self.seqs.clone(),
+            depths: self.depths.clone(),
         }
     }
 
@@ -656,6 +686,15 @@ impl SharedObjects {
                 self.remove_change(&c.hash())?;
                 return Err(ProfileError::ChangeTooLarge);
             }
+            // §11.2: a writer never creates an object deeper than 256.
+            let known = |key: &ObjKey| self.depths.get(key).copied();
+            match depth::created_objects(c, known, Some(depth::MAX_DEPTH)) {
+                Ok(created) => self.depths.extend(created),
+                Err(_) => {
+                    self.remove_change(&c.hash())?;
+                    return Err(ProfileError::ObjectTooDeep);
+                }
+            }
             self.seqs.insert(c.actor_id().clone(), c.seq());
         }
         Ok(change)
@@ -675,6 +714,7 @@ impl SharedObjects {
         doc.apply_changes(keep)?;
         self.doc = doc;
         self.seqs = seqs_of(&mut self.doc);
+        self.depths = depth::depths_of(&mut self.doc)?;
         Ok(())
     }
 
@@ -1140,7 +1180,7 @@ mod admission_tests {
         receiver.apply_changes(vec![first]).unwrap();
         let before = state(&mut receiver);
         assert_eq!(
-            receiver.engine_apply(gapped),
+            receiver.engine_apply(gapped, Vec::new()),
             Err(ProfileError::Invalid(Diagnostic::InvalidAutomergeBytes))
         );
         assert_eq!(state(&mut receiver), before);
@@ -1264,6 +1304,65 @@ mod admission_tests {
         let next = put_root(&mut doc, "after", "ok");
         assert_eq!(next.seq(), 2);
         SharedObjects::load(&doc.save(), actor(1)).unwrap();
+    }
+
+    /// A map nesting `levels` maps in all (itself included).
+    fn nested(levels: usize) -> Plain {
+        let mut value = Plain::Map(BTreeMap::new());
+        for _ in 1..levels {
+            value = Plain::Map(BTreeMap::from([("d".to_owned(), value)]));
+        }
+        value
+    }
+
+    #[test]
+    fn a_writer_never_creates_an_object_deeper_than_256() {
+        // §11.2: the root is depth 0, `objects` 1, an object 2; an object
+        // nesting 255 maps reaches 256, one more 257.
+        let mut doc = SharedObjects::new(actor(1));
+        doc.initialize().unwrap();
+        let before = state(&mut doc);
+        assert_eq!(
+            doc.insert_object("deep", "over", &nested(256)),
+            Err(ProfileError::ObjectTooDeep)
+        );
+        assert_eq!(state(&mut doc), before);
+        let at_limit = doc.insert_object("deep", "limit", &nested(255)).unwrap();
+        assert_eq!(at_limit.seq(), 2, "the refused change was taken back out");
+
+        // The depths survive a reload and a fork: the next level is
+        // refused there too, whether written locally or received.
+        let deepest = |doc: &SharedObjects| {
+            let mut obj = doc.object_id("limit").unwrap();
+            while let Some((_, child)) = doc.doc.get(&obj, "d").unwrap() {
+                obj = child;
+            }
+            obj
+        };
+        let mut loaded = SharedObjects::load(&doc.save(), actor(1)).unwrap();
+        let obj = deepest(&loaded);
+        assert_eq!(
+            loaded.transact("deeper", |d| {
+                d.put_object(&obj, "d", ObjType::Text)?;
+                Ok(())
+            }),
+            Err(ProfileError::ObjectTooDeep)
+        );
+        let mut writer = doc.fork(actor(2));
+        let obj = deepest(&writer);
+        let deeper = writer
+            .doc
+            .put_object(&obj, "d", ObjType::List)
+            .map(|_| writer.doc.commit())
+            .unwrap()
+            .unwrap();
+        let deeper = writer.doc.get_change_by_hash(&deeper).unwrap().clone();
+        let before = state(&mut loaded);
+        assert_eq!(
+            loaded.apply_changes(vec![deeper]),
+            Err(ProfileError::Invalid(Diagnostic::InvalidAutomergeBytes))
+        );
+        assert_eq!(state(&mut loaded), before);
     }
 
     #[test]

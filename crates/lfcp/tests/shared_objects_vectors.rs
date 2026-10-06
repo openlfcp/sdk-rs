@@ -977,7 +977,9 @@ fn text_anywhere_in_an_object_is_profile_invalid() {
 }
 
 /// S01's document with a change, as another replica would send it, that
-/// nests `levels` maps under the object's `extensions`.
+/// nests `levels` maps under the object's `extensions`. Past the document
+/// depth bound (§11.2) the change is refused at admission, and the document
+/// is loaded from a local save instead, which admission does not check.
 fn nested_extensions(levels: usize) -> (SharedObjects, String) {
     use automerge::transaction::Transactable;
     use automerge::{AutoCommit, ObjType, ReadDoc, ROOT};
@@ -999,8 +1001,17 @@ fn nested_extensions(levels: usize) -> (SharedObjects, String) {
     }
     let heads = doc.heads();
     let changes = raw.get_changes(&heads);
-    assert!(doc.apply_changes(changes).unwrap().is_empty());
-    (doc, key)
+    // The root is depth 0, `objects` 1, the object 2, `extensions` 3.
+    if levels as u32 + 2 <= lfcp::shared_objects::depth::MAX_DEPTH {
+        assert!(doc.apply_changes(changes).unwrap().is_empty());
+        return (doc, key);
+    }
+    assert_eq!(
+        doc.apply_changes(changes),
+        Err(ProfileError::Invalid(Diagnostic::InvalidAutomergeBytes))
+    );
+    let actor = doc.automerge().get_actor().clone();
+    (SharedObjects::load(&raw.save(), actor).unwrap(), key)
 }
 
 #[test]

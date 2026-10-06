@@ -32,6 +32,7 @@
 
 use std::fmt;
 
+pub mod depth;
 pub mod document;
 pub mod expansion;
 pub mod framing;
@@ -143,6 +144,9 @@ pub enum ProfileError {
     /// §11.1: a local transaction would make a change above the expansion
     /// limits; nothing was committed. Split it into several changes.
     ChangeTooLarge,
+    /// §11.2: a local transaction would create an object deeper than
+    /// [`depth::MAX_DEPTH`]; nothing was committed.
+    ObjectTooDeep,
 }
 
 impl ProfileError {
@@ -202,6 +206,7 @@ impl fmt::Display for ProfileError {
             ProfileError::ChangeTooLarge => {
                 f.write_str("the change would exceed the expansion limits")
             }
+            ProfileError::ObjectTooDeep => f.write_str("the change would nest an object too deep"),
         }
     }
 }
