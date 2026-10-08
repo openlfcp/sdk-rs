@@ -1534,7 +1534,19 @@ impl SectionsReplica {
             }
         };
         if change.actor_id().to_bytes() != actor_id_bytes(&self.resource, signer) {
-            return Received::Refused(Refusal::ChangeActorMismatch);
+            // Recorded, but not held against the change: the same change
+            // under its own actor's signature is still admitted, so another
+            // Principal cannot block a change by forwarding it.
+            let hash = change.hash();
+            if self.engine.automerge().get_change_by_hash(&hash).is_some() {
+                return Received::Refused(Refusal::ChangeActorMismatch);
+            }
+            return self
+                .refused
+                .get(&hash)
+                .copied()
+                .map(Received::Refused)
+                .unwrap_or_else(|| self.refuse(hash, Refusal::ChangeActorMismatch));
         }
         let outcome = self.admit(change);
         if outcome == Received::Applied {
@@ -1545,8 +1557,12 @@ impl SectionsReplica {
 
     fn admit(&mut self, change: Change) -> Received {
         let hash = change.hash();
-        if let Some(r) = self.refused.get(&hash) {
-            return Received::Refused(*r);
+        match self.refused.get(&hash) {
+            Some(Refusal::ChangeActorMismatch) => {
+                self.refused.remove(&hash);
+            }
+            Some(r) => return Received::Refused(*r),
+            None => {}
         }
         let doc = self.engine.automerge();
         if doc.get_change_by_hash(&hash).is_some() {

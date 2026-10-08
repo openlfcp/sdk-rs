@@ -303,22 +303,28 @@ fn retained_concurrent_edits_match_every_case() {
 /// Every change record of a case, dependencies first, as (signer, plaintext).
 fn received(corpus: &Json, case: &Json) -> Vec<(PrincipalId, Vec<u8>)> {
     let actors = corpus["identities"]["actors"].as_object().unwrap();
-    let signer = |actor: &str| {
-        let (_, a) = actors
-            .iter()
-            .find(|(_, a)| a["actor_hex"] == actor)
-            .unwrap_or_else(|| panic!("unknown actor {actor}"));
+    let principal = |a: &Json| {
         PrincipalId::from_bytes(
             base::fixed(&base::from_hex(a["principal_hex"].as_str().unwrap()).unwrap()).unwrap(),
         )
     };
+    let signer = |r: &Json| match r["signer"].as_str() {
+        // A crafted Data Unit names its signer; otherwise the change's own
+        // actor signs it.
+        Some(name) => principal(&actors[name]),
+        None => {
+            let actor = r["actor"].as_str().unwrap();
+            let (_, a) = actors
+                .iter()
+                .find(|(_, a)| a["actor_hex"] == actor)
+                .unwrap_or_else(|| panic!("unknown actor {actor}"));
+            principal(a)
+        }
+    };
     let mut out = Vec::new();
     let mut push = |records: &Json| {
         for r in records.as_array().unwrap() {
-            out.push((
-                signer(r["actor"].as_str().unwrap()),
-                bytes_of(&r["framed_plaintext"]),
-            ));
+            out.push((signer(r), bytes_of(&r["framed_plaintext"])));
         }
     };
     push(&case["base_changes"]);
@@ -429,4 +435,6 @@ fn a_change_signed_by_another_principal_is_refused() {
         replica.receive(&units[0].0, &units[0].1),
         shared_sections::Received::Applied
     );
+    // Forwarding a change under another signature does not block it.
+    assert!(replica.refused().is_empty());
 }
