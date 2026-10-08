@@ -411,3 +411,14 @@ fn automerge_skips_a_plain_same_value_write() {
         .unwrap();
     assert!(doc.commit().is_none(), "the same-value put is suppressed");
 }
+
+#[test]
+fn setting_the_current_title_is_still_a_change() {
+    // SHARED-OBJECTS-PROFILE-01 §58: an intent writes an operation even when
+    // the value does not change (found by a schedule run, LFCP-02-024).
+    let mut doc = seeded();
+    let first = doc.set_title("Same").unwrap();
+    let again = doc.set_title("Same").unwrap();
+    assert_ne!(first.hash(), again.hash());
+    assert_eq!(doc.section().unwrap().title.as_deref(), Some("Same"));
+}

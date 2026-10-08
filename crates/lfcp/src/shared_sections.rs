@@ -877,20 +877,20 @@ impl SectionsDoc {
         self.doc.get_changes(&[])
     }
 
-    /// Commit the pending operations as one change named `intent`.
-    fn commit(&mut self, intent: &str) -> Change {
-        let hash = self
-            .doc
-            .commit_with(
-                CommitOptions::default()
-                    .with_message(intent.to_owned())
-                    .with_time(0),
-            )
-            .expect("an intent writes at least one operation");
-        self.doc
-            .get_change_by_hash(&hash)
-            .expect("the committed change")
-            .clone()
+    /// Commit the pending operations as one change named `intent`, or
+    /// None when the intent wrote nothing.
+    fn commit(&mut self, intent: &str) -> Option<Change> {
+        let hash = self.doc.commit_with(
+            CommitOptions::default()
+                .with_message(intent.to_owned())
+                .with_time(0),
+        )?;
+        Some(
+            self.doc
+                .get_change_by_hash(&hash)
+                .expect("the committed change")
+                .clone(),
+        )
     }
 
     /// Run `write`; roll back on failure, commit on success (one change).
@@ -903,7 +903,9 @@ impl SectionsDoc {
             self.doc.rollback();
             return Err(e);
         }
-        Ok(self.commit(intent))
+        // Every intent writes at least one operation (SHARED-OBJECTS-PROFILE-01
+        // §58); one that would write none is refused, never committed empty.
+        self.commit(intent).ok_or(AuthoringError::NotApplicable)
     }
 
     /// `section.create` (§4.1, §11, §12.1): a new section document in one
@@ -943,6 +945,11 @@ impl SectionsDoc {
             .root_map("section")
             .ok_or(AuthoringError::UnknownNode)?;
         self.transact("section.set_title", |d| {
+            // A fresh assignment even for the current title: Automerge skips
+            // a put of the value already there (SHARED-OBJECTS-PROFILE-01 §58).
+            if scalar(&d.doc, &section, "title").as_deref() == Some(title) {
+                d.doc.delete(&section, "title")?;
+            }
             put_str(&mut d.doc, &section, "title", title)
         })
     }
