@@ -15,11 +15,14 @@
 //! | per-node value checks | [`SectionsDoc::node_problems`], [`Diagnostic`] | §14.2 |
 //! | the effective tree, structural conflicts and visibility | [`SectionsDoc::effective`], [`Effective`] | §7, §9, §14.3 |
 //! | authoring: section, nodes, moves, explicit resolution | [`SectionsDoc::create`], [`SectionsDoc::create_node`], [`SectionsDoc::move_node`], [`SectionsDoc::resolve_placement`] | §4–§8, §11 |
+//! | lifecycle, Text, split and join, retained concurrent edits | [`SectionsDoc::delete_node`], [`SectionsDoc::restore_node`], [`SectionsDoc::text_edit`], [`SectionsDoc::split`], [`SectionsDoc::join`], [`SectionsDoc::retained_concurrent_edits`] | §9, §10 |
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use automerge::transaction::{CommitOptions, Transactable};
-use automerge::{ActorId, AutoCommit, Change, ObjId, ObjType, ReadDoc, ScalarValue, Value, ROOT};
+use automerge::{
+    ActorId, AutoCommit, Change, ChangeHash, ObjId, ObjType, ReadDoc, ScalarValue, Value, ROOT,
+};
 
 use crate::base::{ObjectId, PrincipalId, ResourceId};
 use crate::crypto;
@@ -718,6 +721,13 @@ pub enum AuthoringError {
     WouldCycle,
     /// An ID is not a canonical UUIDv7, or is already used.
     InvalidId,
+    /// The node's Text changed since the base the edit was computed on
+    /// (§10): its offsets must be rebased first.
+    StaleBase,
+    /// The intent does not apply to this node: a Text edit of a Task, a
+    /// split of a conflicted node, or a join of non-adjacent, different or
+    /// parenting nodes (§10).
+    NotApplicable,
     /// The engine refused the write.
     Profile(ProfileError),
 }
@@ -1108,4 +1118,323 @@ impl SectionsDoc {
             d.place(node, parent, &lane, index, placement_id, &author)
         })
     }
+}
+
+impl SectionsDoc {
+    /// The map holding `node`'s lifecycle: the Task object for a Task
+    /// node, the node map otherwise (§4.2, §9).
+    fn lifecycle_map(&self, node: &str) -> Result<ObjId, AuthoringError> {
+        let n = self
+            .nodes()
+            .get(node)
+            .cloned()
+            .ok_or(AuthoringError::UnknownNode)?;
+        let map = if n.kind == Some(NodeKind::Task) {
+            "objects"
+        } else {
+            "nodes"
+        };
+        let root = self.root_map(map).ok_or(AuthoringError::UnknownNode)?;
+        object(&self.doc, &root, node, ObjType::Map).ok_or(AuthoringError::UnknownNode)
+    }
+
+    /// Write `value` to a lifecycle register as a fresh causal assignment
+    /// (§9): when the visible value already equals it, the engine would
+    /// skip the write, so the other valid value is written first in the
+    /// same change.
+    fn assign_lifecycle(&mut self, map: &ObjId, value: &str) -> Result<(), AuthoringError> {
+        if scalar(&self.doc, map, "lifecycle").as_deref() == Some(value) {
+            let other = if value == "active" {
+                "deleted"
+            } else {
+                "active"
+            };
+            put_str(&mut self.doc, map, "lifecycle", other)?;
+        }
+        put_str(&mut self.doc, map, "lifecycle", value)
+    }
+
+    /// `node.delete` (§9): the node's lifecycle, or its Task's, becomes
+    /// `deleted`. Descendants are not rewritten; they are hidden and kept.
+    pub fn delete_node(&mut self, node: &str) -> Result<Change, AuthoringError> {
+        let map = self.lifecycle_map(node)?;
+        self.transact("node.delete", |d| d.assign_lifecycle(&map, "deleted"))
+    }
+
+    /// `node.restore` (§9): the node's lifecycle, or its Task's, becomes
+    /// `active` as a fresh assignment, so it also resolves a concurrent
+    /// delete. Descendants with their own tombstones stay deleted.
+    pub fn restore_node(&mut self, node: &str) -> Result<Change, AuthoringError> {
+        let map = self.lifecycle_map(node)?;
+        self.transact("node.restore", |d| d.assign_lifecycle(&map, "active"))
+    }
+
+    /// The Text object of a paragraph, item or raw node.
+    fn text_of(&self, node: &str) -> Result<ObjId, AuthoringError> {
+        let nodes = self.root_map("nodes").ok_or(AuthoringError::UnknownNode)?;
+        let n = object(&self.doc, &nodes, node, ObjType::Map).ok_or(AuthoringError::UnknownNode)?;
+        object(&self.doc, &n, "text", ObjType::Text).ok_or(AuthoringError::NotApplicable)
+    }
+
+    /// The document heads, a base for [`SectionsDoc::text_edit`].
+    pub fn heads(&mut self) -> Vec<ChangeHash> {
+        self.doc.get_heads()
+    }
+
+    /// `text.edit` (§10): delete `delete` and insert `insert` at `index`,
+    /// both in Unicode scalar values, in the node's existing Text. `base`
+    /// is the heads the offsets were computed at; if the node's Text has
+    /// changed since, the edit is refused ([`AuthoringError::StaleBase`])
+    /// rather than applied to a different text. Callers keep each change
+    /// within the Text budget of §16.2 by splitting long edits (§12.3).
+    pub fn text_edit(
+        &mut self,
+        node: &str,
+        base: &[ChangeHash],
+        index: usize,
+        delete: usize,
+        insert: &str,
+    ) -> Result<Change, AuthoringError> {
+        let text = self.text_of(node)?;
+        let then = self
+            .doc
+            .text_at(&text, base)
+            .map_err(|_| AuthoringError::StaleBase)?;
+        if then != self.doc.text(&text)? {
+            return Err(AuthoringError::StaleBase);
+        }
+        self.transact("text.edit", |d| {
+            d.doc.splice_text(&text, index, delete as isize, insert)?;
+            Ok(())
+        })
+    }
+
+    /// `paragraph.split` / `item.split` (§10): the node keeps the prefix up
+    /// to `index` (Unicode scalar values); a new node of the same kind,
+    /// right after it under the same parent, takes the suffix. An item's
+    /// children stay with the original. One change.
+    pub fn split(
+        &mut self,
+        node: &str,
+        index: usize,
+        new_node: &str,
+        placement_id: &str,
+        author: &PrincipalId,
+    ) -> Result<Change, AuthoringError> {
+        let current = self
+            .nodes()
+            .get(node)
+            .cloned()
+            .ok_or(AuthoringError::UnknownNode)?;
+        if !matches!(current.kind, Some(NodeKind::Paragraph | NodeKind::Item))
+            || current.placements.len() != 1
+        {
+            return Err(AuthoringError::NotApplicable);
+        }
+        if !self.fresh(new_node) || !self.fresh(placement_id) || new_node == placement_id {
+            return Err(AuthoringError::InvalidId);
+        }
+        let parent = self
+            .placements()
+            .get(&current.placements[0])
+            .and_then(|p| p.parent_id.clone())
+            .ok_or(AuthoringError::NotApplicable)?;
+        let (lane, at) = self.insertion_index(&parent, Some(node))?;
+        let text = self.text_of(node)?;
+        let whole = self.doc.text(&text)?;
+        let length = whole.chars().count();
+        if index > length {
+            return Err(AuthoringError::NotApplicable);
+        }
+        let suffix: String = whole.chars().skip(index).collect();
+        let kind = if current.kind == Some(NodeKind::Item) {
+            "item"
+        } else {
+            "paragraph"
+        };
+        let nodes = self.root_map("nodes").ok_or(AuthoringError::UnknownNode)?;
+        let author = crate::shared_objects::identity::principal_ref(author);
+        let intent = if kind == "item" {
+            "item.split"
+        } else {
+            "paragraph.split"
+        };
+        self.transact(intent, |d| {
+            d.doc
+                .splice_text(&text, index, (length - index) as isize, "")?;
+            let doc = &mut d.doc;
+            let n = doc.put_object(&nodes, new_node, ObjType::Map)?;
+            put_str(doc, &n, "id", new_node)?;
+            put_str(doc, &n, "kind", kind)?;
+            put_str(doc, &n, "created_by", &author)?;
+            put_str(doc, &n, "lifecycle", "active")?;
+            if kind == "item" {
+                put_str(doc, &n, "list_style", "bullet")?;
+            }
+            doc.put_object(&n, "children", ObjType::List)?;
+            doc.put_object(&n, "extensions", ObjType::Map)?;
+            let t = doc.put_object(&n, "text", ObjType::Text)?;
+            doc.splice_text(&t, 0, 0, &suffix)?;
+            d.place(new_node, &parent, &lane, at, placement_id, &author)
+        })
+    }
+
+    /// `node.join` (§10): `second`, the next visible sibling of `first`, of
+    /// the same kind and with no children like `first`, is appended to
+    /// `first` after `separator` and tombstoned; its own Text stays under
+    /// the tombstone. One change.
+    pub fn join(
+        &mut self,
+        first: &str,
+        second: &str,
+        separator: &str,
+    ) -> Result<Change, AuthoringError> {
+        let nodes = self.nodes();
+        let (a, b) = match (nodes.get(first), nodes.get(second)) {
+            (Some(a), Some(b)) => (a.clone(), b.clone()),
+            _ => return Err(AuthoringError::UnknownNode),
+        };
+        let effective = self.effective();
+        let pos = |id: &str| effective.tree.iter().position(|t| t.id == id);
+        let adjacent = match (pos(first), pos(second)) {
+            (Some(i), Some(j)) => {
+                j == i + 1 && effective.tree[i].parent == effective.tree[j].parent
+            }
+            _ => false,
+        };
+        if !adjacent
+            || a.kind != b.kind
+            || !matches!(a.kind, Some(NodeKind::Paragraph | NodeKind::Item))
+            || !a.children.is_empty()
+            || !b.children.is_empty()
+        {
+            return Err(AuthoringError::NotApplicable);
+        }
+        let target = self.text_of(first)?;
+        let appended = format!("{separator}{}", b.text.clone().unwrap_or_default());
+        let length = self.doc.text(&target)?.chars().count();
+        let map = self.lifecycle_map(second)?;
+        self.transact("node.join", |d| {
+            d.doc.splice_text(&target, length, 0, &appended)?;
+            d.assign_lifecycle(&map, "deleted")
+        })
+    }
+
+    /// §9: nodes whose content changed concurrently with the deletion of
+    /// the node itself or an ancestor, while they are hidden
+    /// (`EDIT_UNDER_DELETED_ANCESTOR`). A content change is a node's
+    /// creation, an edit of its Text, or of its Task's title or status;
+    /// concurrency is decided from the changes' dependencies. It does not
+    /// alter convergence.
+    pub fn retained_concurrent_edits(&mut self) -> BTreeSet<String> {
+        let effective = self.effective();
+        let changes = self.doc.get_changes(&[]);
+        let mut deps: BTreeMap<ChangeHash, Vec<ChangeHash>> = BTreeMap::new();
+        let mut contents: Vec<(ChangeHash, String)> = Vec::new();
+        let mut deletes: Vec<(ChangeHash, String)> = Vec::new();
+        // Replay change by change and compare the state before and after.
+        let mut replay = SectionsDoc::new(ActorId::from([0u8; 32]));
+        for change in changes {
+            let hash = change.hash();
+            deps.insert(hash, change.deps().to_vec());
+            let before = replay.snapshot_state();
+            replay
+                .doc
+                .apply_changes(vec![change])
+                .expect("a change of this document");
+            let after = replay.snapshot_state();
+            for (n, now) in &after {
+                let old = before.get(n);
+                if old.is_none_or(|o| o.content != now.content) {
+                    contents.push((hash, n.clone()));
+                }
+                if now.deleted && !old.is_some_and(|o| o.deleted) {
+                    deletes.push((hash, n.clone()));
+                }
+            }
+        }
+        let ancestor = |a: &ChangeHash, b: &ChangeHash| -> bool {
+            let mut stack = vec![*b];
+            let mut seen = HashSet::new();
+            while let Some(h) = stack.pop() {
+                if h == *a {
+                    return true;
+                }
+                if seen.insert(h) {
+                    stack.extend(deps.get(&h).cloned().unwrap_or_default());
+                }
+            }
+            false
+        };
+        let parents: BTreeMap<String, String> = {
+            let placements = self.placements();
+            self.nodes()
+                .keys()
+                .filter_map(|n| {
+                    let p = self.selected_placement(n)?;
+                    Some((n.clone(), placements.get(&p)?.parent_id.clone()?))
+                })
+                .collect()
+        };
+        let mut out = BTreeSet::new();
+        for (edit, node) in &contents {
+            if !effective.hidden.contains(node) {
+                continue;
+            }
+            let known = self.nodes();
+            let mut p = node.clone();
+            let mut seen = HashSet::new();
+            while known.contains_key(&p) && seen.insert(p.clone()) {
+                for (delete, deleted) in &deletes {
+                    if *deleted == p && !ancestor(delete, edit) && !ancestor(edit, delete) {
+                        out.insert(node.clone());
+                    }
+                }
+                match parents.get(&p) {
+                    Some(next) => p = next.clone(),
+                    None => break,
+                }
+            }
+        }
+        out
+    }
+
+    /// Per node: its content (Text, or Task title and status) and whether
+    /// it is deleted, for [`SectionsDoc::retained_concurrent_edits`].
+    fn snapshot_state(&self) -> BTreeMap<String, NodeState> {
+        self.nodes()
+            .into_iter()
+            .map(|(id, node)| {
+                let (content, lifecycle) = if node.kind == Some(NodeKind::Task) {
+                    let objects = self.root_map("objects");
+                    let task = objects.and_then(|o| object(&self.doc, &o, &id, ObjType::Map));
+                    let field = |k| task.as_ref().and_then(|t| scalar(&self.doc, t, k));
+                    (
+                        format!("{:?}|{:?}", field("title"), field("status")),
+                        field("lifecycle"),
+                    )
+                } else {
+                    let nodes = self.root_map("nodes").expect("nodes");
+                    let n = object(&self.doc, &nodes, &id, ObjType::Map).expect("node");
+                    (
+                        node.text.clone().unwrap_or_default(),
+                        scalar(&self.doc, &n, "lifecycle"),
+                    )
+                };
+                (
+                    id,
+                    NodeState {
+                        content,
+                        deleted: lifecycle.as_deref() == Some("deleted"),
+                    },
+                )
+            })
+            .collect()
+    }
+}
+
+/// A node's content and deletion at one point of the history.
+struct NodeState {
+    content: String,
+    deleted: bool,
 }

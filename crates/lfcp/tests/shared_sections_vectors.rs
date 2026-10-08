@@ -281,3 +281,21 @@ fn the_effective_tree_matches_every_case() {
         assert_eq!(recovery, want_recovery, "{id}: recovery");
     }
 }
+
+#[test]
+fn retained_concurrent_edits_match_every_case() {
+    // §9: EDIT_UNDER_DELETED_ANCESTOR, decided from change dependencies.
+    let corpus = corpus();
+    for case in corpus["cases"].as_array().unwrap() {
+        let id = case["id"].as_str().unwrap();
+        let mut doc = SectionsDoc::load(&bytes_of(&case["reference_snapshot"])).unwrap();
+        let got: Vec<String> = doc.retained_concurrent_edits().into_iter().collect();
+        let want: Vec<String> = case["expected"]["retainedConcurrentEdits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n.as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(got, want, "{id}: retained concurrent edits");
+    }
+}

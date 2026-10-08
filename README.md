@@ -59,7 +59,11 @@ In progress for MVP 0.2, feature `shared-sections`:
 - nodes and structure (LFCP-02-020): the effective tree of §7 with its
   conflicts and visibility, and authoring of the section, Task, paragraph,
   item and raw nodes, moves and explicit placement resolution, one change
-  per intent. Lifecycle, Text and admission follow (LFCP-02-021, 022).
+  per intent;
+- lifecycle and Text (LFCP-02-021): delete and restore as fresh
+  assignments (automerge 0.12 skips a same-value write), retained edits
+  under a deleted ancestor, Text edits in Unicode scalar indices against a
+  base, split and join. Admission follows (LFCP-02-022).
 
 The LFCP protocol layer of this SDK (LFCP-041 to LFCP-043) is complete
 for MVP 0.1: every LFCP-TEST-VECTORS-01 case is decided in scope.

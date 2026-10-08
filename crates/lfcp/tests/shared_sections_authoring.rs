@@ -265,3 +265,145 @@ fn invalid_intents_are_refused_before_writing() {
         "only the valid move was written"
     );
 }
+
+// ---------------------------------------------------------------- LFCP-02-021
+
+fn hidden(doc: &SectionsDoc) -> Vec<String> {
+    doc.effective().hidden.into_iter().collect()
+}
+
+#[test]
+fn deleting_a_parent_hides_a_concurrently_edited_child_and_keeps_the_edit() {
+    let mut a = seeded();
+    let mut b = fork(&mut a, 2);
+    a.delete_node(T).unwrap();
+    let base = b.heads();
+    b.text_edit(P, &base, 0, 0, "Edited: ").unwrap();
+    merge(&mut a, &mut b);
+    assert_eq!(hidden(&a), [T.to_owned(), P.to_owned()]);
+    assert_eq!(a.nodes()[P].text.as_deref(), Some("Edited: Draft contract"));
+    assert!(
+        a.retained_concurrent_edits().contains(P),
+        "EDIT_UNDER_DELETED_ANCESTOR"
+    );
+}
+
+#[test]
+fn a_child_moved_out_of_a_deleted_parent_stays_visible() {
+    let mut a = seeded();
+    let mut b = fork(&mut a, 2);
+    a.delete_node(T).unwrap();
+    b.move_node(P, SECTION, None, &slot(60), &principal(2))
+        .unwrap();
+    merge(&mut a, &mut b);
+    assert!(tree(&a).contains(&(P.into(), SECTION.into())));
+    assert!(!tree(&a).iter().any(|(id, _)| id == T));
+}
+
+#[test]
+fn delete_versus_restore_conflicts_and_a_fresh_restore_resolves_it() {
+    let mut a = seeded();
+    let mut b = fork(&mut a, 2);
+    a.delete_node(T).unwrap();
+    // T is visibly active for B: a plain same-value write would be skipped
+    // by the engine; the restore intent still writes an operation.
+    let restore = b.restore_node(T).unwrap();
+    assert!(
+        restore.len() > 0,
+        "the explicit restore is a fresh assignment"
+    );
+    merge(&mut a, &mut b);
+    assert_eq!(
+        a.effective().recovery.get(T),
+        Some(&Fact::LifecycleConflict)
+    );
+    let mut c = fork(&mut a, 3);
+    c.restore_node(T).unwrap();
+    assert!(c.effective().recovery.is_empty());
+    assert!(tree(&c).iter().any(|(id, _)| id == T));
+}
+
+#[test]
+fn restoring_a_parent_leaves_an_independently_deleted_child_hidden() {
+    let mut doc = seeded();
+    doc.delete_node(P).unwrap();
+    doc.delete_node(T).unwrap();
+    doc.restore_node(T).unwrap();
+    assert!(tree(&doc).iter().any(|(id, _)| id == T));
+    assert_eq!(hidden(&doc), [P.to_owned()]);
+}
+
+#[test]
+fn concurrent_unicode_text_edits_converge() {
+    let mut a = seeded();
+    let base = a.heads();
+    a.text_edit(P, &base, 0, 14, "А😀Б").unwrap();
+    let mut b = fork(&mut a, 2);
+    // Scalar indices: the emoji is one position.
+    let base_a = a.heads();
+    a.text_edit(P, &base_a, 2, 0, "!").unwrap();
+    let base_b = b.heads();
+    b.text_edit(P, &base_b, 0, 0, "Я: ").unwrap();
+    merge(&mut a, &mut b);
+    assert_eq!(a.nodes()[P].text.as_deref(), Some("Я: А😀!Б"));
+    assert_eq!(b.nodes()[P].text, a.nodes()[P].text);
+}
+
+#[test]
+fn an_edit_on_a_stale_base_is_refused() {
+    let mut doc = seeded();
+    let base = doc.heads();
+    doc.text_edit(P, &base, 0, 0, "x").unwrap();
+    assert_eq!(
+        doc.text_edit(P, &base, 0, 0, "y"),
+        Err(AuthoringError::StaleBase)
+    );
+    let task_base = doc.heads();
+    assert_eq!(
+        doc.text_edit(T, &task_base, 0, 0, "y"),
+        Err(AuthoringError::NotApplicable)
+    );
+}
+
+#[test]
+fn split_and_join_keep_identities() {
+    let mut doc = seeded();
+    let base = doc.heads();
+    doc.text_edit(P, &base, 0, 14, "Черновик договора 😀")
+        .unwrap();
+    let suffix = "019a2f85-7b31-7c42-8000-000000000020";
+    doc.split(P, 8, suffix, &slot(70), &principal(1)).unwrap();
+    assert_eq!(doc.nodes()[P].text.as_deref(), Some("Черновик"));
+    assert_eq!(doc.nodes()[suffix].text.as_deref(), Some(" договора 😀"));
+    let order: Vec<String> = tree(&doc).into_iter().map(|(id, _)| id).collect();
+    let at = order.iter().position(|id| id == P).unwrap();
+    assert_eq!(order[at + 1], suffix, "the suffix follows the original");
+    doc.join(P, suffix, "").unwrap();
+    assert_eq!(doc.nodes()[P].text.as_deref(), Some("Черновик договора 😀"));
+    assert!(
+        hidden(&doc).contains(&suffix.to_owned()),
+        "the joined node is tombstoned"
+    );
+    assert_eq!(
+        doc.nodes()[suffix].text.as_deref(),
+        Some(" договора 😀"),
+        "its Text is retained"
+    );
+    assert_eq!(doc.join(P, X, ""), Err(AuthoringError::NotApplicable));
+}
+
+#[test]
+fn automerge_skips_a_plain_same_value_write() {
+    // Why §9 asks for a fresh assignment: automerge 0.12 commits nothing for
+    // a put of the value already there, so an explicit restore of a visibly
+    // active node must write differently (restore_node does).
+    use automerge::transaction::Transactable;
+    use automerge::{AutoCommit, ScalarValue, ROOT};
+    let mut doc = AutoCommit::new();
+    doc.put(ROOT, "lifecycle", ScalarValue::Str("active".into()))
+        .unwrap();
+    assert!(doc.commit().is_some());
+    doc.put(ROOT, "lifecycle", ScalarValue::Str("active".into()))
+        .unwrap();
+    assert!(doc.commit().is_none(), "the same-value put is suppressed");
+}
