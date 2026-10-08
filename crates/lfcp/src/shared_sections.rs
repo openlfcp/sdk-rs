@@ -18,7 +18,7 @@
 //! | admission of received changes (SOP §§7–18, then A1–A5) | [`SectionsReplica`], [`Refusal`] | §2, §14.1 |
 //! | lifecycle, Text, split and join, retained concurrent edits | [`SectionsDoc::delete_node`], [`SectionsDoc::restore_node`], [`SectionsDoc::text_edit`], [`SectionsDoc::split`], [`SectionsDoc::join`], [`SectionsDoc::retained_concurrent_edits`] | §9, §10 |
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use automerge::transaction::{CommitOptions, Transactable};
 use automerge::{
@@ -326,26 +326,26 @@ impl SectionsDoc {
         };
         self.keys("nodes")
             .into_iter()
-            .filter_map(|k| {
-                let n = object(&self.doc, &nodes, &k, ObjType::Map)?;
-                let text = object(&self.doc, &n, "text", ObjType::Text)
-                    .and_then(|t| self.doc.text(&t).ok());
-                Some((
-                    k.clone(),
-                    Node {
-                        id: k,
-                        kind: scalar(&self.doc, &n, "kind").and_then(|s| NodeKind::parse(&s)),
-                        placements: scalars(&self.doc, &n, "placement"),
-                        lifecycles: scalars(&self.doc, &n, "lifecycle"),
-                        task_id: scalar(&self.doc, &n, "task_id"),
-                        text,
-                        children: object(&self.doc, &n, "children", ObjType::List)
-                            .map(|l| list_strings(&self.doc, &l))
-                            .unwrap_or_default(),
-                    },
-                ))
-            })
+            .filter_map(|k| Some((k.clone(), self.node_in(&nodes, k)?)))
             .collect()
+    }
+
+    /// The node `id` of the `nodes` map, as read.
+    fn node_in(&self, nodes: &ObjId, id: String) -> Option<Node> {
+        let n = object(&self.doc, nodes, &id, ObjType::Map)?;
+        let text =
+            object(&self.doc, &n, "text", ObjType::Text).and_then(|t| self.doc.text(&t).ok());
+        Some(Node {
+            id,
+            kind: scalar(&self.doc, &n, "kind").and_then(|s| NodeKind::parse(&s)),
+            placements: scalars(&self.doc, &n, "placement"),
+            lifecycles: scalars(&self.doc, &n, "lifecycle"),
+            task_id: scalar(&self.doc, &n, "task_id"),
+            text,
+            children: object(&self.doc, &n, "children", ObjType::List)
+                .map(|l| list_strings(&self.doc, &l))
+                .unwrap_or_default(),
+        })
     }
 
     /// Every placement, by PlacementId.
@@ -1384,24 +1384,40 @@ impl SectionsDoc {
         let mut deps: BTreeMap<ChangeHash, Vec<ChangeHash>> = BTreeMap::new();
         let mut contents: Vec<(ChangeHash, String)> = Vec::new();
         let mut deletes: Vec<(ChangeHash, String)> = Vec::new();
-        // Replay change by change and compare the state before and after.
+        // Which node each object belongs to: its map, its Text, its Task.
+        // Automerge object IDs are the same in every replica of the history.
+        let owners = self.node_objects();
+        let nodes_map = self.root_map("nodes").map(|o| o.to_string());
+        let objects_map = self.root_map("objects").map(|o| o.to_string());
+        // Replay change by change and compare, for the nodes a change
+        // touches, their state before and after it.
         let mut replay = SectionsDoc::new(ActorId::from([0u8; 32]));
         for change in changes {
             let hash = change.hash();
             deps.insert(hash, change.deps().to_vec());
-            let before = replay.snapshot_state();
+            let mut touched: BTreeSet<String> = BTreeSet::new();
+            for op in change.decode().operations {
+                let obj = op.obj.to_string();
+                if let Some(node) = owners.get(&obj) {
+                    touched.insert(node.clone());
+                } else if Some(&obj) == nodes_map.as_ref() || Some(&obj) == objects_map.as_ref() {
+                    if let automerge::legacy::Key::Map(key) = &op.key {
+                        touched.insert(key.to_string());
+                    }
+                }
+            }
+            let before = replay.node_states(&touched);
             replay
                 .doc
                 .apply_changes(vec![change])
                 .expect("a change of this document");
-            let after = replay.snapshot_state();
-            for (n, now) in &after {
-                let old = before.get(n);
+            for (n, now) in replay.node_states(&touched) {
+                let old = before.get(&n);
                 if old.is_none_or(|o| o.content != now.content) {
                     contents.push((hash, n.clone()));
                 }
                 if now.deleted && !old.is_some_and(|o| o.deleted) {
-                    deletes.push((hash, n.clone()));
+                    deletes.push((hash, n));
                 }
             }
         }
@@ -1451,11 +1467,39 @@ impl SectionsDoc {
         out
     }
 
-    /// Per node: its content (Text, or Task title and status) and whether
-    /// it is deleted, for [`SectionsDoc::retained_concurrent_edits`].
-    fn snapshot_state(&self) -> BTreeMap<String, NodeState> {
-        self.nodes()
-            .into_iter()
+    /// The node each node map, node Text and Task map belongs to, by
+    /// Automerge object ID.
+    fn node_objects(&self) -> HashMap<String, String> {
+        let mut out = HashMap::new();
+        let (Some(nodes), objects) = (self.root_map("nodes"), self.root_map("objects")) else {
+            return out;
+        };
+        for id in self.keys("nodes") {
+            if let Some(n) = object(&self.doc, &nodes, &id, ObjType::Map) {
+                if let Some(text) = object(&self.doc, &n, "text", ObjType::Text) {
+                    out.insert(text.to_string(), id.clone());
+                }
+                out.insert(n.to_string(), id.clone());
+            }
+            if let Some(task) = objects
+                .as_ref()
+                .and_then(|o| object(&self.doc, o, &id, ObjType::Map))
+            {
+                out.insert(task.to_string(), id.clone());
+            }
+        }
+        out
+    }
+
+    /// For the nodes of `ids` that exist: their content (Text, or Task
+    /// title and status) and whether they are deleted, for
+    /// [`SectionsDoc::retained_concurrent_edits`].
+    fn node_states(&self, ids: &BTreeSet<String>) -> BTreeMap<String, NodeState> {
+        let Some(nodes) = self.root_map("nodes") else {
+            return BTreeMap::new();
+        };
+        ids.iter()
+            .filter_map(|id| Some((id.clone(), self.node_in(&nodes, id.clone())?)))
             .map(|(id, node)| {
                 let (content, lifecycle) = if node.kind == Some(NodeKind::Task) {
                     let objects = self.root_map("objects");
