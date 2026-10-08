@@ -4,7 +4,7 @@
 //! view of the section, nodes and placements, Text versus scalar fields,
 //! readiness and the per-node problems of SHARED-SECTIONS-PROFILE-01 §14.2.
 //!
-//! The corpus is read at the spec-sections.lock pin. Only the profile, its
+//! The corpus is read at the spec.lock pin. Only the profile, its
 //! Markdown grammar and the JSON corpus are sources; the corpus generator
 //! is not (independence rule).
 
@@ -23,7 +23,7 @@ use support::spec::Spec;
 const CORPUS: &str = "test-vectors/shared-sections-01/SHARED-SECTIONS-TEST-VECTORS-01.json";
 
 fn corpus() -> Json {
-    Spec::open_sections().read_json(CORPUS)
+    Spec::open().read_json(CORPUS)
 }
 
 /// Standard base64 with padding, as the corpus stores bytes.

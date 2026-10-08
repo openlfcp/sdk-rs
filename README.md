@@ -55,7 +55,7 @@ In progress for MVP 0.2, feature `shared-sections`:
   section document (section, nodes, placements, Text versus scalar
   fields, readiness) and the per-node problems of
   SHARED-SECTIONS-PROFILE-01 §14.2; checked against
-  SHARED-SECTIONS-TEST-VECTORS-01 at the `spec-sections.lock` pin;
+  SHARED-SECTIONS-TEST-VECTORS-01 at the `spec.lock` pin;
 - nodes and structure (LFCP-02-020): the effective tree of §7 with its
   conflicts and visibility, and authoring of the section, Task, paragraph,
   item and raw nodes, moves and explicit placement resolution, one change
@@ -121,19 +121,18 @@ builds on the stable Rust toolchain; no older minimum version is promised.
 `spec.lock` pins the specification this SDK implements:
 
 ```json
-{ "tag": "mvp-0.1-baseline.9", "commit": "f42533c47f58fc980afd4e06f1366891592f7691" }
+{ "tag": "mvp-0.2-baseline.1", "commit": "96e21d62b97aa0241a4399e47e5c9cc168a3bd81" }
 ```
 
-`spec-sections.lock` pins, by commit only, the shared sections profile,
-its Markdown grammar and their corpus during MVP 0.2 development, before
-`mvp-0.2-baseline.1` is tagged. Tests read only those files through it;
-it is removed when the baseline is tagged.
+`mvp-0.2-baseline.1` is the MVP 0.1 baseline `mvp-0.1-baseline.9`
+unchanged, plus the shared sections profile, its Markdown grammar, the SDK
+integration contracts and their corpus.
 
 Vectors are never copied into this repository. The tests read them from a
 checkout of `openlfcp/spec` with `git show <commit>:<path>`, so the state of
 that checkout's working tree does not matter. Before reading, they check
-that the tag in `spec.lock` still resolves to the locked commit (and that the
-commit of `spec-sections.lock` exists), and fail with a clear message if not.
+that the tag in `spec.lock` still resolves to the locked commit, and fail
+with a clear message if not.
 
 The checkout is found at `$LFCP_SPEC_DIR`, or at `../spec` next to this
 repository by default. A relative `LFCP_SPEC_DIR` is resolved against this
