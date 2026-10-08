@@ -556,6 +556,44 @@ impl SharedObjects {
         self.history.rule_of(change, &Overlay::default()).err()
     }
 
+    /// [`SharedObjects::apply_change`], with one more check of the document
+    /// before and after `change`: when `verdict` returns a refusal, the
+    /// document is restored as it was and the refusal is returned. The
+    /// document is copied once, as for any apply, and the change applied
+    /// once. `verdict` runs only when the change enters the document.
+    pub fn apply_change_checked<R>(
+        &mut self,
+        change: Change,
+        verdict: impl FnOnce(&AutoCommit, &AutoCommit) -> Option<R>,
+    ) -> Result<Result<ChangeOutcome, R>, ProfileError> {
+        let created = match self.admit(&change) {
+            Ok(Admission::Duplicate) => return Ok(Ok(ChangeOutcome::Duplicate)),
+            Ok(Admission::Apply(created)) => created,
+            Err(ProfileError::SequenceTaken { .. }) => {
+                self.hold(change);
+                return Ok(Ok(ChangeOutcome::Held));
+            }
+            Err(err) => return Err(err),
+        };
+        let backup = self.doc.clone();
+        let (actor, seq) = (change.actor_id().clone(), change.seq());
+        let doc = &mut self.doc;
+        match catch_unwind(AssertUnwindSafe(|| doc.apply_changes(vec![change]))) {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) | Err(_) => {
+                self.doc = backup;
+                return Err(ProfileError::Invalid(Diagnostic::InvalidAutomergeBytes));
+            }
+        }
+        if let Some(refusal) = verdict(&backup, &self.doc) {
+            self.doc = backup;
+            return Ok(Err(refusal));
+        }
+        self.seqs.insert(actor, seq);
+        self.add(created);
+        Ok(Ok(ChangeOutcome::Applied))
+    }
+
     /// Keep `change` held, once.
     fn hold(&mut self, change: Change) {
         if !self.held.iter().any(|c| c.hash() == change.hash()) {

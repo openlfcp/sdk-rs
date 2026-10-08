@@ -27,7 +27,7 @@ use automerge::{
 
 use crate::base::{ObjectId, PrincipalId, ResourceId};
 use crate::crypto;
-use crate::shared_objects::document::load_guarded;
+use crate::shared_objects::document::{load_guarded, ChangeOutcome};
 use crate::shared_objects::ProfileError;
 
 /// The profile identifier a section Resource's Genesis declares (§1).
@@ -1705,44 +1705,55 @@ impl SectionsReplica {
         // The state of the change's causal history, before and after it.
         // When the change depends on exactly the current heads, that state
         // is the document itself; otherwise it is rebuilt from the history.
-        let mut current = self.engine.automerge().clone();
-        let mut heads = current.get_heads();
+        let mut heads = self.engine.heads();
         heads.sort();
         let mut deps = change.deps().to_vec();
         deps.sort();
-        let (prev, mut probe) = if deps == heads {
-            (current, self.engine.fork(ActorId::from([0u8; 32])))
-        } else {
-            // Guarded: admission keeps out the changes automerge cannot
-            // write back out, and an abort here still refuses, never panics.
-            let forked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                current.fork_at(change.deps())
-            }));
-            let Ok(Ok(mut prev)) = forked else {
-                return self.refuse(hash, Refusal::InvalidAutomergeBytes);
+        if deps == heads {
+            // SOP's admission on the document itself, then the structural
+            // rules between it and the document after the change: applied
+            // once, and restored when a rule refuses it.
+            let resource = self.resource;
+            let checked = change.clone();
+            let outcome = self.engine.apply_change_checked(change, |prev, next| {
+                structural_refusal(prev, next, &checked, &resource)
+            });
+            return match outcome {
+                Ok(Ok(ChangeOutcome::Applied)) => Received::Applied,
+                Ok(Ok(ChangeOutcome::Duplicate)) => Received::Duplicate,
+                Ok(Ok(ChangeOutcome::Held)) => Received::Held,
+                Ok(Err(r)) => self.refuse(hash, r),
+                Err(_) => self.refuse(hash, Refusal::InvalidAutomergeBytes),
             };
-            let mut probe =
-                crate::shared_objects::document::SharedObjects::new(ActorId::from([0u8; 32]));
-            let history = crate::shared_objects::document::all_changes(&mut prev);
-            if history.and_then(|h| probe.apply_changes(h)).is_err() {
-                return self.refuse(hash, Refusal::InvalidAutomergeBytes);
-            }
-            (prev, probe)
-        };
-        // SOP's admission first: sequence, actors, depth, held (POST-001).
-        match probe.apply_change(change.clone()) {
-            Ok(crate::shared_objects::document::ChangeOutcome::Applied) => {}
-            Ok(_) => {}
-            Err(_) => return self.refuse(hash, Refusal::InvalidAutomergeBytes),
         }
-        let next = probe.automerge();
-        if let Some(r) = structural_refusal(&prev, next, &change, &self.resource) {
+        // Otherwise the state of the change's causal history is rebuilt
+        // from it. Guarded: admission keeps out the changes automerge cannot
+        // write back out, and an abort here still refuses, never panics.
+        let mut current = self.engine.automerge().clone();
+        let forked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            current.fork_at(change.deps())
+        }));
+        let Ok(Ok(mut prev)) = forked else {
+            return self.refuse(hash, Refusal::InvalidAutomergeBytes);
+        };
+        let mut probe =
+            crate::shared_objects::document::SharedObjects::new(ActorId::from([0u8; 32]));
+        let history = crate::shared_objects::document::all_changes(&mut prev);
+        if history.and_then(|h| probe.apply_changes(h)).is_err() {
+            return self.refuse(hash, Refusal::InvalidAutomergeBytes);
+        }
+        // SOP's admission first: sequence, actors, depth, held (POST-001).
+        let refusal = match probe.apply_change(change.clone()) {
+            Err(_) => Some(Refusal::InvalidAutomergeBytes),
+            Ok(_) => structural_refusal(&prev, probe.automerge(), &change, &self.resource),
+        };
+        if let Some(r) = refusal {
             return self.refuse(hash, r);
         }
         match self.engine.apply_change(change) {
-            Ok(crate::shared_objects::document::ChangeOutcome::Applied) => Received::Applied,
-            Ok(crate::shared_objects::document::ChangeOutcome::Duplicate) => Received::Duplicate,
-            Ok(crate::shared_objects::document::ChangeOutcome::Held) => Received::Held,
+            Ok(ChangeOutcome::Applied) => Received::Applied,
+            Ok(ChangeOutcome::Duplicate) => Received::Duplicate,
+            Ok(ChangeOutcome::Held) => Received::Held,
             Err(_) => self.refuse(hash, Refusal::InvalidAutomergeBytes),
         }
     }
