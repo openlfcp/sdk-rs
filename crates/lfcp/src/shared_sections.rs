@@ -1667,7 +1667,7 @@ impl SectionsReplica {
             // under its own actor's signature is still admitted, so another
             // Principal cannot block a change by forwarding it.
             let hash = change.hash();
-            if self.engine.automerge().get_change_by_hash(&hash).is_some() {
+            if self.engine.has_change(&hash) {
                 return Received::Refused(Refusal::ChangeActorMismatch);
             }
             return self
@@ -1693,15 +1693,10 @@ impl SectionsReplica {
             Some(r) => return Received::Refused(*r),
             None => {}
         }
-        let doc = self.engine.automerge();
-        if doc.get_change_by_hash(&hash).is_some() {
+        if self.engine.has_change(&hash) {
             return Received::Duplicate;
         }
-        if change
-            .deps()
-            .iter()
-            .any(|d| doc.get_change_by_hash(d).is_none())
-        {
+        if change.deps().iter().any(|d| !self.engine.has_change(d)) {
             if !self.waiting.iter().any(|c| c.hash() == hash) {
                 self.waiting.push(change);
             }
@@ -1710,7 +1705,7 @@ impl SectionsReplica {
         // The state of the change's causal history, before and after it.
         // When the change depends on exactly the current heads, that state
         // is the document itself; otherwise it is rebuilt from the history.
-        let mut current = doc.clone();
+        let mut current = self.engine.automerge().clone();
         let mut heads = current.get_heads();
         heads.sort();
         let mut deps = change.deps().to_vec();
@@ -1718,15 +1713,18 @@ impl SectionsReplica {
         let (prev, mut probe) = if deps == heads {
             (current, self.engine.fork(ActorId::from([0u8; 32])))
         } else {
-            let Ok(prev) = current.fork_at(change.deps()) else {
+            // Guarded: admission keeps out the changes automerge cannot
+            // write back out, and an abort here still refuses, never panics.
+            let forked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                current.fork_at(change.deps())
+            }));
+            let Ok(Ok(mut prev)) = forked else {
                 return self.refuse(hash, Refusal::InvalidAutomergeBytes);
             };
             let mut probe =
                 crate::shared_objects::document::SharedObjects::new(ActorId::from([0u8; 32]));
-            if probe
-                .apply_changes(prev.clone().get_changes(&[]).into_iter().collect())
-                .is_err()
-            {
+            let history = crate::shared_objects::document::all_changes(&mut prev);
+            if history.and_then(|h| probe.apply_changes(h)).is_err() {
                 return self.refuse(hash, Refusal::InvalidAutomergeBytes);
             }
             (prev, probe)
@@ -1756,14 +1754,13 @@ impl SectionsReplica {
 
     fn retry_waiting(&mut self) {
         loop {
-            let ready: Vec<Change> = {
-                let doc = self.engine.automerge();
-                self.waiting
-                    .iter()
-                    .filter(|c| c.deps().iter().all(|d| doc.get_change_by_hash(d).is_some()))
-                    .cloned()
-                    .collect()
-            };
+            let engine = &mut self.engine;
+            let ready: Vec<Change> = self
+                .waiting
+                .iter()
+                .filter(|c| c.deps().iter().all(|d| engine.has_change(d)))
+                .cloned()
+                .collect();
             if ready.is_empty() {
                 return;
             }

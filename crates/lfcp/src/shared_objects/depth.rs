@@ -74,7 +74,7 @@ pub(crate) fn created_objects(
 /// History already held is not limited: the limit applies at admission.
 pub(crate) fn depths_of(doc: &mut AutoCommit) -> Result<Depths, ProfileError> {
     let mut depths = Depths::new();
-    for change in doc.get_changes(&[]) {
+    for change in crate::shared_objects::document::all_changes(doc)? {
         let objects = created_objects(&change, |key| depths.get(key).copied(), None)?;
         depths.extend(objects);
     }

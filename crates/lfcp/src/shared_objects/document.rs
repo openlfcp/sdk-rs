@@ -216,14 +216,29 @@ pub(crate) fn load_guarded(save: &[u8]) -> Result<AutoCommit, ProfileError> {
     }
 }
 
+/// Every change of `doc`, dependencies first, with an engine abort
+/// reported as `INVALID_AUTOMERGE_BYTES`. Defense in depth: admission
+/// (§11.3, §11.4) keeps out the changes automerge 0.12 cannot write back
+/// out. Sound: on a panic nothing of the call is used.
+pub(crate) fn all_changes(doc: &mut AutoCommit) -> Result<Vec<Change>, ProfileError> {
+    catch_unwind(AssertUnwindSafe(|| doc.get_changes(&[])))
+        .map_err(|_| ProfileError::Invalid(Diagnostic::InvalidAutomergeBytes))
+}
+
+/// Whether `doc` holds the change `hash`, read from its metadata: unlike
+/// `get_change_by_hash`, nothing is written out.
+fn holds(doc: &mut AutoCommit, hash: &ChangeHash) -> bool {
+    doc.get_change_meta_by_hash(hash).is_some()
+}
+
 /// The latest sequence number of every actor of `doc`.
-fn seqs_of(doc: &mut AutoCommit) -> HashMap<ActorId, u64> {
+fn seqs_of(doc: &mut AutoCommit) -> Result<HashMap<ActorId, u64>, ProfileError> {
     let mut seqs = HashMap::new();
-    for change in doc.get_changes(&[]) {
+    for change in all_changes(doc)? {
         let latest = seqs.entry(change.actor_id().clone()).or_insert(0);
         *latest = (*latest).max(change.seq());
     }
-    seqs
+    Ok(seqs)
 }
 
 /// Changes admitted earlier in an [`SharedObjects::apply_changes`] batch.
@@ -268,7 +283,7 @@ impl SharedObjects {
     }
 
     fn with_doc(mut doc: AutoCommit, time: i64) -> Result<SharedObjects, ProfileError> {
-        let seqs = seqs_of(&mut doc);
+        let seqs = seqs_of(&mut doc)?;
         let depths = depth::depths_of(&mut doc)?;
         // A document holding a change §11.3 or §11.4 refuses is refused
         // whole: its changes could not be written back out.
@@ -341,7 +356,7 @@ impl SharedObjects {
         let mut children: HashMap<ChangeHash, Vec<usize>> = HashMap::new();
         for (i, change) in changes.iter().enumerate() {
             for dep in change.deps() {
-                if self.doc.get_change_by_hash(dep).is_some() {
+                if holds(&mut self.doc, dep) {
                     continue;
                 }
                 if in_batch.contains_key(dep) {
@@ -422,13 +437,13 @@ impl SharedObjects {
     /// already in the document.
     fn admit_in(&mut self, change: &Change, batch: &Batch) -> Result<Admission, ProfileError> {
         let hash = change.hash();
-        if batch.hashes.contains(&hash) || self.doc.get_change_by_hash(&hash).is_some() {
+        if batch.hashes.contains(&hash) || holds(&mut self.doc, &hash) {
             return Ok(Admission::Duplicate);
         }
         let missing: Vec<ChangeHash> = change
             .deps()
             .iter()
-            .filter(|d| !batch.hashes.contains(*d) && self.doc.get_change_by_hash(d).is_none())
+            .filter(|d| !batch.hashes.contains(*d) && !holds(&mut self.doc, d))
             .copied()
             .collect();
         if !missing.is_empty() {
@@ -561,10 +576,10 @@ impl SharedObjects {
     /// number are free again and whose dependencies are all here applies;
     /// the others stay held. Hashes the document does not hold are ignored.
     pub fn exclude(&mut self, hashes: &[ChangeHash]) -> Result<Excluded, ProfileError> {
-        let all = self.doc.get_changes(&[]);
+        let all = all_changes(&mut self.doc)?;
         let mut removed: std::collections::HashSet<ChangeHash> = hashes
             .iter()
-            .filter(|h| self.doc.get_change_by_hash(h).is_some())
+            .filter(|h| holds(&mut self.doc, h))
             .copied()
             .collect();
         // Dependencies come first, so one pass finds every dependent.
@@ -581,7 +596,7 @@ impl SharedObjects {
             let mut doc = AutoCommit::new().with_actor(self.doc.get_actor().clone());
             doc.apply_changes(keep)?;
             self.doc = doc;
-            self.seqs = seqs_of(&mut self.doc);
+            self.seqs = seqs_of(&mut self.doc)?;
             self.depths = depth::depths_of(&mut self.doc)?;
             self.history = History::of(&mut self.doc)?;
         }
@@ -679,11 +694,9 @@ impl SharedObjects {
     /// POST-001); the changes of `other` that depend on a held one are
     /// returned, not merged.
     pub fn merge(&mut self, other: &mut SharedObjects) -> Result<Vec<Change>, ProfileError> {
-        let new: Vec<Change> = other
-            .doc
-            .get_changes(&[])
+        let new: Vec<Change> = all_changes(&mut other.doc)?
             .into_iter()
-            .filter(|c| self.doc.get_change_by_hash(&c.hash()).is_none())
+            .filter(|c| !holds(&mut self.doc, &c.hash()))
             .collect();
         let waiting = self.apply_changes(new)?;
         // A whole history has every dependency: what is left waits for a
@@ -694,13 +707,18 @@ impl SharedObjects {
             let waits_on_held = change
                 .deps()
                 .iter()
-                .all(|d| blocked.contains(d) || self.doc.get_change_by_hash(d).is_some());
+                .all(|d| blocked.contains(d) || holds(&mut self.doc, d));
             if !waits_on_held {
                 return Err(ProfileError::MissingDependencies(change.deps().to_vec()));
             }
             blocked.insert(change.hash());
         }
         Ok(waiting)
+    }
+
+    /// Whether the document holds the change `hash`.
+    pub fn has_change(&mut self, hash: &ChangeHash) -> bool {
+        holds(&mut self.doc, hash)
     }
 
     /// The current heads.
@@ -879,16 +897,14 @@ impl SharedObjects {
     /// dependents (the last local change). The writer's next change takes
     /// the same sequence number (§9).
     fn remove_change(&mut self, hash: &ChangeHash) -> Result<(), ProfileError> {
-        let keep: Vec<Change> = self
-            .doc
-            .get_changes(&[])
+        let keep: Vec<Change> = all_changes(&mut self.doc)?
             .into_iter()
             .filter(|c| c.hash() != *hash)
             .collect();
         let mut doc = AutoCommit::new().with_actor(self.doc.get_actor().clone());
         doc.apply_changes(keep)?;
         self.doc = doc;
-        self.seqs = seqs_of(&mut self.doc);
+        self.seqs = seqs_of(&mut self.doc)?;
         self.depths = depth::depths_of(&mut self.doc)?;
         self.history = History::of(&mut self.doc)?;
         Ok(())
