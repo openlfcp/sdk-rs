@@ -299,3 +299,134 @@ fn retained_concurrent_edits_match_every_case() {
         assert_eq!(got, want, "{id}: retained concurrent edits");
     }
 }
+
+/// Every change record of a case, dependencies first, as (signer, plaintext).
+fn received(corpus: &Json, case: &Json) -> Vec<(PrincipalId, Vec<u8>)> {
+    let actors = corpus["identities"]["actors"].as_object().unwrap();
+    let signer = |actor: &str| {
+        let (_, a) = actors
+            .iter()
+            .find(|(_, a)| a["actor_hex"] == actor)
+            .unwrap_or_else(|| panic!("unknown actor {actor}"));
+        PrincipalId::from_bytes(
+            base::fixed(&base::from_hex(a["principal_hex"].as_str().unwrap()).unwrap()).unwrap(),
+        )
+    };
+    let mut out = Vec::new();
+    let mut push = |records: &Json| {
+        for r in records.as_array().unwrap() {
+            out.push((
+                signer(r["actor"].as_str().unwrap()),
+                bytes_of(&r["framed_plaintext"]),
+            ));
+        }
+    };
+    push(&case["base_changes"]);
+    push(&case["branches"]["A"]);
+    push(&case["branches"]["B"]);
+    push(&case["after_merge"]);
+    out
+}
+
+#[test]
+fn the_full_corpus_replays_through_admission() {
+    // LFCP-02-022: every case through SectionsReplica, in order and in
+    // reverse with duplicates: SHARED-OBJECTS-PROFILE-01's admission, then
+    // A1-A5 (§14.1); the refused changes, the changes held behind them, the
+    // heads and the effective tree are the corpus's.
+    let corpus = corpus();
+    let resource = ResourceId::from_bytes(
+        base::fixed(
+            &base::from_hex(corpus["identities"]["resource_hex"].as_str().unwrap()).unwrap(),
+        )
+        .unwrap(),
+    );
+    for case in corpus["cases"].as_array().unwrap() {
+        let id = case["id"].as_str().unwrap();
+        let expected = &case["expected"];
+        let units = received(&corpus, case);
+        let mut reversed: Vec<_> = units
+            .iter()
+            .rev()
+            .flat_map(|u| [u.clone(), u.clone()])
+            .collect();
+        reversed.dedup_by(|_, _| false);
+        for (order, units) in [("in order", units.clone()), ("reversed", reversed)] {
+            let mut replica = shared_sections::SectionsReplica::new(
+                resource,
+                automerge::ActorId::from([7u8; 32]),
+            );
+            for (signer, plaintext) in &units {
+                replica.receive(signer, plaintext);
+            }
+            let refused: BTreeMap<String, &str> = replica
+                .refused()
+                .iter()
+                .map(|(h, r)| (h.to_string(), r.name()))
+                .collect();
+            let want: BTreeMap<String, &str> = expected["refused"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| {
+                    (
+                        r["change"].as_str().unwrap().to_owned(),
+                        r["diagnostic"].as_str().unwrap(),
+                    )
+                })
+                .collect();
+            assert_eq!(refused, want, "{id} {order}: refused");
+            let waiting: Vec<String> = replica.waiting().iter().map(|h| h.to_string()).collect();
+            let want_held: Vec<String> = expected["held"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|h| h.as_str().unwrap().to_owned())
+                .collect();
+            assert_eq!(waiting, want_held, "{id} {order}: held behind refusals");
+            let mut view = replica.view();
+            let mut heads: Vec<String> = view.heads().iter().map(|h| h.to_string()).collect();
+            heads.sort();
+            let want_heads: Vec<String> = case["expected_heads"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|h| h.as_str().unwrap().to_owned())
+                .collect();
+            assert_eq!(heads, want_heads, "{id} {order}: heads");
+            let tree: Vec<String> = view.effective().tree.into_iter().map(|t| t.id).collect();
+            let want_tree: Vec<String> = expected["tree"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["id"].as_str().unwrap().to_owned())
+                .collect();
+            assert_eq!(tree, want_tree, "{id} {order}: tree");
+        }
+    }
+}
+
+#[test]
+fn a_change_signed_by_another_principal_is_refused() {
+    // §2 (SHARED-OBJECTS-PROFILE-01 §8, §11): the change must be the signer's.
+    let corpus = corpus();
+    let resource = ResourceId::from_bytes(
+        base::fixed(
+            &base::from_hex(corpus["identities"]["resource_hex"].as_str().unwrap()).unwrap(),
+        )
+        .unwrap(),
+    );
+    let case = &corpus["cases"][0];
+    let units = received(&corpus, case);
+    let other = PrincipalId::from_bytes([0xee; 32]);
+    let mut replica =
+        shared_sections::SectionsReplica::new(resource, automerge::ActorId::from([7u8; 32]));
+    assert_eq!(
+        replica.receive(&other, &units[0].1),
+        shared_sections::Received::Refused(shared_sections::Refusal::ChangeActorMismatch)
+    );
+    assert_eq!(
+        replica.receive(&units[0].0, &units[0].1),
+        shared_sections::Received::Applied
+    );
+}

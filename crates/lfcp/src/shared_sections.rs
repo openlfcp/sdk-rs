@@ -15,6 +15,7 @@
 //! | per-node value checks | [`SectionsDoc::node_problems`], [`Diagnostic`] | §14.2 |
 //! | the effective tree, structural conflicts and visibility | [`SectionsDoc::effective`], [`Effective`] | §7, §9, §14.3 |
 //! | authoring: section, nodes, moves, explicit resolution | [`SectionsDoc::create`], [`SectionsDoc::create_node`], [`SectionsDoc::move_node`], [`SectionsDoc::resolve_placement`] | §4–§8, §11 |
+//! | admission of received changes (SOP §§7–18, then A1–A5) | [`SectionsReplica`], [`Refusal`] | §2, §14.1 |
 //! | lifecycle, Text, split and join, retained concurrent edits | [`SectionsDoc::delete_node`], [`SectionsDoc::restore_node`], [`SectionsDoc::text_edit`], [`SectionsDoc::split`], [`SectionsDoc::join`], [`SectionsDoc::retained_concurrent_edits`] | §9, §10 |
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -1437,4 +1438,509 @@ impl SectionsDoc {
 struct NodeState {
     content: String,
     deleted: bool,
+}
+
+/// Why a received change was refused at admission (§14.1). The first two
+/// are SHARED-OBJECTS-PROFILE-01's (§11, §11.1, §11.2, §14.1, §8); the
+/// others are this profile's structural rules A1-A5, in this order of
+/// precedence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Refusal {
+    /// Not a valid change chunk within the limits, or a sequence gap, an
+    /// unknown actor or an object too deep.
+    InvalidAutomergeBytes,
+    /// The change is not a change of the signer's actor (§2).
+    ChangeActorMismatch,
+    /// A4: a container is replaced or deleted.
+    ContainerReplaced,
+    /// A1: an element of a children list is deleted or replaced.
+    ChildrenListMutated,
+    /// A2: a placement is not created, inserted once and assigned together.
+    PlacementNotAtomic,
+    /// A3: an immutable field or placement is written, or `ready` against §12.1.
+    ImmutableFieldMutated,
+    /// A5: Text where a scalar is required, or the reverse.
+    InvalidFieldType,
+}
+
+impl Refusal {
+    /// The diagnostic name, such as `CHILDREN_LIST_MUTATED`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Refusal::InvalidAutomergeBytes => "INVALID_AUTOMERGE_BYTES",
+            Refusal::ChangeActorMismatch => "CHANGE_ACTOR_MISMATCH",
+            Refusal::ContainerReplaced => "CONTAINER_REPLACED",
+            Refusal::ChildrenListMutated => "CHILDREN_LIST_MUTATED",
+            Refusal::PlacementNotAtomic => "PLACEMENT_NOT_ATOMIC",
+            Refusal::ImmutableFieldMutated => "IMMUTABLE_FIELD_MUTATED",
+            Refusal::InvalidFieldType => "INVALID_FIELD_TYPE",
+        }
+    }
+}
+
+/// What became of one received Data Unit plaintext.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Received {
+    /// The change entered the document (with any waiting changes it
+    /// released).
+    Applied,
+    /// The document already holds it.
+    Duplicate,
+    /// Its actor sequence is taken (POST-001): held until a rebuild.
+    Held,
+    /// A dependency is not in the document yet: kept and retried.
+    Waiting,
+    /// Refused at admission; never merged.
+    Refused(Refusal),
+}
+
+/// A receiving replica of one section Resource: every change goes through
+/// SHARED-OBJECTS-PROFILE-01's admission (§§7-18, shared with the Shared
+/// Objects profile, not copied) and then this profile's structural rules,
+/// decided against the change's causal history (§14.1).
+#[derive(Debug)]
+pub struct SectionsReplica {
+    resource: ResourceId,
+    engine: crate::shared_objects::document::SharedObjects,
+    waiting: Vec<Change>,
+    refused: BTreeMap<ChangeHash, Refusal>,
+}
+
+impl SectionsReplica {
+    /// An empty replica of `resource`, writing as `actor` if ever.
+    pub fn new(resource: ResourceId, actor: ActorId) -> SectionsReplica {
+        SectionsReplica {
+            resource,
+            engine: crate::shared_objects::document::SharedObjects::new(actor),
+            waiting: Vec::new(),
+            refused: BTreeMap::new(),
+        }
+    }
+
+    /// Receive the plaintext of a Data Unit signed by `signer`.
+    pub fn receive(&mut self, signer: &PrincipalId, plaintext: &[u8]) -> Received {
+        let change = match crate::shared_objects::framing::decode_change(plaintext) {
+            Ok(c) => c,
+            Err(_) => {
+                // Recorded by its hash when the bytes still parse as a change
+                // (for example one above the §11.1 limits).
+                let parsed = crate::shared_objects::framing::unframe(plaintext)
+                    .ok()
+                    .and_then(|b| Change::from_bytes(b).ok());
+                return match parsed {
+                    Some(c) => self.refuse(c.hash(), Refusal::InvalidAutomergeBytes),
+                    None => Received::Refused(Refusal::InvalidAutomergeBytes),
+                };
+            }
+        };
+        if change.actor_id().to_bytes() != actor_id_bytes(&self.resource, signer) {
+            return Received::Refused(Refusal::ChangeActorMismatch);
+        }
+        let outcome = self.admit(change);
+        if outcome == Received::Applied {
+            self.retry_waiting();
+        }
+        outcome
+    }
+
+    fn admit(&mut self, change: Change) -> Received {
+        let hash = change.hash();
+        if let Some(r) = self.refused.get(&hash) {
+            return Received::Refused(*r);
+        }
+        let doc = self.engine.automerge();
+        if doc.get_change_by_hash(&hash).is_some() {
+            return Received::Duplicate;
+        }
+        if change
+            .deps()
+            .iter()
+            .any(|d| doc.get_change_by_hash(d).is_none())
+        {
+            if !self.waiting.iter().any(|c| c.hash() == hash) {
+                self.waiting.push(change);
+            }
+            return Received::Waiting;
+        }
+        // The state of the change's causal history, before and after it.
+        let mut prev = doc.clone();
+        let Ok(prev) = prev.fork_at(change.deps()) else {
+            return self.refuse(hash, Refusal::InvalidAutomergeBytes);
+        };
+        // SOP's admission first: sequence, actors, depth, held (POST-001).
+        let mut probe =
+            crate::shared_objects::document::SharedObjects::new(ActorId::from([0u8; 32]));
+        if probe
+            .apply_changes(prev.clone().get_changes(&[]).into_iter().collect())
+            .is_err()
+        {
+            return self.refuse(hash, Refusal::InvalidAutomergeBytes);
+        }
+        match probe.apply_change(change.clone()) {
+            Ok(crate::shared_objects::document::ChangeOutcome::Applied) => {}
+            Ok(_) => {}
+            Err(_) => return self.refuse(hash, Refusal::InvalidAutomergeBytes),
+        }
+        let next = probe.automerge();
+        if let Some(r) = structural_refusal(&prev, next, &change, &self.resource) {
+            return self.refuse(hash, r);
+        }
+        match self.engine.apply_change(change) {
+            Ok(crate::shared_objects::document::ChangeOutcome::Applied) => Received::Applied,
+            Ok(crate::shared_objects::document::ChangeOutcome::Duplicate) => Received::Duplicate,
+            Ok(crate::shared_objects::document::ChangeOutcome::Held) => Received::Held,
+            Err(_) => self.refuse(hash, Refusal::InvalidAutomergeBytes),
+        }
+    }
+
+    fn refuse(&mut self, hash: ChangeHash, refusal: Refusal) -> Received {
+        self.refused.insert(hash, refusal);
+        Received::Refused(refusal)
+    }
+
+    fn retry_waiting(&mut self) {
+        loop {
+            let ready: Vec<Change> = {
+                let doc = self.engine.automerge();
+                self.waiting
+                    .iter()
+                    .filter(|c| c.deps().iter().all(|d| doc.get_change_by_hash(d).is_some()))
+                    .cloned()
+                    .collect()
+            };
+            if ready.is_empty() {
+                return;
+            }
+            self.waiting
+                .retain(|c| !ready.iter().any(|r| r.hash() == c.hash()));
+            for change in ready {
+                self.admit(change);
+            }
+        }
+    }
+
+    /// The refused changes with their refusal.
+    pub fn refused(&self) -> &BTreeMap<ChangeHash, Refusal> {
+        &self.refused
+    }
+
+    /// The changes still waiting for a dependency: in particular every
+    /// change that depends on a refused one.
+    pub fn waiting(&self) -> Vec<ChangeHash> {
+        let mut out: Vec<ChangeHash> = self.waiting.iter().map(Change::hash).collect();
+        out.sort();
+        out
+    }
+
+    /// A read view of the admitted document.
+    pub fn view(&self) -> SectionsDoc {
+        SectionsDoc {
+            doc: self.engine.automerge().clone(),
+        }
+    }
+}
+
+/// The object at `key` of `obj`, as its ID.
+fn object_id(doc: &AutoCommit, obj: &ObjId, key: &str) -> Option<ObjId> {
+    match doc.get(obj, key).ok().flatten()? {
+        (Value::Object(_), id) => Some(id),
+        _ => None,
+    }
+}
+
+/// Whether `before` is a subsequence of `after`.
+fn is_subsequence(before: &[String], after: &[String]) -> bool {
+    let mut i = 0;
+    for x in after {
+        if i < before.len() && *x == before[i] {
+            i += 1;
+        }
+    }
+    i == before.len()
+}
+
+/// A Text object at `key` of `obj`.
+fn is_text(doc: &AutoCommit, obj: &ObjId, key: &str) -> bool {
+    matches!(
+        doc.get(obj, key).ok().flatten(),
+        Some((Value::Object(ObjType::Text), _))
+    )
+}
+
+/// Every value of a list, scalar strings as themselves and anything else
+/// as `None`.
+fn list_values(doc: &AutoCommit, list: &ObjId) -> Vec<Option<String>> {
+    (0..doc.length(list))
+        .map(|i| match doc.get(list, i).ok().flatten() {
+            Some((Value::Scalar(s), _)) => match s.as_ref() {
+                ScalarValue::Str(s) => Some(s.to_string()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+/// §14.1: the structural refusal of `change`, given the state `prev` of its
+/// causal history and the state `next` after it, or `None`.
+fn structural_refusal(
+    prev: &AutoCommit,
+    next: &AutoCommit,
+    change: &Change,
+    resource: &ResourceId,
+) -> Option<Refusal> {
+    let mut found: BTreeSet<Refusal> = BTreeSet::new();
+    let a = SectionsDoc { doc: prev.clone() };
+    let b = SectionsDoc { doc: next.clone() };
+    let initialized = object_id(prev, &ROOT, "section").is_some();
+    // A4: root containers and the profile.
+    if initialized {
+        for key in ROOT_MAPS {
+            if object_id(prev, &ROOT, key) != object_id(next, &ROOT, key) {
+                found.insert(Refusal::ContainerReplaced);
+            }
+        }
+        if scalar(prev, &ROOT, "profile") != scalar(next, &ROOT, "profile") {
+            found.insert(Refusal::ContainerReplaced);
+        }
+    }
+    let ps = object_id(prev, &ROOT, "section");
+    let ns = object_id(next, &ROOT, "section");
+    if let (Some(ps), Some(ns)) = (&ps, &ns) {
+        for key in ["children", "extensions"] {
+            if object_id(prev, ps, key).is_some()
+                && object_id(prev, ps, key) != object_id(next, ns, key)
+            {
+                found.insert(Refusal::ContainerReplaced);
+            }
+        }
+        // A3: the section's immutable fields and readiness (§12.1).
+        for key in ["id", "created_by"] {
+            if scalar(prev, ps, key).is_some() && scalar(prev, ps, key) != scalar(next, ns, key) {
+                found.insert(Refusal::ImmutableFieldMutated);
+            }
+        }
+        let ready = |d: &AutoCommit, s: &ObjId| -> Vec<String> {
+            let mut v: Vec<String> = d
+                .get_all(s, "ready")
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(v, _)| format!("{v:?}"))
+                .collect();
+            v.sort();
+            v
+        };
+        let (before, after) = (ready(prev, ps), ready(next, ns));
+        if before != after {
+            let values = next.get_all(ns, "ready").unwrap_or_default();
+            let all_true = !values.is_empty()
+                && values.iter().all(|(v, _)| matches!(v, Value::Scalar(s) if matches!(s.as_ref(), ScalarValue::Boolean(true))));
+            let creator = scalar(next, ns, "created_by")
+                .and_then(|r| crate::shared_objects::identity::parse_principal_ref(&r).ok());
+            let by_creator = creator
+                .is_some_and(|p| change.actor_id().to_bytes() == actor_id_bytes(resource, &p));
+            if !all_true || !by_creator {
+                found.insert(Refusal::ImmutableFieldMutated);
+            }
+        }
+    }
+    // Existing nodes: their maps, containers and immutable fields.
+    let (pn, nn) = (
+        object_id(prev, &ROOT, "nodes"),
+        object_id(next, &ROOT, "nodes"),
+    );
+    if let (Some(pn), Some(nn)) = (&pn, &nn) {
+        for id in prev.keys(pn).collect::<Vec<_>>() {
+            let (Some(old), Some(new)) = (object_id(prev, pn, &id), object_id(next, nn, &id))
+            else {
+                found.insert(Refusal::ContainerReplaced);
+                continue;
+            };
+            if old != new {
+                found.insert(Refusal::ContainerReplaced);
+                continue;
+            }
+            for key in ["children", "text", "extensions"] {
+                if object_id(prev, &old, key).is_some()
+                    && object_id(prev, &old, key) != object_id(next, &new, key)
+                {
+                    found.insert(Refusal::ContainerReplaced);
+                }
+            }
+            for key in ["id", "kind", "created_by", "task_id"] {
+                if scalar(prev, &old, key) != scalar(next, &new, key) {
+                    found.insert(Refusal::ImmutableFieldMutated);
+                }
+            }
+        }
+    }
+    let (po, no) = (
+        object_id(prev, &ROOT, "objects"),
+        object_id(next, &ROOT, "objects"),
+    );
+    if let (Some(po), Some(no)) = (&po, &no) {
+        for id in prev.keys(po).collect::<Vec<_>>() {
+            if let (Some(old), Some(new)) = (object_id(prev, po, &id), object_id(next, no, &id)) {
+                for key in ["id", "type", "created_by"] {
+                    if scalar(prev, &old, key) != scalar(next, &new, key) {
+                        found.insert(Refusal::ImmutableFieldMutated);
+                    }
+                }
+            }
+        }
+    }
+    // A3: placements are immutable once created.
+    let (old_placements, new_placements) = (a.placements(), b.placements());
+    for (id, p) in &old_placements {
+        if new_placements.get(id) != Some(p) {
+            found.insert(Refusal::ImmutableFieldMutated);
+        }
+    }
+    // A1, A2, A5 on the children lists.
+    let section_id = b.section().map(|s| s.id);
+    let mut lanes: Vec<(String, Option<ObjId>, ObjId)> = Vec::new();
+    if let (Some(sid), Some(ns)) = (&section_id, &ns) {
+        if let Some(l) = object_id(next, ns, "children") {
+            lanes.push((
+                sid.clone(),
+                ps.as_ref().and_then(|p| object_id(prev, p, "children")),
+                l,
+            ));
+        }
+    }
+    if let Some(nn) = &nn {
+        for id in next.keys(nn).collect::<Vec<_>>() {
+            let Some(n) = object_id(next, nn, &id) else {
+                continue;
+            };
+            let Some(l) = object_id(next, &n, "children") else {
+                continue;
+            };
+            let old = pn
+                .as_ref()
+                .and_then(|pn| object_id(prev, pn, &id))
+                .and_then(|o| object_id(prev, &o, "children"));
+            lanes.push((id, old, l));
+        }
+    }
+    let created: BTreeSet<String> = new_placements
+        .keys()
+        .filter(|k| !old_placements.contains_key(*k))
+        .cloned()
+        .collect();
+    let mut inserted_into: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (owner, old, new) in &lanes {
+        let after = list_values(next, new);
+        let before: Vec<String> = match old {
+            Some(o) => list_strings(prev, o),
+            None => Vec::new(),
+        };
+        let after_strings: Vec<String> = after
+            .iter()
+            .map(|v| v.clone().unwrap_or_default())
+            .collect();
+        if old.is_some() && !is_subsequence(&before, &after_strings) {
+            found.insert(Refusal::ChildrenListMutated);
+        }
+        // The entries `after` adds to `before`, as a multiset.
+        let mut left: BTreeMap<String, usize> = BTreeMap::new();
+        for x in &before {
+            *left.entry(x.clone()).or_default() += 1;
+        }
+        for v in &after {
+            let key = v.clone().unwrap_or_default();
+            match left.get_mut(&key) {
+                Some(k) if *k > 0 => *k -= 1,
+                _ => match v {
+                    None => {
+                        found.insert(Refusal::InvalidFieldType);
+                    }
+                    Some(id) if created.contains(id) => {
+                        inserted_into
+                            .entry(id.clone())
+                            .or_default()
+                            .push(owner.clone());
+                    }
+                    Some(_) => {
+                        found.insert(Refusal::PlacementNotAtomic);
+                    }
+                },
+            }
+        }
+    }
+    let new_nodes = b.nodes();
+    for id in &created {
+        let p = &new_placements[id];
+        let owners = inserted_into.get(id).cloned().unwrap_or_default();
+        if owners.len() != 1 || Some(&owners[0]) != p.parent_id.as_ref() {
+            found.insert(Refusal::PlacementNotAtomic);
+        }
+        let selected = p
+            .node_id
+            .as_ref()
+            .and_then(|n| new_nodes.get(n))
+            .is_some_and(|n| n.placements.contains(id));
+        if !selected {
+            found.insert(Refusal::PlacementNotAtomic);
+        }
+    }
+    // A5: scalars stay scalar; a paragraph, item or raw node's text is Text.
+    if let Some(nn) = &nn {
+        for id in next.keys(nn).collect::<Vec<_>>() {
+            let Some(n) = object_id(next, nn, &id) else {
+                continue;
+            };
+            let old = pn.as_ref().and_then(|pn| object_id(prev, pn, &id));
+            for key in [
+                "id",
+                "kind",
+                "created_by",
+                "lifecycle",
+                "placement",
+                "task_id",
+                "list_style",
+            ] {
+                let changed =
+                    old.as_ref().map(|o| object_id(prev, o, key)) != Some(object_id(next, &n, key));
+                if is_text(next, &n, key) && (old.is_none() || changed) {
+                    found.insert(Refusal::InvalidFieldType);
+                }
+            }
+            let kind = scalar(next, &n, "kind");
+            if matches!(kind.as_deref(), Some("paragraph" | "item" | "raw"))
+                && next.get(&n, "text").ok().flatten().is_some()
+                && !is_text(next, &n, "text")
+            {
+                found.insert(Refusal::InvalidFieldType);
+            }
+        }
+    }
+    if let Some(no) = &no {
+        for id in next.keys(no).collect::<Vec<_>>() {
+            let Some(t) = object_id(next, no, &id) else {
+                continue;
+            };
+            let old = po.as_ref().and_then(|po| object_id(prev, po, &id));
+            for key in [
+                "id",
+                "type",
+                "created_by",
+                "lifecycle",
+                "title",
+                "status",
+                "priority",
+                "due",
+                "scheduled",
+                "completion_date",
+                "created_at",
+            ] {
+                let changed =
+                    old.as_ref().map(|o| object_id(prev, o, key)) != Some(object_id(next, &t, key));
+                if is_text(next, &t, key) && (old.is_none() || changed) {
+                    found.insert(Refusal::InvalidFieldType);
+                }
+            }
+        }
+    }
+    found.into_iter().next()
 }

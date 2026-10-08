@@ -43,7 +43,7 @@ fn frame(bytes: &[u8]) -> Vec<u8> {
 }
 
 /// The payload of `[1, bytes]`, rejecting anything else.
-fn unframe(plaintext: &[u8]) -> Result<Vec<u8>, ProfileError> {
+pub(crate) fn unframe(plaintext: &[u8]) -> Result<Vec<u8>, ProfileError> {
     let value = cbor::decode_strict(plaintext).map_err(|_| INVALID)?;
     match value.as_array() {
         Some([version, payload]) if version.as_u64() == Some(FRAMING_VERSION) => {

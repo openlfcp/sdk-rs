@@ -63,7 +63,13 @@ In progress for MVP 0.2, feature `shared-sections`:
 - lifecycle and Text (LFCP-02-021): delete and restore as fresh
   assignments (automerge 0.12 skips a same-value write), retained edits
   under a deleted ancestor, Text edits in Unicode scalar indices against a
-  base, split and join. Admission follows (LFCP-02-022).
+  base, split and join;
+- admission (LFCP-02-022): `SectionsReplica` receives Data Unit plaintexts
+  through SHARED-OBJECTS-PROFILE-01's admission (the same engine as Shared
+  Objects, not a copy) and then the structural rules A1-A5 against each
+  change's causal history; every corpus case replays in order and in
+  reverse with duplicates to the corpus's refusals, held changes, heads
+  and tree.
 
 The LFCP protocol layer of this SDK (LFCP-041 to LFCP-043) is complete
 for MVP 0.1: every LFCP-TEST-VECTORS-01 case is decided in scope.
