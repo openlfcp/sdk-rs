@@ -1,0 +1,57 @@
+[package]
+name = "lfcp-fuzz"
+description = "cargo-fuzz targets for the admission paths of lfcp."
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+# The same pins as crates/lfcp: the harness builds Automerge values and
+# hashes chunk bodies itself.
+automerge = { version = "=0.12.0", default-features = false }
+sha2 = { version = "0.11", default-features = false }
+lfcp = { path = "../crates/lfcp", features = ["shared-sections"] }
+
+# Not a member of the repository's workspace: normal builds and CI never
+# compile it. Run with `cargo +nightly fuzz` from the repository root.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "plaintext"
+path = "fuzz_targets/plaintext.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "objects_admission"
+path = "fuzz_targets/objects_admission.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sections_receive"
+path = "fuzz_targets/sections_receive.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "snapshot"
+path = "fuzz_targets/snapshot.rs"
+test = false
+doc = false
+bench = false
