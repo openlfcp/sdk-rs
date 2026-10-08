@@ -1630,19 +1630,30 @@ impl SectionsReplica {
             return Received::Waiting;
         }
         // The state of the change's causal history, before and after it.
-        let mut prev = doc.clone();
-        let Ok(prev) = prev.fork_at(change.deps()) else {
-            return self.refuse(hash, Refusal::InvalidAutomergeBytes);
+        // When the change depends on exactly the current heads, that state
+        // is the document itself; otherwise it is rebuilt from the history.
+        let mut current = doc.clone();
+        let mut heads = current.get_heads();
+        heads.sort();
+        let mut deps = change.deps().to_vec();
+        deps.sort();
+        let (prev, mut probe) = if deps == heads {
+            (current, self.engine.fork(ActorId::from([0u8; 32])))
+        } else {
+            let Ok(prev) = current.fork_at(change.deps()) else {
+                return self.refuse(hash, Refusal::InvalidAutomergeBytes);
+            };
+            let mut probe =
+                crate::shared_objects::document::SharedObjects::new(ActorId::from([0u8; 32]));
+            if probe
+                .apply_changes(prev.clone().get_changes(&[]).into_iter().collect())
+                .is_err()
+            {
+                return self.refuse(hash, Refusal::InvalidAutomergeBytes);
+            }
+            (prev, probe)
         };
         // SOP's admission first: sequence, actors, depth, held (POST-001).
-        let mut probe =
-            crate::shared_objects::document::SharedObjects::new(ActorId::from([0u8; 32]));
-        if probe
-            .apply_changes(prev.clone().get_changes(&[]).into_iter().collect())
-            .is_err()
-        {
-            return self.refuse(hash, Refusal::InvalidAutomergeBytes);
-        }
         match probe.apply_change(change.clone()) {
             Ok(crate::shared_objects::document::ChangeOutcome::Applied) => {}
             Ok(_) => {}
