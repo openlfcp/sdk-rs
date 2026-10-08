@@ -129,7 +129,7 @@ fn actors_use_the_sections_domain() {
 fn reference_documents_read_through_the_schema() {
     let corpus = corpus();
     let cases = corpus["cases"].as_array().unwrap();
-    assert_eq!(cases.len(), 41);
+    assert_eq!(cases.len(), 56);
     for case in cases {
         let id = case["id"].as_str().unwrap();
         let expected = &case["expected"];
@@ -444,4 +444,46 @@ fn a_change_signed_by_another_principal_is_refused() {
     );
     // Forwarding a change under another signature does not block it.
     assert!(replica.refused().is_empty());
+}
+
+#[test]
+fn snapshots_at_the_floor_are_checked_as_recorded() {
+    // SHARED-OBJECTS-PROFILE-01 §13.1, SS55 and SS56: a Snapshot of a long
+    // Text history is accepted within the floor and rejected past it, before
+    // the engine loads it; its counts are the corpus's.
+    use lfcp::shared_objects::{expansion, framing};
+    let corpus = corpus();
+    let mut checked = 0;
+    for case in corpus["cases"].as_array().unwrap() {
+        let Some(want) = case["expected"].get("snapshot") else {
+            continue;
+        };
+        let id = case["id"].as_str().unwrap();
+        let plaintext = bytes_of(&case["reference_snapshot_plaintext"]);
+        let within = want["within_floor"].as_bool().unwrap();
+        assert_eq!(
+            framing::decode_snapshot(&plaintext).is_ok(),
+            within,
+            "{id}: floor"
+        );
+        let unbounded = expansion::Limits {
+            max_rows: u64::MAX,
+            max_group_sum: u64::MAX,
+            ..expansion::SNAPSHOT_LIMITS_FLOOR
+        };
+        let counts = expansion::check_snapshot(&bytes_of(&case["reference_snapshot"]), &unbounded)
+            .unwrap_or_else(|e| panic!("{id}: {e:?}"));
+        assert_eq!(
+            counts.max_rows,
+            want["rows"].as_u64().unwrap(),
+            "{id}: rows"
+        );
+        assert_eq!(
+            counts.group_sum,
+            want["group_sum"].as_u64().unwrap(),
+            "{id}: group sum"
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, 2);
 }
