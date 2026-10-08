@@ -168,30 +168,6 @@ pub fn panic_policy() {
     });
 }
 
-/// Finding F1: `SectionsReplica::receive` hands bytes that
-/// `decode_change` refused to `automerge::Change::from_bytes`, which
-/// expands them without the §11.1 limits (a change chunk over them) or
-/// inflates them without a cap (a compressed chunk). Such a plaintext
-/// stalls or exhausts the fuzzer and hides every other path, so the
-/// targets skip it until the fix lands; `LFCP_FUZZ_F1=1` delivers it.
-pub fn known_f1(plaintext: &[u8]) -> bool {
-    use lfcp::shared_objects::{expansion, framing};
-    if std::env::var_os("LFCP_FUZZ_F1").is_some() || framing::decode_change(plaintext).is_ok() {
-        return false;
-    }
-    let Ok(bytes) = framing::snapshot_payload(plaintext) else {
-        return false;
-    };
-    if bytes.len() < 9 || bytes[..4] != [0x85, 0x6f, 0x4a, 0x83] {
-        return false;
-    }
-    match bytes[8] {
-        1 => expansion::check_change(&bytes).is_err(),
-        2 => true,
-        _ => false,
-    }
-}
-
 /// Finding F2: `framing::decode_change` panics inside
 /// `automerge::Change::from_bytes` on a change whose object or operation
 /// counter does not fit in 32 bits (automerge 0.12 `OpId::new` unwraps),

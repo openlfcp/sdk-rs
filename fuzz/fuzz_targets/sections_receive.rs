@@ -27,7 +27,7 @@ fn run(data: &[u8]) -> (Vec<Received>, Vec<ChangeHash>, Vec<ChangeHash>) {
     let mut verdicts = Vec::new();
     for record in records(data) {
         let plaintext = plaintext(&record);
-        if known_f2(&plaintext) || known_f1(&plaintext) {
+        if known_f2(&plaintext) {
             continue;
         }
         let signer = signer(&SECTIONS_PRINCIPALS, record.ctl);

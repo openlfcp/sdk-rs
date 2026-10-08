@@ -42,6 +42,5 @@ a fix):
 
 | Variable | Finding |
 | --- | --- |
-| `LFCP_FUZZ_F1=1` | `SectionsReplica::receive` re-parses refused bytes with `Change::from_bytes`, bypassing §11.1 (CPU) and inflating compressed chunks without a cap (OOM) |
 | `LFCP_FUZZ_F2=1` | `decode_change` panics in automerge's `OpId::new` on a counter above `u32::MAX` |
 | `LFCP_FUZZ_F3=1` | admitted changes Automerge cannot reproduce make the document's save fail to load ("mismatching heads") |

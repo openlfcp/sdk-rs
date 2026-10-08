@@ -18,9 +18,6 @@ fuzz_target!(|data: &[u8]| {
     let snapshot = framing::decode_snapshot(data);
     assert_eq!(snapshot, framing::decode_snapshot(data));
 
-    if known_f1(data) {
-        return;
-    }
     // The same bytes through the sections replica: refused exactly when
     // the framing refuses them (an empty replica has no dependency, so a
     // decodable change is Applied, Waiting or refused by a rule).
