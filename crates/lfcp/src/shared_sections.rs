@@ -14,10 +14,12 @@
 //! | the document and its typed view | [`SectionsDoc`], [`Section`], [`Node`], [`Placement`] | §3, §4 |
 //! | per-node value checks | [`SectionsDoc::node_problems`], [`Diagnostic`] | §14.2 |
 //! | the effective tree, structural conflicts and visibility | [`SectionsDoc::effective`], [`Effective`] | §7, §9, §14.3 |
+//! | authoring: section, nodes, moves, explicit resolution | [`SectionsDoc::create`], [`SectionsDoc::create_node`], [`SectionsDoc::move_node`], [`SectionsDoc::resolve_placement`] | §4–§8, §11 |
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use automerge::{ActorId, AutoCommit, ObjId, ObjType, ReadDoc, ScalarValue, Value, ROOT};
+use automerge::transaction::{CommitOptions, Transactable};
+use automerge::{ActorId, AutoCommit, Change, ObjId, ObjType, ReadDoc, ScalarValue, Value, ROOT};
 
 use crate::base::{ObjectId, PrincipalId, ResourceId};
 use crate::crypto;
@@ -699,4 +701,411 @@ pub struct Effective {
     pub recovery: BTreeMap<String, Fact>,
     /// Invalid nodes by NodeId (§14.2).
     pub invalid: BTreeMap<String, Diagnostic>,
+}
+
+/// Why an authoring intent was refused before anything was written (§6).
+#[derive(Clone, Debug, PartialEq)]
+pub enum AuthoringError {
+    /// The node does not exist.
+    UnknownNode,
+    /// The parent is not the section or a valid, visible, unconflicted Task
+    /// or item node.
+    InvalidParent,
+    /// The preceding sibling is not a visible child of the parent.
+    InvalidPredecessor,
+    /// A node would become its own ancestor (a self-, descendant- or
+    /// self-predecessor move).
+    WouldCycle,
+    /// An ID is not a canonical UUIDv7, or is already used.
+    InvalidId,
+    /// The engine refused the write.
+    Profile(ProfileError),
+}
+
+impl From<automerge::AutomergeError> for AuthoringError {
+    fn from(e: automerge::AutomergeError) -> AuthoringError {
+        AuthoringError::Profile(ProfileError::Automerge(e.to_string()))
+    }
+}
+
+/// A new node's content (§4.2): a Task's title, or the Text of another kind.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NewNode<'a> {
+    /// A Task node with its Task (SHARED-OBJECTS-PROFILE-01 §31 fields).
+    Task {
+        /// The Task title.
+        title: &'a str,
+    },
+    /// A paragraph.
+    Paragraph {
+        /// Its Text.
+        text: &'a str,
+    },
+    /// A list item.
+    Item {
+        /// Its Text.
+        text: &'a str,
+    },
+    /// A raw Markdown block.
+    Raw {
+        /// Its Text.
+        text: &'a str,
+    },
+}
+
+fn put_str(
+    doc: &mut AutoCommit,
+    obj: &ObjId,
+    key: &str,
+    value: &str,
+) -> Result<(), AuthoringError> {
+    doc.put(obj, key, ScalarValue::Str(value.into()))?;
+    Ok(())
+}
+
+impl SectionsDoc {
+    /// An empty document writing as `actor`, for applying a Resource's
+    /// changes.
+    pub fn new(actor: ActorId) -> SectionsDoc {
+        SectionsDoc {
+            doc: AutoCommit::new().with_actor(actor),
+        }
+    }
+
+    /// Load a full-save image and continue writing as `actor`.
+    pub fn load_as(save: &[u8], actor: ActorId) -> Result<SectionsDoc, ProfileError> {
+        Ok(SectionsDoc {
+            doc: load_guarded(save)?.with_actor(actor),
+        })
+    }
+
+    /// A full-save image (SHARED-OBJECTS-PROFILE-01 §13).
+    pub fn save(&mut self) -> Vec<u8> {
+        self.doc.save()
+    }
+
+    /// Apply changes whose admission is established (§14.1 checks belong
+    /// to the receiver; see LFCP-02-022).
+    pub fn apply_changes(&mut self, changes: Vec<Change>) -> Result<(), ProfileError> {
+        self.doc
+            .apply_changes(changes)
+            .map_err(|e| ProfileError::Automerge(e.to_string()))
+    }
+
+    /// Every change of the document, dependencies first.
+    pub fn changes(&mut self) -> Vec<Change> {
+        self.doc.get_changes(&[])
+    }
+
+    /// Commit the pending operations as one change named `intent`.
+    fn commit(&mut self, intent: &str) -> Change {
+        let hash = self
+            .doc
+            .commit_with(
+                CommitOptions::default()
+                    .with_message(intent.to_owned())
+                    .with_time(0),
+            )
+            .expect("an intent writes at least one operation");
+        self.doc
+            .get_change_by_hash(&hash)
+            .expect("the committed change")
+            .clone()
+    }
+
+    /// Run `write`; roll back on failure, commit on success (one change).
+    fn transact(
+        &mut self,
+        intent: &str,
+        write: impl FnOnce(&mut SectionsDoc) -> Result<(), AuthoringError>,
+    ) -> Result<Change, AuthoringError> {
+        if let Err(e) = write(self) {
+            self.doc.rollback();
+            return Err(e);
+        }
+        Ok(self.commit(intent))
+    }
+
+    /// `section.create` (§4.1, §11, §12.1): a new section document in one
+    /// change, written by `creator` as `actor`, ready at once.
+    pub fn create(
+        actor: ActorId,
+        section_id: &str,
+        title: &str,
+        creator: &PrincipalId,
+    ) -> Result<(SectionsDoc, Change), AuthoringError> {
+        if !is_uuidv7(section_id) {
+            return Err(AuthoringError::InvalidId);
+        }
+        let mut doc = SectionsDoc::new(actor);
+        let created_by = crate::shared_objects::identity::principal_ref(creator);
+        let change = doc.transact("section.create", |d| {
+            let doc = &mut d.doc;
+            put_str(doc, &ROOT, "profile", PROFILE)?;
+            let section = doc.put_object(ROOT, "section", ObjType::Map)?;
+            put_str(doc, &section, "id", section_id)?;
+            put_str(doc, &section, "title", title)?;
+            put_str(doc, &section, "created_by", &created_by)?;
+            doc.put_object(&section, "children", ObjType::List)?;
+            doc.put_object(&section, "extensions", ObjType::Map)?;
+            doc.put(&section, "ready", ScalarValue::Boolean(true))?;
+            for key in ["objects", "nodes", "placements", "extensions"] {
+                doc.put_object(ROOT, key, ObjType::Map)?;
+            }
+            Ok(())
+        })?;
+        Ok((doc, change))
+    }
+
+    /// `section.set_title` (§11): a scalar title.
+    pub fn set_title(&mut self, title: &str) -> Result<Change, AuthoringError> {
+        let section = self
+            .root_map("section")
+            .ok_or(AuthoringError::UnknownNode)?;
+        self.transact("section.set_title", |d| {
+            put_str(&mut d.doc, &section, "title", title)
+        })
+    }
+
+    /// The children list of `parent` (the section or a node).
+    fn lane(&self, parent: &str) -> Option<ObjId> {
+        if self.section().is_some_and(|s| s.id == parent) {
+            let section = self.root_map("section")?;
+            return object(&self.doc, &section, "children", ObjType::List);
+        }
+        let nodes = self.root_map("nodes")?;
+        let node = object(&self.doc, &nodes, parent, ObjType::Map)?;
+        object(&self.doc, &node, "children", ObjType::List)
+    }
+
+    /// §6 steps 2 and 4-5: the index in `parent`'s list after which a new
+    /// placement goes, checking the parent and the preceding sibling.
+    fn insertion_index(
+        &self,
+        parent: &str,
+        after: Option<&str>,
+    ) -> Result<(ObjId, usize), AuthoringError> {
+        let effective = self.effective();
+        let section_id = self
+            .section()
+            .map(|s| s.id)
+            .ok_or(AuthoringError::InvalidParent)?;
+        if parent != section_id {
+            let node = self
+                .nodes()
+                .get(parent)
+                .cloned()
+                .ok_or(AuthoringError::InvalidParent)?;
+            let visible = effective.tree.iter().any(|t| t.id == parent);
+            if !node.kind.is_some_and(NodeKind::can_parent) || !visible {
+                return Err(AuthoringError::InvalidParent);
+            }
+        }
+        let lane = self.lane(parent).ok_or(AuthoringError::InvalidParent)?;
+        let entries = list_strings(&self.doc, &lane);
+        let index = match after {
+            None => 0,
+            Some(sibling) => {
+                let visible_child = effective
+                    .tree
+                    .iter()
+                    .any(|t| t.id == sibling && t.parent == parent);
+                let slot = self.selected_placement(sibling);
+                match (
+                    visible_child,
+                    slot.and_then(|s| entries.iter().position(|e| *e == s)),
+                ) {
+                    (true, Some(i)) => i + 1,
+                    _ => return Err(AuthoringError::InvalidPredecessor),
+                }
+            }
+        };
+        Ok((lane, index))
+    }
+
+    /// Write a new placement of `node` under `parent` at `index` of `lane`
+    /// and select it (§4.3, §5: created, inserted and assigned at once).
+    fn place(
+        &mut self,
+        node: &str,
+        parent: &str,
+        lane: &ObjId,
+        index: usize,
+        placement_id: &str,
+        author: &str,
+    ) -> Result<(), AuthoringError> {
+        let placements = self
+            .root_map("placements")
+            .ok_or(AuthoringError::InvalidParent)?;
+        let nodes = self
+            .root_map("nodes")
+            .ok_or(AuthoringError::InvalidParent)?;
+        let doc = &mut self.doc;
+        let p = doc.put_object(&placements, placement_id, ObjType::Map)?;
+        put_str(doc, &p, "id", placement_id)?;
+        put_str(doc, &p, "node_id", node)?;
+        put_str(doc, &p, "parent_id", parent)?;
+        put_str(doc, &p, "created_by", author)?;
+        doc.insert(lane, index, ScalarValue::Str(placement_id.into()))?;
+        let n = object(doc, &nodes, node, ObjType::Map).ok_or(AuthoringError::UnknownNode)?;
+        put_str(doc, &n, "placement", placement_id)?;
+        Ok(())
+    }
+
+    fn fresh(&self, id: &str) -> bool {
+        is_uuidv7(id)
+            && !self.nodes().contains_key(id)
+            && !self.placements().contains_key(id)
+            && !self.task_ids().contains(id)
+    }
+
+    /// `task.create_in_section`, `paragraph.create`, `item.create`,
+    /// `raw.create` (§11): a node, its Task or Text, its children list and
+    /// its placement, in one change. `after` is the preceding visible
+    /// sibling; `None` inserts first.
+    pub fn create_node(
+        &mut self,
+        node_id: &str,
+        content: NewNode<'_>,
+        parent: &str,
+        after: Option<&str>,
+        placement_id: &str,
+        author: &PrincipalId,
+    ) -> Result<Change, AuthoringError> {
+        if !self.fresh(node_id) || !self.fresh(placement_id) || node_id == placement_id {
+            return Err(AuthoringError::InvalidId);
+        }
+        let (lane, index) = self.insertion_index(parent, after)?;
+        let author = crate::shared_objects::identity::principal_ref(author);
+        let (intent, kind) = match content {
+            NewNode::Task { .. } => ("task.create_in_section", "task"),
+            NewNode::Paragraph { .. } => ("paragraph.create", "paragraph"),
+            NewNode::Item { .. } => ("item.create", "item"),
+            NewNode::Raw { .. } => ("raw.create", "raw"),
+        };
+        let nodes = self
+            .root_map("nodes")
+            .ok_or(AuthoringError::InvalidParent)?;
+        let objects = self
+            .root_map("objects")
+            .ok_or(AuthoringError::InvalidParent)?;
+        self.transact(intent, |d| {
+            let doc = &mut d.doc;
+            let n = doc.put_object(&nodes, node_id, ObjType::Map)?;
+            put_str(doc, &n, "id", node_id)?;
+            put_str(doc, &n, "kind", kind)?;
+            put_str(doc, &n, "created_by", &author)?;
+            put_str(doc, &n, "lifecycle", "active")?;
+            doc.put_object(&n, "children", ObjType::List)?;
+            doc.put_object(&n, "extensions", ObjType::Map)?;
+            match content {
+                NewNode::Task { title } => {
+                    put_str(doc, &n, "task_id", node_id)?;
+                    put_str(doc, &n, "list_style", "bullet")?;
+                    let t = doc.put_object(&objects, node_id, ObjType::Map)?;
+                    for (key, value) in [
+                        ("id", node_id),
+                        ("type", "task"),
+                        ("created_by", author.as_str()),
+                        ("lifecycle", "active"),
+                        ("title", title),
+                        ("status", "todo"),
+                        ("priority", "normal"),
+                    ] {
+                        put_str(doc, &t, key, value)?;
+                    }
+                    for key in ["tags", "assignees", "extensions"] {
+                        doc.put_object(&t, key, ObjType::Map)?;
+                    }
+                }
+                NewNode::Paragraph { text } | NewNode::Item { text } | NewNode::Raw { text } => {
+                    if kind == "item" {
+                        put_str(doc, &n, "list_style", "bullet")?;
+                    }
+                    let t = doc.put_object(&n, "text", ObjType::Text)?;
+                    doc.splice_text(&t, 0, 0, text)?;
+                }
+            }
+            d.place(node_id, parent, &lane, index, placement_id, &author)
+        })
+    }
+
+    /// Whether `ancestor` is `node` or one of its selected ancestors.
+    fn is_ancestor(&self, ancestor: &str, node: &str) -> bool {
+        let placements = self.placements();
+        let mut n = node.to_owned();
+        let mut seen = HashSet::new();
+        while seen.insert(n.clone()) {
+            if n == ancestor {
+                return true;
+            }
+            match self
+                .selected_placement(&n)
+                .and_then(|p| placements.get(&p).and_then(|p| p.parent_id.clone()))
+            {
+                Some(p) => n = p,
+                None => return false,
+            }
+        }
+        false
+    }
+
+    /// `node.move` (§5, §6): a new placement under `parent` after `after`,
+    /// selected by the node's register; the node keeps its identity and
+    /// descendants, and the old placement stays as an invisible slot.
+    pub fn move_node(
+        &mut self,
+        node: &str,
+        parent: &str,
+        after: Option<&str>,
+        placement_id: &str,
+        author: &PrincipalId,
+    ) -> Result<Change, AuthoringError> {
+        self.relocate("node.move", node, parent, after, placement_id, author)
+    }
+
+    /// `node.resolve_placement` (§8): a fresh placement at the chosen valid
+    /// location, superseding every placement observed in the register.
+    pub fn resolve_placement(
+        &mut self,
+        node: &str,
+        parent: &str,
+        after: Option<&str>,
+        placement_id: &str,
+        author: &PrincipalId,
+    ) -> Result<Change, AuthoringError> {
+        self.relocate(
+            "node.resolve_placement",
+            node,
+            parent,
+            after,
+            placement_id,
+            author,
+        )
+    }
+
+    fn relocate(
+        &mut self,
+        intent: &str,
+        node: &str,
+        parent: &str,
+        after: Option<&str>,
+        placement_id: &str,
+        author: &PrincipalId,
+    ) -> Result<Change, AuthoringError> {
+        if !self.nodes().contains_key(node) {
+            return Err(AuthoringError::UnknownNode);
+        }
+        if after == Some(node) || self.is_ancestor(node, parent) {
+            return Err(AuthoringError::WouldCycle);
+        }
+        if !self.fresh(placement_id) {
+            return Err(AuthoringError::InvalidId);
+        }
+        let (lane, index) = self.insertion_index(parent, after)?;
+        let author = crate::shared_objects::identity::principal_ref(author);
+        self.transact(intent, |d| {
+            d.place(node, parent, &lane, index, placement_id, &author)
+        })
+    }
 }
