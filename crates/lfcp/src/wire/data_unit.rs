@@ -18,6 +18,9 @@
 //!
 //! Epoch validity, the epoch cutoff and `data/write` authorization
 //! (§26.3 steps 2–5) need Control Plane state and are not checked here.
+//!
+//! A server checks a `DATA_PUT`'s `previous` links against what it stores
+//! with [`check_put_previous`] (§51.1).
 
 use crate::base::{DataUnitId, Error, Hash32, PrincipalId, ResourceId};
 use crate::cbor::{self, Value};
@@ -431,6 +434,65 @@ pub fn check_equivocation(a: &DataUnit, b: &DataUnit) -> Result<(), Error> {
     } else {
         Ok(())
     }
+}
+
+/// What a server stores of one Resource, as the `previous` link check of
+/// §51.1 needs it. The server answers from its store; [`check_put_previous`]
+/// applies the rule.
+pub trait StoredUnits {
+    /// The sequence of the stored Data Unit `id`, if it is a unit of
+    /// `actor` the server stores. A unit kept as equivocation evidence
+    /// (§26.2) counts.
+    fn stored_sequence(&self, actor: &PrincipalId, id: &DataUnitId) -> Option<u64>;
+
+    /// The highest sequence of `actor` below `below` that the frontier of
+    /// a Snapshot the server stores covers.
+    fn snapshot_covered_below(&self, actor: &PrincipalId, below: u64) -> Option<u64>;
+
+    /// Whether the server stores a unit of `actor` at a sequence `s` with
+    /// `low < s < high`.
+    fn stores_between(&self, actor: &PrincipalId, low: u64, high: u64) -> bool;
+}
+
+/// §51.1: check the `previous` links of a `DATA_PUT`'s units, in message
+/// order, against what the server stores. A unit with a non-null
+/// `previous` passes when:
+///
+/// 1. the server stores a unit of the same actor, at a lower sequence,
+///    whose ID is `previous`;
+/// 2. an earlier unit of the same `DATA_PUT` is such a unit; or
+/// 3. a stored Snapshot covers sequence `m < N` of the actor and the
+///    server stores no unit of the actor between `m` and `N`.
+///
+/// The first unit that passes none is [`Error::UnknownPrevious`], whose
+/// `NACK` details are its `previous`; a `DATA_PUT` is all-or-nothing
+/// (§51), so the whole message is refused. A null `previous` is not
+/// checked here.
+pub fn check_put_previous<'a>(
+    units: impl IntoIterator<Item = (DataUnitId, &'a DataUnitHeader)>,
+    stored: &impl StoredUnits,
+) -> Result<(), Error> {
+    let mut earlier: Vec<(DataUnitId, PrincipalId, u64)> = Vec::new();
+    for (id, header) in units {
+        let (actor, sequence) = (header.actor, header.sequence);
+        if let Some(previous) = header.previous {
+            let below = |seq: u64| seq < sequence;
+            let held = stored.stored_sequence(&actor, &previous).is_some_and(below)
+                || earlier
+                    .iter()
+                    .any(|(i, a, seq)| *i == previous && *a == actor && below(*seq));
+            let covered = || {
+                stored
+                    .snapshot_covered_below(&actor, sequence)
+                    .is_some_and(|m| !stored.stores_between(&actor, m, sequence))
+            };
+            if !held && !covered() {
+                return Err(Error::UnknownPrevious { previous });
+            }
+        }
+        earlier.push((id, actor, sequence));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

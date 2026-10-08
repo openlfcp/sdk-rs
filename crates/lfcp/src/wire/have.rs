@@ -109,6 +109,15 @@ impl HaveVector {
             .is_some_and(|ranges| ranges.iter().any(|&(s, e)| s <= sequence && sequence <= e))
     }
 
+    /// The highest sequence of `actor` below `below` that is held, if any.
+    pub fn highest_below(&self, actor: &PrincipalId, below: u64) -> Option<u64> {
+        self.actors
+            .get(actor.as_bytes())?
+            .iter()
+            .rev()
+            .find_map(|&(start, end)| (start < below).then(|| end.min(below - 1)))
+    }
+
     /// Add everything `other` holds.
     pub fn merge(&mut self, other: &HaveVector) {
         for (actor, ranges) in &other.actors {

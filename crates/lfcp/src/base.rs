@@ -112,6 +112,14 @@ pub enum Error {
     /// Two different validly signed Data Units share one
     /// `(resource, actor, sequence)` (§26.2).
     ActorEquivocation,
+    /// A server does not hold the Data Unit's `previous` (§51.1): neither
+    /// as a stored unit of the actor, nor as an earlier unit of the same
+    /// `DATA_PUT`, nor covered by a stored Snapshot.
+    UnknownPrevious {
+        /// The unknown `previous`, which the `NACK` carries as its details
+        /// (§51.1, §60).
+        previous: DataUnitId,
+    },
     /// An `actor-have` or frontier value does not have the §28 shape.
     FrontierMalformed,
     /// An `actor-have` or frontier breaks a canonical-form rule (§28.1,
@@ -369,6 +377,7 @@ impl Error {
             Error::DataUnitMalformed => "DATA_UNIT_MALFORMED",
             Error::DataUnitSequenceZero => "DATA_UNIT_SEQUENCE_ZERO",
             Error::ActorEquivocation => "ACTOR_EQUIVOCATION",
+            Error::UnknownPrevious { .. } => "UNKNOWN_PREVIOUS",
             Error::FrontierMalformed => "FRONTIER_MALFORMED",
             Error::FrontierNotCanonical(_) => "FRONTIER_NOT_CANONICAL",
             Error::SnapshotMalformed => "SNAPSHOT_MALFORMED",
@@ -479,6 +488,7 @@ impl Error {
             }
             Error::ControlConflict => Some(WireCode::ControlConflict),
             Error::ActorEquivocation => Some(WireCode::ActorEquivocation),
+            Error::UnknownPrevious { .. } => Some(WireCode::UnknownPrevious),
             Error::SignatureInvalid | Error::CoseKidMismatch => Some(WireCode::InvalidSignature),
         }
     }
@@ -574,6 +584,9 @@ impl fmt::Display for Error {
             Error::DataUnitMalformed => f.write_str("malformed Data Unit payload"),
             Error::DataUnitSequenceZero => f.write_str("Data Unit actor sequence is 0"),
             Error::ActorEquivocation => f.write_str("actor equivocation"),
+            Error::UnknownPrevious { previous } => {
+                write!(f, "the previous Data Unit {previous:?} is not held")
+            }
             Error::FrontierMalformed => f.write_str("malformed actor-have or frontier"),
             Error::FrontierNotCanonical(rule) => write!(f, "non-canonical frontier: {rule:?}"),
             Error::SnapshotMalformed => f.write_str("malformed Snapshot payload"),
@@ -655,7 +668,7 @@ macro_rules! wire_codes {
             }
 
             /// The code with this number, if the registry defines one. Codes
-            /// 23–127 are reserved for LFCP core and have no name yet.
+            /// 24–127 are reserved for LFCP core and have no name yet.
             pub fn from_number(number: u64) -> Option<WireCode> {
                 match number {
                     $($number => Some(WireCode::$variant),)*
@@ -711,6 +724,8 @@ wire_codes! {
     ResourceTombstoned = 21, "RESOURCE_TOMBSTONED";
     /// `INTERNAL_ERROR` (22).
     InternalError = 22, "INTERNAL_ERROR";
+    /// `UNKNOWN_PREVIOUS` (23).
+    UnknownPrevious = 23, "UNKNOWN_PREVIOUS";
 }
 
 /// Copy `bytes` into a fixed-size array, or fail with
@@ -1028,12 +1043,16 @@ mod tests {
 
     #[test]
     fn wire_codes_cover_the_section_62_registry() {
-        for number in 1..=22 {
+        for number in 1..=23 {
             let code = WireCode::from_number(number).unwrap();
             assert_eq!(code.number(), number);
         }
         assert_eq!(WireCode::from_number(0), None);
-        assert_eq!(WireCode::from_number(23), None);
+        assert_eq!(WireCode::from_number(24), None);
+        assert_eq!(
+            WireCode::from_number(23).unwrap().name(),
+            "UNKNOWN_PREVIOUS"
+        );
         assert_eq!(
             WireCode::from_number(19).unwrap().name(),
             "MESSAGE_TOO_LARGE"

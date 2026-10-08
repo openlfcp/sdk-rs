@@ -280,7 +280,7 @@ impl ErrorBody {
     /// The `NACK` or `ERROR` body for `error`, if it has a wire code (see
     /// [`Error::wire_code`]): the code, no diagnostic, and the details §47
     /// defines for `CONTROL_HEAD_MISMATCH`, the current head's Control
-    /// Record ID. Use [`Error::session_wire_code`] instead for `HELLO` and
+    /// Record ID, and §51.1 for `UNKNOWN_PREVIOUS`, the unknown `previous`. Use [`Error::session_wire_code`] instead for `HELLO` and
     /// `AUTH`.
     pub fn for_error(error: &Error) -> Option<ErrorBody> {
         let code = error.wire_code()?;
@@ -288,6 +288,8 @@ impl ErrorBody {
             Error::ControlHeadMismatch { current } => {
                 Some(Value::bytes(current.as_bytes().to_vec()))
             }
+            // §51.1: the unknown `previous`.
+            Error::UnknownPrevious { previous } => Some(Value::bytes(previous.as_bytes().to_vec())),
             _ => None,
         };
         Some(ErrorBody {

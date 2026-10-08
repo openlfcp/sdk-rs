@@ -10,7 +10,7 @@
 //!   the corpus' logical state and conflicts.
 //!
 //! The vectors and the corpus are read at the `spec.lock` pin
-//! (mvp-0.1-baseline.8).
+//! (mvp-0.1-baseline.9).
 
 mod support;
 

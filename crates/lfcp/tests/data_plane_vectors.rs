@@ -6,17 +6,17 @@
 
 mod support;
 
-use lfcp::base::{DataUnitId, Error, FrontierRule, ResourceId};
+use lfcp::base::{DataUnitId, Error, FrontierRule, PrincipalId, ResourceId};
 use lfcp::cbor;
 use lfcp::crypto;
 use lfcp::wire::data_unit::{
-    check_chain, check_equivocation, ActorChain, ChainReport, ChainStatus, DataUnit,
-    ReceivedDataUnit,
+    check_chain, check_equivocation, check_put_previous, ActorChain, ChainReport, ChainStatus,
+    DataUnit, DataUnitHeader, ReceivedDataUnit, StoredUnits,
 };
 use lfcp::wire::frontier::Frontier;
 use lfcp::wire::have::HaveVector;
 use lfcp::wire::keys::{dek_commitment, sequence_nonce, ActorKey, Dek, SnapshotKey};
-use lfcp::wire::message::WireActorHave;
+use lfcp::wire::message::{Body, DecodeOptions, ErrorBody, Message, WireActorHave};
 use lfcp::wire::snapshot::{ReceivedSnapshot, Snapshot, SnapshotHeader};
 use serde_json::Value as Json;
 use support::vectors::{hex, hex32, id_of, principal_by_id, Suite};
@@ -569,4 +569,86 @@ fn every_unit_and_snapshot_case_names_the_dek_of_its_epoch() {
         checked += 1;
     }
     assert!(checked >= 20, "only {checked} cases");
+}
+
+/// A server's store as the `data_put_previous` cases give it: the
+/// `stored_*_cose` units and, where given, one Snapshot frontier.
+struct Store {
+    units: Vec<(DataUnitId, DataUnitHeader)>,
+    snapshot: HaveVector,
+}
+
+impl StoredUnits for Store {
+    fn stored_sequence(&self, actor: &PrincipalId, id: &DataUnitId) -> Option<u64> {
+        self.units
+            .iter()
+            .find(|(i, h)| i == id && &h.actor == actor)
+            .map(|(_, h)| h.sequence)
+    }
+
+    fn snapshot_covered_below(&self, actor: &PrincipalId, below: u64) -> Option<u64> {
+        self.snapshot.highest_below(actor, below)
+    }
+
+    fn stores_between(&self, actor: &PrincipalId, low: u64, high: u64) -> bool {
+        self.units
+            .iter()
+            .any(|(_, h)| &h.actor == actor && low < h.sequence && h.sequence < high)
+    }
+}
+
+#[test]
+fn a_server_refuses_a_previous_it_does_not_hold() {
+    // §51.1 (SPEC-PATCH-09): the server's `previous` link check.
+    let suite = Suite::load();
+    let mut checked = 0;
+    for case in suite.cases().filter(|c| c["kind"] == "data_put_previous") {
+        let case_id = id_of(case);
+        let inputs = case["inputs"].as_object().unwrap();
+        let parse = |bytes: &[u8]| {
+            let unit = ReceivedDataUnit::parse(bytes)
+                .unwrap_or_else(|err| panic!("{case_id}: unit: {err}"));
+            (unit.id(), unit.header().clone())
+        };
+        let units = inputs
+            .iter()
+            .filter(|(k, _)| k.starts_with("stored_") && k.ends_with("_cose"))
+            .map(|(_, v)| parse(&hex(case_id, v)))
+            .collect();
+        let snapshot = match inputs.get("stored_snapshot_frontier") {
+            Some(v) => {
+                let value = cbor::decode_strict(&hex(case_id, v)).unwrap();
+                HaveVector::from_frontier(&Frontier::from_value(&value).unwrap())
+            }
+            None => HaveVector::new(),
+        };
+        let store = Store { units, snapshot };
+        let message = Message::decode(
+            &hex(case_id, &case["inputs"]["message_cbor"]),
+            &DecodeOptions::default(),
+        )
+        .unwrap_or_else(|err| panic!("{case_id}: message: {err}"));
+        let Body::DataPut { units, .. } = message.body else {
+            panic!("{case_id}: not a DATA_PUT")
+        };
+        let put: Vec<_> = units.iter().map(|u| parse(u)).collect();
+        let got = check_put_previous(put.iter().map(|(id, h)| (*id, h)), &store);
+        let expected = &case["expected"];
+        if expected["valid"] == true {
+            assert_eq!(got, Ok(()), "{case_id}: accepted");
+        } else {
+            let err = got.expect_err(case_id);
+            assert_eq!(err.code(), expected["error"]["code"], "{case_id}: code");
+            let body = ErrorBody::for_error(&err).unwrap();
+            assert_eq!(body.code, 23, "{case_id}: code number");
+            let details = body.details.unwrap();
+            assert_eq!(
+                details.as_bytes().unwrap(),
+                hex(case_id, &expected["error"]["details"]),
+                "{case_id}: NACK details"
+            );
+        }
+        checked += 1;
+    }
+    assert_eq!(checked, 8, "data_put_previous cases");
 }
