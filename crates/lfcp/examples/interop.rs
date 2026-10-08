@@ -752,8 +752,10 @@ fn produce_shared_objects(p: &Producer) -> Json {
               "expect": "INVALID_AUTOMERGE_BYTES" },
             { "name": "snapshot_change_chunk", "kind": "snapshot", "plaintext": hex(&framing::encode_snapshot(&raw)),
               "expect": "INVALID_AUTOMERGE_BYTES" },
+            // §14.1 (baseline.9, POST-001): a change whose actor sequence is
+            // taken is held, not refused.
             { "name": "change_equivocation", "kind": "change", "plaintext": hex(&framing::encode_change(twin.raw_bytes())), "signer": "bob",
-              "expect": "ACTOR_EQUIVOCATION" },
+              "expect": "HELD" },
             { "name": "state_problems", "kind": "state", "changes": invalid_changes,
               "expect": [ { "pointer": format!("{t1p}/status"), "diagnostic": "INVALID_ENUM_VALUE" },
                           { "pointer": format!("{t1p}/tags/#bad"), "diagnostic": "INVALID_TAG" } ] },
