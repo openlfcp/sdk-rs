@@ -19,16 +19,15 @@ jobs:
         with:
           path: sdk-rs
       # Tests read official vectors from a spec checkout next to this
-      # repository (../spec) at the tag pinned in spec.lock, or at its
-      # commit when the lock pins a development commit without a tag.
+      # repository (../spec) at the tag pinned in spec.lock.
       - id: spec-lock
-        run: echo "ref=$(jq -er 'if .tag then "refs/tags/" + .tag else .commit end' spec.lock)" >> "$GITHUB_OUTPUT"
+        run: echo "tag=$(jq -er .tag spec.lock)" >> "$GITHUB_OUTPUT"
       # Full history with tags, so the tests can check that the tag still
       # resolves to the commit in spec.lock.
       - uses: actions/checkout@v4
         with:
           repository: openlfcp/spec
-          ref: ${{ steps.spec-lock.outputs.ref }}
+          ref: refs/tags/${{ steps.spec-lock.outputs.tag }}
           path: spec
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable

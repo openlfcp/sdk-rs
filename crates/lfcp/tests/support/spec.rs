@@ -8,8 +8,11 @@
 //!
 //! Before reading anything, [`Spec::open`] checks that the locked tag
 //! resolves to the locked commit, and panics with a clear message if not.
-//! A lock without a tag pins a commit during development, before the next
-//! baseline is tagged; the commit must then exist in the checkout.
+//!
+//! [`Spec::open_sections`] reads `spec-sections.lock` instead: a
+//! development pin of the shared sections documents and corpus (MVP 0.2)
+//! before their baseline is tagged. It has no tag; its commit must exist in
+//! the same checkout. Only the shared sections files are read through it.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -31,8 +34,24 @@ pub struct Spec {
 impl Spec {
     /// Locate the spec checkout and verify that it matches `spec.lock`.
     pub fn open() -> Spec {
+        Spec::open_lock("spec.lock")
+    }
+
+    /// The development pin of the shared sections files,
+    /// `spec-sections.lock` (no tag; the commit must exist).
+    #[allow(dead_code)]
+    pub fn open_sections() -> Spec {
+        let spec = Spec::open_lock("spec-sections.lock");
+        assert!(
+            spec.lock.tag.is_none(),
+            "spec-sections.lock pins a commit, not a tag"
+        );
+        spec
+    }
+
+    fn open_lock(name: &str) -> Spec {
         let root = repo_root();
-        let lock = read_lock(&root.join("spec.lock"));
+        let lock = read_lock(&root.join(name));
         let dir = match env::var_os("LFCP_SPEC_DIR") {
             Some(dir) => root.join(dir),
             None => root.join("../spec"),
