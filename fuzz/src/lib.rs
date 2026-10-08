@@ -184,8 +184,9 @@ pub fn known_f2(plaintext: &[u8]) -> bool {
 /// reproduce from the document, and the document's save then fails to load
 /// ("mismatching heads", "missing ops") or makes the load panic: a
 /// non-canonical change (a column with more rows than operations), an
-/// operation whose predecessor is an operation on another key, or a change
-/// without operations whose start op is not its actor's next. The admission
+/// operation whose predecessor is an operation on another key or list
+/// element, a delete without a predecessor, or a change without operations
+/// whose start op is not its actor's next. The admission
 /// target skips that failure until the fix lands; `LFCP_FUZZ_F3=1` reports
 /// it.
 pub fn known_f3(save: &[u8]) -> bool {
@@ -208,4 +209,31 @@ pub fn known_f4<T>(read: impl FnOnce() -> T) -> Option<T> {
         return Some(read());
     }
     panic::catch_unwind(panic::AssertUnwindSafe(read)).ok()
+}
+
+/// F4 on a Shared Sections replica: once it holds a change of F3, a later
+/// `SectionsReplica::receive` can panic in Automerge (`get_change_by_hash`,
+/// "MissingOps"). Runs `read` on `state`; a panic is known, and `None`,
+/// only when the document `doc` reads from `state` then no longer saves to
+/// a loadable image (the replica is poisoned). Any other panic goes on.
+/// `LFCP_FUZZ_F4=1` lets every panic through.
+pub fn guarded<S, T>(
+    state: &mut S,
+    read: impl FnOnce(&mut S) -> T,
+    doc: impl FnOnce(&S) -> automerge::AutoCommit,
+) -> Option<T> {
+    if std::env::var_os("LFCP_FUZZ_F4").is_some() {
+        return Some(read(state));
+    }
+    match panic::catch_unwind(panic::AssertUnwindSafe(|| read(&mut *state))) {
+        Ok(value) => Some(value),
+        Err(payload) => {
+            let save = doc(state).save();
+            if known_f3(&save) {
+                None
+            } else {
+                panic::resume_unwind(payload)
+            }
+        }
+    }
 }
