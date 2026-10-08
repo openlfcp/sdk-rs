@@ -72,6 +72,10 @@ required-features = ["shared-objects"]
 name = "expansion"
 required-features = ["shared-objects"]
 
+[[test]]
+name = "shared_objects_references"
+required-features = ["shared-objects"]
+
 [[example]]
 name = "interop"
 required-features = ["shared-objects"]

@@ -32,6 +32,7 @@
 
 use std::fmt;
 
+pub mod canonical;
 pub mod depth;
 pub mod document;
 pub mod expansion;

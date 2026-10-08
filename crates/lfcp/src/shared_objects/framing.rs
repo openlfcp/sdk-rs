@@ -26,7 +26,7 @@ use automerge::{Change, ChangeHash};
 use sha2::{Digest, Sha256};
 
 use crate::cbor::{self, Value};
-use crate::shared_objects::{expansion, Diagnostic, ProfileError};
+use crate::shared_objects::{canonical, expansion, Diagnostic, ProfileError};
 
 /// Every rejection here: `PROFILE_INVALID` with `INVALID_AUTOMERGE_BYTES`.
 const INVALID: ProfileError = ProfileError::Invalid(Diagnostic::InvalidAutomergeBytes);
@@ -110,8 +110,10 @@ fn chunk_header(bytes: &[u8]) -> Result<ChunkHeader, ProfileError> {
 }
 
 /// Decode a Data Unit plaintext into one valid Automerge change (§11): a
-/// single uncompressed change chunk within the §11.1 limits, whose
-/// checksum matches. The limits are checked before Automerge parses it.
+/// single uncompressed change chunk within the §11.1 limits, in the
+/// canonical encoding of §11.3, whose checksum matches. Both are checked
+/// before Automerge parses it. The §11.4 references are checked at
+/// admission, against the change's history.
 pub fn decode_change(plaintext: &[u8]) -> Result<Change, ProfileError> {
     let bytes = unframe(plaintext)?;
     let header = chunk_header(&bytes)?;
@@ -119,7 +121,13 @@ pub fn decode_change(plaintext: &[u8]) -> Result<Change, ProfileError> {
         return Err(INVALID);
     }
     expansion::check_change(&bytes)?;
-    let change = Change::from_bytes(bytes).map_err(|_| INVALID)?;
+    // §11.3: the canonical encoding, every counter below 2^32 among it,
+    // before Automerge parses the change (automerge 0.12 panics on a larger
+    // counter). The parse is guarded all the same.
+    canonical::check(&bytes)?;
+    let change = std::panic::catch_unwind(|| Change::from_bytes(bytes))
+        .map_err(|_| INVALID)?
+        .map_err(|_| INVALID)?;
     // The checksum is the first four bytes of the (uncompressed) change's
     // hash, which Automerge computes from the chunk's contents.
     if change.hash().0[..4] != header.checksum {
