@@ -211,3 +211,73 @@ fn a_document_of_another_profile_has_an_invalid_root() {
         Err(shared_sections::Diagnostic::InvalidRoot)
     );
 }
+
+#[test]
+fn the_effective_tree_matches_every_case() {
+    // §7, §9, §14.3: tree in scan order, hidden nodes and structural facts.
+    let corpus = corpus();
+    for case in corpus["cases"].as_array().unwrap() {
+        let id = case["id"].as_str().unwrap();
+        let expected = &case["expected"];
+        let doc = SectionsDoc::load(&bytes_of(&case["reference_snapshot"])).unwrap();
+        let effective = doc.effective();
+        let kind = |k: Option<NodeKind>| match k {
+            Some(NodeKind::Task) => "task",
+            Some(NodeKind::Paragraph) => "paragraph",
+            Some(NodeKind::Item) => "item",
+            Some(NodeKind::Raw) => "raw",
+            None => "?",
+        };
+        let tree: Vec<(String, String, u64, String)> = effective
+            .tree
+            .iter()
+            .map(|t| {
+                (
+                    t.id.clone(),
+                    t.parent.clone(),
+                    t.depth as u64,
+                    kind(t.kind).to_owned(),
+                )
+            })
+            .collect();
+        let want: Vec<(String, String, u64, String)> = expected["tree"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| {
+                (
+                    t["id"].as_str().unwrap().to_owned(),
+                    t["parent"].as_str().unwrap().to_owned(),
+                    t["depth"].as_u64().unwrap(),
+                    t["kind"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        assert_eq!(tree, want, "{id}: tree");
+        let hidden: Vec<&str> = effective.hidden.iter().map(String::as_str).collect();
+        let want_hidden: Vec<&str> = expected["hidden"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| h.as_str().unwrap())
+            .collect();
+        assert_eq!(hidden, want_hidden, "{id}: hidden");
+        let recovery: Vec<(String, &str)> = effective
+            .recovery
+            .iter()
+            .map(|(n, f)| (n.clone(), f.name()))
+            .collect();
+        let want_recovery: Vec<(String, &str)> = expected["recovery"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| {
+                (
+                    r["id"].as_str().unwrap().to_owned(),
+                    r["code"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(recovery, want_recovery, "{id}: recovery");
+    }
+}

@@ -13,8 +13,9 @@
 //! | actor IDs with this profile's domain | [`actor_id`] | §2 |
 //! | the document and its typed view | [`SectionsDoc`], [`Section`], [`Node`], [`Placement`] | §3, §4 |
 //! | per-node value checks | [`SectionsDoc::node_problems`], [`Diagnostic`] | §14.2 |
+//! | the effective tree, structural conflicts and visibility | [`SectionsDoc::effective`], [`Effective`] | §7, §9, §14.3 |
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use automerge::{ActorId, AutoCommit, ObjId, ObjType, ReadDoc, ScalarValue, Value, ROOT};
 
@@ -486,4 +487,216 @@ impl SectionsDoc {
         }
         out
     }
+
+    /// Every concurrent value of the Task `id`'s `lifecycle`.
+    pub fn task_lifecycles(&self, id: &str) -> Vec<String> {
+        let Some(objects) = self.root_map("objects") else {
+            return Vec::new();
+        };
+        match object(&self.doc, &objects, id, ObjType::Map) {
+            Some(task) => scalars(&self.doc, &task, "lifecycle"),
+            None => Vec::new(),
+        }
+    }
+
+    /// §7: the effective tree, its structural facts and visibility.
+    pub fn effective(&self) -> Effective {
+        let nodes = self.nodes();
+        let placements = self.placements();
+        let invalid = self.node_problems();
+        let section = self.section();
+        let section_id = section.as_ref().map(|s| s.id.clone()).unwrap_or_default();
+        let lifecycles = |id: &str, node: &Node| match node.kind {
+            Some(NodeKind::Task) => self.task_lifecycles(id),
+            _ => node.lifecycles.clone(),
+        };
+        // Steps 2-3: placement conflicts and the selected parent of every
+        // node whose selected placement resolves (the engine-selected value
+        // of the register, used only to follow the graph).
+        let mut blocked: BTreeMap<String, Fact> = BTreeMap::new();
+        let mut parents: BTreeMap<String, String> = BTreeMap::new();
+        for (id, node) in &nodes {
+            if node.placements.len() > 1 {
+                blocked.insert(id.clone(), Fact::PlacementConflict);
+            }
+            let selected = self.selected_placement(id);
+            if let Some(p) = selected.and_then(|p| placements.get(&p)) {
+                if p.node_id.as_deref() == Some(id.as_str()) {
+                    if let Some(parent) = &p.parent_id {
+                        parents.insert(id.clone(), parent.clone());
+                    }
+                }
+            }
+            if !blocked.contains_key(id) && lifecycles(id, node).len() > 1 {
+                blocked.insert(id.clone(), Fact::LifecycleConflict);
+            }
+        }
+        for id in invalid.keys() {
+            blocked.remove(id);
+        }
+        // Step 4: every member of a cycle in the selected parent graph,
+        // among nodes not already blocked or invalid.
+        let eligible = |n: &str, blocked: &BTreeMap<String, Fact>| {
+            nodes.contains_key(n) && !blocked.contains_key(n) && !invalid.contains_key(n)
+        };
+        let mut cycle: BTreeSet<String> = BTreeSet::new();
+        for start in nodes.keys() {
+            let mut path: Vec<String> = Vec::new();
+            let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+            let mut n = start.clone();
+            while n != section_id && eligible(&n, &blocked) {
+                if let Some(&at) = seen.get(&n) {
+                    cycle.extend(path[at..].iter().cloned());
+                    break;
+                }
+                seen.insert(n.clone(), path.len());
+                path.push(n.clone());
+                match parents.get(&n) {
+                    Some(p) => n = p.clone(),
+                    None => break,
+                }
+            }
+        }
+        for n in cycle {
+            blocked.insert(n, Fact::ParentCycle);
+        }
+        // Step 5: descendants of blocked or invalid nodes, to a fixed point.
+        let out = |n: &str, blocked: &BTreeMap<String, Fact>| {
+            blocked.contains_key(n) || invalid.contains_key(n)
+        };
+        loop {
+            let more: Vec<String> = nodes
+                .keys()
+                .filter(|n| !out(n, &blocked) && parents.get(*n).is_some_and(|p| out(p, &blocked)))
+                .cloned()
+                .collect();
+            if more.is_empty() {
+                break;
+            }
+            for n in more {
+                blocked.insert(n, Fact::BlockedParent);
+            }
+        }
+        // Step 6: a node is hidden when it, or an ancestor along the
+        // selected parents, is deleted.
+        let deleted = |n: &str| {
+            nodes.get(n).is_some_and(|node| {
+                lifecycles(n, node).iter().any(|l| l == "deleted") && lifecycles(n, node).len() == 1
+            })
+        };
+        let mut hidden: BTreeSet<String> = BTreeSet::new();
+        for start in nodes.keys() {
+            let mut n = start.clone();
+            let mut seen: HashSet<String> = HashSet::new();
+            while n != section_id && nodes.contains_key(&n) && seen.insert(n.clone()) {
+                if deleted(&n) {
+                    hidden.insert(start.clone());
+                    break;
+                }
+                match parents.get(&n) {
+                    Some(p) => n = p.clone(),
+                    None => break,
+                }
+            }
+        }
+        // Step 7: scan the children lists from the section, emitting a node
+        // only from the placement it selects. Iterative, so depth does not
+        // depend on the call stack.
+        let mut tree = Vec::new();
+        if section.as_ref().is_some_and(|s| s.ready) {
+            let mut stack: Vec<(String, usize, Vec<String>)> = Vec::new();
+            stack.push((section_id.clone(), 0, section.unwrap().children));
+            while let Some((parent, depth, mut lane)) = stack.pop() {
+                if lane.is_empty() {
+                    continue;
+                }
+                let slot = lane.remove(0);
+                stack.push((parent.clone(), depth, lane));
+                let Some(node_id) = placements.get(&slot).and_then(|p| p.node_id.clone()) else {
+                    continue;
+                };
+                let Some(node) = nodes.get(&node_id) else {
+                    continue;
+                };
+                if out(&node_id, &blocked)
+                    || hidden.contains(&node_id)
+                    || self.selected_placement(&node_id).as_deref() != Some(slot.as_str())
+                {
+                    continue;
+                }
+                tree.push(TreeEntry {
+                    id: node_id.clone(),
+                    parent,
+                    depth,
+                    kind: node.kind,
+                });
+                stack.push((node_id, depth + 1, node.children.clone()));
+            }
+        }
+        Effective {
+            tree,
+            hidden,
+            recovery: blocked,
+            invalid,
+        }
+    }
+
+    /// The engine-selected value of the node's placement register.
+    fn selected_placement(&self, id: &str) -> Option<String> {
+        let nodes = self.root_map("nodes")?;
+        let n = object(&self.doc, &nodes, id, ObjType::Map)?;
+        scalar(&self.doc, &n, "placement")
+    }
+}
+
+/// A structural fact of §14.3: the history is valid, and a user resolves it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fact {
+    /// Concurrent location assignments of one node.
+    PlacementConflict,
+    /// A cycle in the selected parent graph.
+    ParentCycle,
+    /// A node under a conflicted, cyclic or invalid parent.
+    BlockedParent,
+    /// Concurrent active and deleted values.
+    LifecycleConflict,
+}
+
+impl Fact {
+    /// The fact's name, such as `PLACEMENT_CONFLICT`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Fact::PlacementConflict => "PLACEMENT_CONFLICT",
+            Fact::ParentCycle => "PARENT_CYCLE",
+            Fact::BlockedParent => "BLOCKED_PARENT",
+            Fact::LifecycleConflict => "LIFECYCLE_CONFLICT",
+        }
+    }
+}
+
+/// One node of the effective tree, in scan order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TreeEntry {
+    /// The node.
+    pub id: String,
+    /// Its parent: the SectionId or a NodeId.
+    pub parent: String,
+    /// Its depth below the section, from 0.
+    pub depth: usize,
+    /// Its kind.
+    pub kind: Option<NodeKind>,
+}
+
+/// The effective structure of a section (§7).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Effective {
+    /// The projected nodes, in scan order. Empty while the section is being
+    /// imported (§12.1).
+    pub tree: Vec<TreeEntry>,
+    /// Nodes hidden by their own or an ancestor's deletion, retained.
+    pub hidden: BTreeSet<String>,
+    /// Structural facts by NodeId (§14.3).
+    pub recovery: BTreeMap<String, Fact>,
+    /// Invalid nodes by NodeId (§14.2).
+    pub invalid: BTreeMap<String, Diagnostic>,
 }
