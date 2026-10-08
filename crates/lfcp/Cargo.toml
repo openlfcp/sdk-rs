@@ -76,6 +76,10 @@ required-features = ["shared-objects"]
 name = "interop"
 required-features = ["shared-objects"]
 
+[[example]]
+name = "interop_sections"
+required-features = ["shared-sections"]
+
 [dev-dependencies]
 serde_json = "1"
 # OS randomness for the interop example's production values (LFCP-070).
