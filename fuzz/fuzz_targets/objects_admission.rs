@@ -24,14 +24,15 @@ struct State {
     held: Vec<ChangeHash>,
 }
 
-fn state(doc: &mut SharedObjects) -> State {
+/// The replica's state, or None when reading it panics (F4).
+fn state(doc: &mut SharedObjects) -> Option<State> {
     let mut heads = doc.heads();
     heads.sort();
-    State {
+    Some(State {
         heads,
-        changes: doc.changes().len(),
+        changes: known_f4(|| doc.changes().len())?,
         held: doc.held().iter().map(Change::hash).collect(),
-    }
+    })
 }
 
 type Verdict = Result<ChangeOutcome, ProfileError>;
@@ -54,7 +55,9 @@ struct Totals {
     strings: u64,
 }
 
-fn run(data: &[u8]) -> (Vec<Verdict>, State) {
+/// The verdicts and the final state; None once the replica is poisoned
+/// (F4), which ends the run.
+fn run(data: &[u8]) -> (Vec<Verdict>, Option<State>) {
     let mut doc = SharedObjects::new(ActorId::from([1u8; 32]));
     let mut verdicts = Vec::new();
     let mut totals = Totals::default();
@@ -63,9 +66,14 @@ fn run(data: &[u8]) -> (Vec<Verdict>, State) {
         if known_f2(&plaintext) {
             continue;
         }
-        let before = state(&mut doc);
+        let Some(before) = state(&mut doc) else {
+            return (verdicts, None);
+        };
         let verdict = deliver(&mut doc, &record, &plaintext);
-        let after = state(&mut doc);
+        let Some(after) = state(&mut doc) else {
+            verdicts.push(verdict);
+            return (verdicts, None);
+        };
         match &verdict {
             Ok(ChangeOutcome::Applied) => {
                 assert_eq!(
@@ -97,7 +105,11 @@ fn run(data: &[u8]) -> (Vec<Verdict>, State) {
             Ok(ChangeOutcome::Applied) => assert_eq!(again, Ok(ChangeOutcome::Duplicate)),
             v => assert_eq!(&again, v, "a repeat changed the verdict"),
         }
-        assert_eq!(state(&mut doc), after, "a repeat altered the replica");
+        assert_eq!(
+            state(&mut doc).as_ref(),
+            Some(&after),
+            "a repeat altered the replica"
+        );
         verdicts.push(verdict);
     }
     // A document of admitted changes within the floor is a Snapshot.

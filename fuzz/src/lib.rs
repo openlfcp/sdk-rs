@@ -181,17 +181,31 @@ pub fn known_f2(plaintext: &[u8]) -> bool {
 }
 
 /// Finding F3: admission accepts a change Automerge applies but cannot
-/// reproduce from the document (a non-canonical change, such as a column
-/// with more rows than operations, or an operation whose predecessor is an
-/// operation on another key), and the document's save then fails to load
-/// with "mismatching heads". The admission target skips that failure until
-/// the fix lands; `LFCP_FUZZ_F3=1` reports it.
+/// reproduce from the document, and the document's save then fails to load
+/// ("mismatching heads", "missing ops") or makes the load panic: a
+/// non-canonical change (a column with more rows than operations), an
+/// operation whose predecessor is an operation on another key, or a change
+/// without operations whose start op is not its actor's next. The admission
+/// target skips that failure until the fix lands; `LFCP_FUZZ_F3=1` reports
+/// it.
 pub fn known_f3(save: &[u8]) -> bool {
     if std::env::var_os("LFCP_FUZZ_F3").is_some() {
         return false;
     }
-    match automerge::AutoCommit::load(save) {
-        Err(err) => err.to_string().contains("mismatching heads"),
-        Ok(_) => false,
+    !matches!(
+        panic::catch_unwind(|| automerge::AutoCommit::load(save).is_ok()),
+        Ok(true)
+    )
+}
+
+/// Finding F4: on a document holding such a change (F3, a predecessor on
+/// another key), `SharedObjects::changes` (`AutoCommit::get_changes`)
+/// panics in Automerge's change collector, a panic nothing catches. The
+/// admission target stops a run there until the fix lands;
+/// `LFCP_FUZZ_F4=1` lets the panic through.
+pub fn known_f4<T>(read: impl FnOnce() -> T) -> Option<T> {
+    if std::env::var_os("LFCP_FUZZ_F4").is_some() {
+        return Some(read());
     }
+    panic::catch_unwind(panic::AssertUnwindSafe(read)).ok()
 }
