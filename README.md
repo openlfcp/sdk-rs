@@ -13,7 +13,7 @@ test vectors in `openlfcp/spec`, not ported from `sdk-ts`.
 ## Scope
 
 sdk-rs implements the OpenLFCP MVP 0.1 subset of LFCP-WIRE-01
-at `mvp-0.1-baseline.8`, not every deferred WIRE-01 feature; it has no
+at `mvp-0.1-baseline.9`, not every deferred WIRE-01 feature; it has no
 invitation URI codec yet. See
 `.github: docs/release/deferred-wire-01-features.md` (in [openlfcp/.github](https://github.com/openlfcp/.github)). It does not claim
 full LFCP-WIRE-01 conformance.
@@ -31,8 +31,11 @@ Implemented and checked against the official vectors:
 - HPKE Key Packages (LFCP-042c);
 - wire messages and the session handshake (LFCP-043a): the envelope, every
   typed message body and HELLO / CHALLENGE / AUTH / READY, without I/O;
-- anti-entropy (LFCP-043b): Have Vectors, their difference, Control sync
+- anti-entropy (LFCP-043b): Have Vectors, their difference in both
+  directions (what to request and what to offer, §68.1), Control sync
   decisions and the §63–§65 state machines;
+- the server's `previous` link check for a `DATA_PUT` (§51.1,
+  `UNKNOWN_PREVIOUS`);
 - capabilities (LFCP-042b2): the capability engine, ownership transfer
   verification and the coordinator's Control transition check;
 - Data Epochs (LFCP-042b3): epoch rotation and the strict previous-epoch
@@ -40,8 +43,9 @@ Implemented and checked against the official vectors:
 
 - the Shared Objects profile (LFCP-069): actor IDs, framing, profile
   validation with its diagnostics, Task intents as Automerge changes,
-  conflict exposure, add-wins tags and assignees, tombstones and
-  preservation of unknown fields and types; checked against
+  conflict exposure, add-wins tags and assignees, tombstones,
+  preservation of unknown fields and types, and holding a change whose
+  actor sequence is taken until a rebuild frees it (§14.1); checked against
   SHARED-OBJECTS-TEST-VECTORS-01 and the Automerge reference corpus.
 
 The LFCP protocol layer of this SDK (LFCP-041 to LFCP-043) is complete
