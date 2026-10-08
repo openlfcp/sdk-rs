@@ -457,57 +457,111 @@ fn consume(dir: &Path) {
     .unwrap();
 }
 
-/// The scenario's summary, replayed in order and in reverse with duplicates,
-/// against the producer's.
-fn check(s: &Json) -> Result<(), String> {
+/// A scenario of a bundle, decoded.
+struct Parsed {
+    resource: ResourceId,
+    principals: BTreeMap<String, PrincipalId>,
+    /// (signer, framed plaintext), in the producer's (causal) order.
+    changes: Vec<(String, Vec<u8>)>,
+    /// Explicit delivery orders: indices into `changes`, repeats allowed.
+    deliveries: Vec<Vec<usize>>,
+}
+
+fn parse(s: &Json) -> Parsed {
     let resource = ResourceId::from_bytes(
         unhex(s["resource_id"].as_str().unwrap())
             .try_into()
             .unwrap(),
     );
-    let names: Vec<String> = s["principals"]
+    let principals: BTreeMap<String, PrincipalId> = s["principals"]
         .as_object()
         .unwrap()
-        .keys()
-        .cloned()
-        .collect();
-    let principals: BTreeMap<&str, PrincipalId> = names
         .iter()
-        .map(|n| {
-            let bytes = unhex(s["principals"][n].as_str().unwrap());
+        .map(|(n, p)| {
+            let bytes = unhex(p.as_str().unwrap());
             (
-                n.as_str(),
+                n.clone(),
                 PrincipalId::from_bytes(bytes.try_into().unwrap()),
             )
         })
         .collect();
-    let changes: Vec<(&str, Vec<u8>)> = s["changes"]
+    let changes = s["changes"]
         .as_array()
         .unwrap()
         .iter()
         .map(|c| {
-            let signer = names
-                .iter()
-                .find(|n| *n == c["signer"].as_str().unwrap())
-                .unwrap();
             (
-                signer.as_str(),
+                c["signer"].as_str().unwrap().to_owned(),
                 unhex(c["framed_plaintext"].as_str().unwrap()),
             )
         })
         .collect();
+    let deliveries = s
+        .get("deliveries")
+        .and_then(Json::as_array)
+        .map(|ds| {
+            ds.iter()
+                .map(|d| {
+                    d.as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|i| i.as_u64().unwrap() as usize)
+                        .collect()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Parsed {
+        resource,
+        principals,
+        changes,
+        deliveries,
+    }
+}
+
+impl Parsed {
+    /// The summary after delivering `order` (indices into the changes).
+    fn deliver(&self, order: &[usize]) -> Json {
+        let principals: BTreeMap<&str, PrincipalId> = self
+            .principals
+            .iter()
+            .map(|(n, p)| (n.as_str(), *p))
+            .collect();
+        summary(&replay(
+            self.resource,
+            &principals,
+            order.iter().map(|&i| {
+                let (signer, bytes) = &self.changes[i];
+                (signer.as_str(), bytes.clone())
+            }),
+        ))
+    }
+}
+
+/// The scenario's summary, replayed in order, in reverse with duplicates and
+/// in each of its explicit deliveries, against the producer's.
+fn check(s: &Json) -> Result<(), String> {
+    let p = parse(s);
     let want = &s["expected"];
-    let forward = summary(&replay(resource, &principals, changes.clone()));
+    let n = p.changes.len();
+    let in_order: Vec<usize> = (0..n).collect();
+    let forward = p.deliver(&in_order);
     if &forward != want {
         return Err(format!("in order: {}", difference(want, &forward)));
     }
-    let backward = changes.iter().rev().flat_map(|c| [c.clone(), c.clone()]);
-    let reverse = summary(&replay(resource, &principals, backward));
+    let backward: Vec<usize> = (0..n).rev().flat_map(|i| [i, i]).collect();
+    let reverse = p.deliver(&backward);
     if &reverse != want {
         return Err(format!(
             "reversed with duplicates: {}",
             difference(want, &reverse)
         ));
+    }
+    for (k, order) in p.deliveries.iter().enumerate() {
+        let got = p.deliver(order);
+        if &got != want {
+            return Err(format!("delivery {k}: {}", difference(want, &got)));
+        }
     }
     Ok(())
 }
@@ -525,13 +579,438 @@ fn difference(want: &Json, got: &Json) -> String {
     "an extra field".into()
 }
 
+// ---------------------------------------------------------------- schedules
+//
+// LFCP-02-024: deterministic concurrency schedules. The generator in
+// openlfcp/examples (conformance/src/schedules.ts) writes `schedules.json`:
+// per seed, three authors' steps (an intent with numbers that pick its
+// nodes from the author's current view, or a sync from one author to
+// another) and the delivery orders to replay. `produce-schedules` runs each
+// schedule with this SDK's authoring API and writes `sections-schedules.json`
+// in the sections bundle format, the deliveries made explicit (repeats are
+// duplicates; a prefix delivered twice is a dropped connection resumed).
+// `consume-schedules` checks every scenario like `consume` and minimizes a
+// failing delivery into a regression fixture under `<dir>/regressions/`.
+
+const AUTHORS: [&str; 3] = ["A", "B", "C"];
+
+/// A deterministic generator for delivery orders (mulberry32).
+struct Rng(u32);
+
+impl Rng {
+    fn next(&mut self) -> u32 {
+        self.0 = self.0.wrapping_add(0x6d2b_79f5);
+        let mut t = self.0;
+        t = (t ^ (t >> 15)).wrapping_mul(t | 1);
+        t ^= t.wrapping_add((t ^ (t >> 7)).wrapping_mul(t | 61));
+        t ^ (t >> 14)
+    }
+
+    fn below(&mut self, n: usize) -> usize {
+        (self.next() as usize) % n.max(1)
+    }
+}
+
+/// One author: its replica and the changes it wrote.
+struct Author {
+    doc: SectionsDoc,
+    principal: PrincipalId,
+}
+
+/// The numbers of a step, as the generator wrote them.
+fn nums(op: &Json) -> Vec<usize> {
+    op["n"]
+        .as_array()
+        .map(|a| a.iter().map(|x| x.as_u64().unwrap() as usize).collect())
+        .unwrap_or_default()
+}
+
+/// The visible nodes of `doc`, in tree order, with their parent and kind.
+fn visible(doc: &SectionsDoc) -> Vec<(String, String, Option<NodeKind>)> {
+    doc.effective()
+        .tree
+        .into_iter()
+        .map(|t| (t.id, t.parent, t.kind))
+        .collect()
+}
+
+/// Runs one step of `author`; an intent its view refuses is skipped.
+fn step(author: &mut Author, op: &Json, ids: &mut impl FnMut(u16) -> String) -> Option<Change> {
+    let n = nums(op);
+    let at = |i: usize| n.get(i).copied().unwrap_or(0);
+    let view = visible(&author.doc);
+    let parents: Vec<String> = std::iter::once(SECTION.to_owned())
+        .chain(
+            view.iter()
+                .filter(|(_, _, k)| k.is_some_and(NodeKind::can_parent))
+                .map(|(id, _, _)| id.clone()),
+        )
+        .collect();
+    let after_in = |parent: &str, pick: usize| -> Option<String> {
+        let children: Vec<&String> = view
+            .iter()
+            .filter(|(_, p, _)| p == parent)
+            .map(|(id, _, _)| id)
+            .collect();
+        match pick % (children.len() + 1) {
+            0 => None,
+            k => Some(children[k - 1].clone()),
+        }
+    };
+    let pick = |i: usize| {
+        view.get(at(i) % view.len().max(1))
+            .map(|(id, _, _)| id.clone())
+    };
+    let texts: Vec<String> = view
+        .iter()
+        .filter(|(_, _, k)| !matches!(k, Some(NodeKind::Task) | None))
+        .map(|(id, _, _)| id.clone())
+        .collect();
+    let text_pick = |i: usize| texts.get(at(i) % texts.len().max(1)).cloned();
+    let me = author.principal;
+    let words = ["alpha", "Задача", "😀 emoji", "β", "line\nbreak"];
+    let result = match op["kind"].as_str().unwrap() {
+        "create" => {
+            let parent = parents[at(1) % parents.len()].clone();
+            let after = after_in(&parent, at(2));
+            let text = words[at(3) % words.len()];
+            let node = match at(0) % 3 {
+                0 => NewNode::Task { title: text },
+                1 => NewNode::Paragraph { text },
+                _ => NewNode::Item { text },
+            };
+            let (id, slot) = (ids(1), ids(2));
+            author
+                .doc
+                .create_node(&id, node, &parent, after.as_deref(), &slot, &me)
+        }
+        "move" => {
+            let node = pick(0)?;
+            let parent = parents[at(1) % parents.len()].clone();
+            let after = after_in(&parent, at(2));
+            let slot = ids(2);
+            author
+                .doc
+                .move_node(&node, &parent, after.as_deref(), &slot, &me)
+        }
+        "delete" => author.doc.delete_node(&pick(0)?),
+        "restore" => {
+            let all: Vec<String> = author.doc.nodes().into_keys().collect();
+            let node = all.get(at(0) % all.len().max(1))?.clone();
+            author.doc.restore_node(&node)
+        }
+        "text" => {
+            let node = text_pick(0)?;
+            let len = author.doc.nodes()[&node]
+                .text
+                .as_deref()
+                .map_or(0, |t| t.chars().count());
+            let index = at(1) % (len + 1);
+            let delete = at(2) % (len - index + 1).min(4);
+            let base = author.doc.heads();
+            author
+                .doc
+                .text_edit(&node, &base, index, delete, words[at(3) % words.len()])
+        }
+        "split" => {
+            let node = text_pick(0)?;
+            let len = author.doc.nodes()[&node]
+                .text
+                .as_deref()
+                .map_or(0, |t| t.chars().count());
+            let (id, slot) = (ids(3), ids(4));
+            author.doc.split(&node, at(1) % (len + 1), &id, &slot, &me)
+        }
+        "join" => {
+            let first = text_pick(0)?;
+            let (_, parent, _) = view.iter().find(|(id, _, _)| *id == first)?.clone();
+            let siblings: Vec<&String> = view
+                .iter()
+                .filter(|(_, p, _)| *p == parent)
+                .map(|(id, _, _)| id)
+                .collect();
+            let at_first = siblings.iter().position(|id| **id == first)?;
+            let second = (*siblings.get(at_first + 1)?).clone();
+            author.doc.join(&first, &second, "\n")
+        }
+        "title" => author.doc.set_title(words[at(0) % words.len()]),
+        other => panic!("unknown schedule step {other}"),
+    };
+    result.ok()
+}
+
+/// Runs a schedule: returns the scenario in the bundle format.
+fn run_schedule(schedule: &Json) -> Json {
+    let seed = schedule["seed"].as_u64().unwrap();
+    let resource = ResourceId::from_bytes(random());
+    let principals: BTreeMap<&str, PrincipalId> = AUTHORS
+        .iter()
+        .map(|a| (*a, PrincipalId::from_bytes(random())))
+        .collect();
+    let actor = |a: &str| shared_sections::actor_id(&resource, &principals[a]);
+    let mut counter = 0u32;
+    let mut ids = |purpose: u16| {
+        counter += 1;
+        uuid((seed & 0xffff) as u16, purpose, counter)
+    };
+    // A creates the section; B and C start from it.
+    let (mut first, genesis) =
+        SectionsDoc::create(actor("A"), SECTION, "Schedule", &principals["A"]).unwrap();
+    let save = first.save();
+    let mut authors: BTreeMap<&str, Author> = AUTHORS
+        .iter()
+        .map(|a| {
+            let doc = if *a == "A" {
+                SectionsDoc::load_as(&save, actor("A")).unwrap()
+            } else {
+                SectionsDoc::load_as(&save, actor(a)).unwrap()
+            };
+            (
+                *a,
+                Author {
+                    doc,
+                    principal: principals[a],
+                },
+            )
+        })
+        .collect();
+    let mut changes: Vec<(&str, Change)> = vec![("A", genesis)];
+    let mut skipped = 0usize;
+    for st in schedule["steps"].as_array().unwrap() {
+        if let Some(sync) = st.get("sync") {
+            let from = AUTHORS
+                .iter()
+                .find(|a| **a == sync["from"].as_str().unwrap())
+                .unwrap();
+            let to = AUTHORS
+                .iter()
+                .find(|a| **a == sync["to"].as_str().unwrap())
+                .unwrap();
+            let theirs = authors.get_mut(from).unwrap().doc.changes();
+            authors
+                .get_mut(to)
+                .unwrap()
+                .doc
+                .apply_changes(theirs)
+                .unwrap();
+            continue;
+        }
+        let who = AUTHORS
+            .iter()
+            .find(|a| **a == st["actor"].as_str().unwrap())
+            .unwrap();
+        match step(authors.get_mut(who).unwrap(), &st["op"], &mut ids) {
+            Some(change) => changes.push((who, change)),
+            None => skipped += 1,
+        }
+    }
+    // The causal order: every change after its dependencies.
+    let mut all = SectionsDoc::new(ActorId::from([1u8; 32]));
+    for a in AUTHORS {
+        let theirs = authors.get_mut(a).unwrap().doc.changes();
+        all.apply_changes(theirs).unwrap();
+    }
+    let order: BTreeMap<_, usize> = all
+        .changes()
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.hash(), i))
+        .collect();
+    changes.sort_by_key(|(_, c)| order[&c.hash()]);
+    let framed: Vec<(&str, Vec<u8>)> = changes
+        .iter()
+        .map(|(s, c)| (*s, framing::encode_change(c.raw_bytes())))
+        .collect();
+    let replica = replay(resource, &principals, framed.clone());
+    // Deliveries: a shuffle, a shuffle with duplicates, and a dropped
+    // connection (a prefix delivered, then everything again).
+    let mut rng = Rng(seed as u32 ^ 0x9e37_79b9);
+    let n = framed.len();
+    let deliveries: Vec<Vec<usize>> = (0..schedule["deliveries"].as_u64().unwrap_or(3))
+        .map(|k| {
+            let mut order: Vec<usize> = (0..n).collect();
+            for i in (1..n).rev() {
+                order.swap(i, rng.below(i + 1));
+            }
+            match k % 3 {
+                1 => {
+                    let mut with: Vec<usize> = vec![];
+                    for i in order {
+                        with.push(i);
+                        if rng.below(3) == 0 {
+                            with.push(i);
+                        }
+                    }
+                    with
+                }
+                2 => {
+                    let cut = rng.below(n + 1);
+                    order[..cut].iter().chain(order.iter()).copied().collect()
+                }
+                _ => order,
+            }
+        })
+        .collect();
+    json!({
+        "id": format!("seed-{seed}"),
+        "description": format!("schedule seed {seed}: {} steps, {} changes, {skipped} intents skipped", schedule["steps"].as_array().unwrap().len(), n),
+        "resource_id": hex(resource.as_bytes()),
+        "principals": principals.iter().map(|(n, p)| (n.to_string(), json!(hex(p.as_bytes())))).collect::<serde_json::Map<_, _>>(),
+        "changes": framed.iter().map(|(s, b)| json!({ "signer": s, "framed_plaintext": hex(b) })).collect::<Vec<_>>(),
+        "deliveries": deliveries,
+        "expected": summary(&replica),
+    })
+}
+
+fn produce_schedules(dir: &Path) {
+    let input: Json =
+        serde_json::from_slice(&std::fs::read(dir.join("schedules.json")).unwrap()).unwrap();
+    let scenarios: Vec<Json> = input["schedules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(run_schedule)
+        .collect();
+    let bundle = json!({ "format": FORMAT, "producer": "rust", "scenarios": scenarios });
+    std::fs::write(
+        dir.join("sections-schedules.json"),
+        serde_json::to_vec_pretty(&bundle).unwrap(),
+    )
+    .unwrap();
+}
+
+/// The smallest sublist of `items` for which `fails` still holds, by
+/// removing ever smaller chunks (delta debugging); `fails(items)` holds.
+fn minimize(items: Vec<usize>, fails: impl Fn(&[usize]) -> bool) -> Vec<usize> {
+    let mut items = items;
+    let mut chunk = items.len().div_ceil(2).max(1);
+    loop {
+        let mut removed = false;
+        let mut start = 0;
+        while start < items.len() {
+            let candidate: Vec<usize> = items[..start]
+                .iter()
+                .chain(items[(start + chunk).min(items.len())..].iter())
+                .copied()
+                .collect();
+            if !candidate.is_empty() && fails(&candidate) {
+                items = candidate;
+                removed = true;
+            } else {
+                start += chunk;
+            }
+        }
+        if chunk == 1 && !removed {
+            return items;
+        }
+        if !removed {
+            chunk = chunk.div_ceil(2);
+        }
+    }
+}
+
+/// A failing delivery of `s`, minimized into a regression scenario: the
+/// changes it delivers, in causal order, and the delivery that diverges
+/// from that order.
+fn regression(s: &Json) -> Option<Json> {
+    let p = parse(s);
+    let n = p.changes.len();
+    let mut candidates: Vec<Vec<usize>> = vec![(0..n).rev().flat_map(|i| [i, i]).collect()];
+    candidates.extend(p.deliveries.iter().cloned());
+    let fails = |order: &[usize]| {
+        let mut causal: Vec<usize> = order.to_vec();
+        causal.sort_unstable();
+        causal.dedup();
+        p.deliver(order) != p.deliver(&causal)
+    };
+    let failing = candidates.into_iter().find(|d| fails(d))?;
+    let minimal = minimize(failing, fails);
+    let mut kept: Vec<usize> = minimal.clone();
+    kept.sort_unstable();
+    kept.dedup();
+    let position = |i: &usize| kept.iter().position(|k| k == i).unwrap();
+    let mut out = s.clone();
+    out["id"] = json!(format!("{}-minimized", s["id"].as_str().unwrap()));
+    out["changes"] = json!(kept
+        .iter()
+        .map(|&i| s["changes"][i].clone())
+        .collect::<Vec<_>>());
+    out["deliveries"] = json!([minimal.iter().map(position).collect::<Vec<_>>()]);
+    out["expected"] = p.deliver(&kept);
+    Some(out)
+}
+
+fn consume_schedules(dir: &Path) {
+    let mut checks = vec![];
+    // The minimizer on a known predicate: the smallest order holding 3 and 7.
+    let found = minimize((0..20).collect(), |o| o.contains(&3) && o.contains(&7));
+    checks.push(json!({
+        "id": "schedules.minimizer",
+        "category": "schedules",
+        "result": if found == vec![3, 7] { "PASS" } else { "FAIL" },
+        "detail": if found == vec![3, 7] { String::new() } else { format!("minimized to {found:?}") },
+    }));
+    if let Ok(bytes) = std::fs::read(dir.join("sections-schedules.json")) {
+        let bundle: Json = serde_json::from_slice(&bytes).unwrap();
+        let mut failures = vec![];
+        for s in bundle["scenarios"].as_array().unwrap() {
+            if let Err(detail) = check(s) {
+                let id = s["id"].as_str().unwrap();
+                if let Some(fixture) = regression(s) {
+                    std::fs::create_dir_all(dir.join("regressions")).unwrap();
+                    std::fs::write(
+                        dir.join("regressions").join(format!("{id}.json")),
+                        serde_json::to_vec_pretty(&fixture).unwrap(),
+                    )
+                    .unwrap();
+                }
+                failures.push(format!("{id}: {detail}"));
+            }
+        }
+        let total = bundle["scenarios"].as_array().unwrap().len();
+        checks.push(json!({
+            "id": "schedules.random",
+            "category": "schedules",
+            "result": if failures.is_empty() { "PASS" } else { "FAIL" },
+            "detail": if failures.is_empty() { format!("{total} schedules converge") } else { failures.join("; ") },
+        }));
+    }
+    // Minimized failures kept as fixtures (examples/conformance/regressions).
+    if let Ok(bytes) = std::fs::read(dir.join("sections-regressions.json")) {
+        let bundle: Json = serde_json::from_slice(&bytes).unwrap();
+        let failures: Vec<String> = bundle["scenarios"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|s| {
+                check(s)
+                    .err()
+                    .map(|d| format!("{}: {d}", s["id"].as_str().unwrap()))
+            })
+            .collect();
+        checks.push(json!({
+            "id": "schedules.regressions",
+            "category": "schedules",
+            "result": if failures.is_empty() { "PASS" } else { "FAIL" },
+            "detail": failures.join("; "),
+        }));
+    }
+    std::fs::write(
+        dir.join("schedules-results-rust.json"),
+        serde_json::to_vec_pretty(&json!({ "consumer": "rust", "checks": checks })).unwrap(),
+    )
+    .unwrap();
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.as_slice() {
         [command, dir] if command == "produce" => produce(Path::new(dir)),
         [command, dir] if command == "consume" => consume(Path::new(dir)),
+        [command, dir] if command == "produce-schedules" => produce_schedules(Path::new(dir)),
+        [command, dir] if command == "consume-schedules" => consume_schedules(Path::new(dir)),
         _ => {
-            eprintln!("usage: interop_sections (produce|consume) <dir>");
+            eprintln!("usage: interop_sections (produce|consume|produce-schedules|consume-schedules) <dir>");
             std::process::exit(2);
         }
     }
