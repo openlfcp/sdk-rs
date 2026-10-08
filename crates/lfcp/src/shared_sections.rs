@@ -403,6 +403,37 @@ impl SectionsDoc {
         .all(|k| !not_scalar(&self.doc, &task, k))
     }
 
+    /// §14.2: the IDs under which `nodes`, `objects` or `placements` holds
+    /// concurrent values, an `OBJECT_ID_COLLISION` (SOP §21).
+    pub fn collisions(&self) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        for key in ["nodes", "objects", "placements"] {
+            let Some(map) = self.root_map(key) else {
+                continue;
+            };
+            for k in self.doc.keys(&map) {
+                if self.doc.get_all(&map, &k).map_or(0, |v| v.len()) > 1 {
+                    out.insert(k);
+                }
+            }
+        }
+        out
+    }
+
+    /// The nodes whose own ID, Task ID or selected PlacementId collides:
+    /// they are not validated or projected, and no value is chosen (§14.2).
+    fn collided(&self, collisions: &BTreeSet<String>) -> BTreeSet<String> {
+        self.keys("nodes")
+            .into_iter()
+            .filter(|n| {
+                collisions.contains(n)
+                    || self
+                        .selected_placement(n)
+                        .is_some_and(|p| collisions.contains(&p))
+            })
+            .collect()
+    }
+
     /// §14.2: the invalid nodes with their diagnostic. An invalid node is
     /// not projected; its descendants are blocked, and the rest of the
     /// section is projected. Placement conflicts are model facts, not
@@ -415,8 +446,12 @@ impl SectionsDoc {
         let placements = self.placements();
         let tasks = self.task_ids();
         let section_id = self.section().map(|s| s.id);
+        let collided = self.collided(&self.collisions());
         let mut out = BTreeMap::new();
         for (id, node) in &nodes {
+            if collided.contains(id) {
+                continue;
+            }
             let n = object(&self.doc, &nodes_map, id, ObjType::Map).expect("listed node");
             let mut found: Vec<Diagnostic> = Vec::new();
             if !is_uuidv7(id) {
@@ -510,11 +545,18 @@ impl SectionsDoc {
         let nodes = self.nodes();
         let placements = self.placements();
         let invalid = self.node_problems();
+        let collisions = self.collisions();
+        let collided = self.collided(&collisions);
         let section = self.section();
         let section_id = section.as_ref().map(|s| s.id.clone()).unwrap_or_default();
-        let lifecycles = |id: &str, node: &Node| match node.kind {
-            Some(NodeKind::Task) => self.task_lifecycles(id),
-            _ => node.lifecycles.clone(),
+        // §14.3: the distinct concurrent values; equal values agree.
+        let lifecycles = |id: &str, node: &Node| {
+            let mut values = match node.kind {
+                Some(NodeKind::Task) => self.task_lifecycles(id),
+                _ => node.lifecycles.clone(),
+            };
+            values.dedup();
+            values
         };
         // Steps 2-3: placement conflicts and the selected parent of every
         // node whose selected placement resolves (the engine-selected value
@@ -522,6 +564,9 @@ impl SectionsDoc {
         let mut blocked: BTreeMap<String, Fact> = BTreeMap::new();
         let mut parents: BTreeMap<String, String> = BTreeMap::new();
         for (id, node) in &nodes {
+            if collided.contains(id) {
+                continue;
+            }
             if node.placements.len() > 1 {
                 blocked.insert(id.clone(), Fact::PlacementConflict);
             }
@@ -543,7 +588,10 @@ impl SectionsDoc {
         // Step 4: every member of a cycle in the selected parent graph,
         // among nodes not already blocked or invalid.
         let eligible = |n: &str, blocked: &BTreeMap<String, Fact>| {
-            nodes.contains_key(n) && !blocked.contains_key(n) && !invalid.contains_key(n)
+            nodes.contains_key(n)
+                && !blocked.contains_key(n)
+                && !invalid.contains_key(n)
+                && !collided.contains(n)
         };
         let mut cycle: BTreeSet<String> = BTreeSet::new();
         for start in nodes.keys() {
@@ -568,7 +616,7 @@ impl SectionsDoc {
         }
         // Step 5: descendants of blocked or invalid nodes, to a fixed point.
         let out = |n: &str, blocked: &BTreeMap<String, Fact>| {
-            blocked.contains_key(n) || invalid.contains_key(n)
+            blocked.contains_key(n) || invalid.contains_key(n) || collided.contains(n)
         };
         loop {
             let more: Vec<String> = nodes
@@ -644,6 +692,7 @@ impl SectionsDoc {
             hidden,
             recovery: blocked,
             invalid,
+            collisions,
         }
     }
 
@@ -705,6 +754,8 @@ pub struct Effective {
     pub recovery: BTreeMap<String, Fact>,
     /// Invalid nodes by NodeId (§14.2).
     pub invalid: BTreeMap<String, Diagnostic>,
+    /// The colliding IDs, `OBJECT_ID_COLLISION` (§14.2).
+    pub collisions: BTreeSet<String>,
 }
 
 /// Why an authoring intent was refused before anything was written (§6).

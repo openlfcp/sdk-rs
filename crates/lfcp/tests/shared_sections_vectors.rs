@@ -262,6 +262,13 @@ fn the_effective_tree_matches_every_case() {
             .map(|h| h.as_str().unwrap())
             .collect();
         assert_eq!(hidden, want_hidden, "{id}: hidden");
+        // §14.2: listed only when there are colliding IDs.
+        let collisions: Vec<&str> = effective.collisions.iter().map(String::as_str).collect();
+        let want_collisions: Vec<&str> = expected["collisions"]
+            .as_array()
+            .map(|c| c.iter().map(|x| x.as_str().unwrap()).collect())
+            .unwrap_or_default();
+        assert_eq!(collisions, want_collisions, "{id}: collisions");
         let recovery: Vec<(String, &str)> = effective
             .recovery
             .iter()
