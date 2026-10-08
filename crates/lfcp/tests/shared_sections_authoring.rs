@@ -309,7 +309,7 @@ fn delete_versus_restore_conflicts_and_a_fresh_restore_resolves_it() {
     // by the engine; the restore intent still writes an operation.
     let restore = b.restore_node(T).unwrap();
     assert!(
-        restore.len() > 0,
+        !restore.is_empty(),
         "the explicit restore is a fresh assignment"
     );
     merge(&mut a, &mut b);
