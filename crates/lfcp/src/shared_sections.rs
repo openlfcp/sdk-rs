@@ -1648,14 +1648,17 @@ impl SectionsReplica {
         let change = match crate::shared_objects::framing::decode_change(plaintext) {
             Ok(c) => c,
             Err(_) => {
-                // Recorded by its hash when the bytes still parse as a change
-                // (for example one above the §11.1 limits).
-                let parsed = crate::shared_objects::framing::unframe(plaintext)
-                    .ok()
-                    .and_then(|b| Change::from_bytes(b).ok());
-                return match parsed {
-                    Some(c) => self.refuse(c.hash(), Refusal::InvalidAutomergeBytes),
-                    None => Received::Refused(Refusal::InvalidAutomergeBytes),
+                // Recorded by its change hash (for example a change above the
+                // §11.1 limits), computed without parsing its operations:
+                // refused bytes are never handed to Automerge, which would
+                // expand them (an RLE or DEFLATE bomb).
+                // Only a change of the signer's own actor is recorded: another
+                // Principal must not block a change by forwarding it spoiled.
+                return match crate::shared_objects::framing::refused_change_key(plaintext) {
+                    Some((hash, actor)) if actor == actor_id_bytes(&self.resource, signer) => {
+                        self.refuse(hash, Refusal::InvalidAutomergeBytes)
+                    }
+                    _ => Received::Refused(Refusal::InvalidAutomergeBytes),
                 };
             }
         };

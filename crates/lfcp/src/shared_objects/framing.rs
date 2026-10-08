@@ -22,7 +22,8 @@
 //! [`decode_change`] compares it with the decoded change's hash;
 //! `AutoCommit::load` checks a document's.
 
-use automerge::Change;
+use automerge::{Change, ChangeHash};
+use sha2::{Digest, Sha256};
 
 use crate::cbor::{self, Value};
 use crate::shared_objects::{expansion, Diagnostic, ProfileError};
@@ -64,6 +65,7 @@ const CHUNK_MAGIC: [u8; 4] = [0x85, 0x6f, 0x4a, 0x83];
 /// Chunk types: a document, a change.
 const DOCUMENT_CHUNK: u8 = 0;
 const CHANGE_CHUNK: u8 = 1;
+const COMPRESSED_CHANGE_CHUNK: u8 = 2;
 
 /// An Automerge chunk header: magic, checksum, type, LEB128 length.
 struct ChunkHeader {
@@ -130,6 +132,80 @@ pub fn decode_change(plaintext: &[u8]) -> Result<Change, ProfileError> {
 /// (§13).
 pub fn encode_snapshot(save: &[u8]) -> Vec<u8> {
     frame(save)
+}
+
+/// How much a refused compressed change chunk may inflate to while its
+/// hash is computed: more than any change within §11.1 holds.
+const REFUSED_INFLATE_CAP: u64 = 8 * 1024 * 1024;
+
+/// The change hash and actor a refused Data Unit plaintext names,
+/// computed without parsing its operations: bytes that failed §11 or §11.1
+/// are never handed to Automerge, which would expand them (an RLE or
+/// DEFLATE bomb). Automerge hashes a change as SHA-256 of its uncompressed
+/// type, length and body; the body starts with the dependencies and the
+/// actor:
+/// - an uncompressed change chunk (type 1) is read as it is, whatever its
+///   checksum says;
+/// - a compressed one (type 2) is inflated under a cap of 8 MiB first, and
+///   names nothing when it inflates to more;
+/// - anything else, or trailing bytes, names nothing.
+pub fn refused_change_key(plaintext: &[u8]) -> Option<(ChangeHash, Vec<u8>)> {
+    let bytes = unframe(plaintext).ok()?;
+    let header = chunk_header(&bytes).ok()?;
+    if header.end != bytes.len() {
+        return None;
+    }
+    let body_at = 9 + leb_len(&bytes[9..])?;
+    let inflated;
+    let body: &[u8] = match header.chunk_type {
+        CHANGE_CHUNK => &bytes[body_at..],
+        COMPRESSED_CHANGE_CHUNK => {
+            inflated = expansion::inflate_capped(&bytes[body_at..], REFUSED_INFLATE_CAP).ok()?;
+            &inflated
+        }
+        _ => return None,
+    };
+    let mut hasher = Sha256::new();
+    hasher.update([CHANGE_CHUNK]);
+    hasher.update(uleb(body.len()));
+    hasher.update(body);
+    let hash = ChangeHash(hasher.finalize().into());
+    // Dependencies: a count and 32 bytes each; then the actor, length-prefixed.
+    let (deps, at) = read_uleb(body, 0)?;
+    let at = at.checked_add(deps.checked_mul(32)?)?;
+    let (len, at) = read_uleb(body, at)?;
+    let actor = body.get(at..at.checked_add(len)?)?.to_vec();
+    Some((hash, actor))
+}
+
+/// The ULEB128 number at `at` in `bytes` and the offset after it.
+fn read_uleb(bytes: &[u8], at: usize) -> Option<(usize, usize)> {
+    let mut value: usize = 0;
+    for (i, b) in bytes.get(at..)?.iter().enumerate().take(10) {
+        value |= usize::from(b & 0x7f).checked_shl(7 * i as u32)?;
+        if b & 0x80 == 0 {
+            return Some((value, at + i + 1));
+        }
+    }
+    None
+}
+
+/// The length in bytes of the ULEB128 number at the start of `bytes`.
+fn leb_len(bytes: &[u8]) -> Option<usize> {
+    bytes.iter().position(|b| b & 0x80 == 0).map(|i| i + 1)
+}
+
+fn uleb(mut n: usize) -> Vec<u8> {
+    let mut out = vec![];
+    loop {
+        let byte = (n & 0x7f) as u8;
+        n >>= 7;
+        if n == 0 {
+            out.push(byte);
+            return out;
+        }
+        out.push(byte | 0x80);
+    }
 }
 
 /// The full-save bytes of a Snapshot plaintext (§13), checked: one

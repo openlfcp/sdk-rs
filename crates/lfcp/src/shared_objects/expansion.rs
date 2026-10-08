@@ -423,7 +423,7 @@ pub fn check_change(bytes: &[u8]) -> Result<Expansion, ProfileError> {
 
 /// Inflate raw DEFLATE `data`, refusing as soon as the output passes
 /// `budget` bytes: never more than the budget is held.
-fn inflate_capped(data: &[u8], budget: u64) -> Result<Vec<u8>, ProfileError> {
+pub(crate) fn inflate_capped(data: &[u8], budget: u64) -> Result<Vec<u8>, ProfileError> {
     let mut out = Vec::new();
     flate2::read::DeflateDecoder::new(data)
         .take(budget.saturating_add(1))
