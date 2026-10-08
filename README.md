@@ -98,14 +98,18 @@ builds on the stable Rust toolchain; no older minimum version is promised.
 `spec.lock` pins the specification this SDK implements:
 
 ```json
-{ "tag": "mvp-0.1-baseline.9", "commit": "f42533c47f58fc980afd4e06f1366891592f7691" }
+{ "commit": "d605f39d7147e8616de8a03cebd350eb400d9065" }
 ```
+
+During MVP 0.2 development the lock pins a spec commit without a tag,
+after `mvp-0.1-baseline.9`: the next baseline, `mvp-0.2-baseline.1`, is
+not tagged yet. With a tag, the lock names both.
 
 Vectors are never copied into this repository. The tests read them from a
 checkout of `openlfcp/spec` with `git show <commit>:<path>`, so the state of
 that checkout's working tree does not matter. Before reading, they check
-that the tag in `spec.lock` still resolves to the locked commit, and fail
-with a clear message if it does not.
+that the tag in `spec.lock` still resolves to the locked commit (or, without
+a tag, that the commit exists), and fail with a clear message if not.
 
 The checkout is found at `$LFCP_SPEC_DIR`, or at `../spec` next to this
 repository by default. A relative `LFCP_SPEC_DIR` is resolved against this

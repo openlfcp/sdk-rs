@@ -8,6 +8,8 @@
 //!
 //! Before reading anything, [`Spec::open`] checks that the locked tag
 //! resolves to the locked commit, and panics with a clear message if not.
+//! A lock without a tag pins a commit during development, before the next
+//! baseline is tagged; the commit must then exist in the checkout.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -15,7 +17,8 @@ use std::process::Command;
 
 /// The pin recorded in `spec.lock`.
 pub struct SpecLock {
-    pub tag: String,
+    /// The baseline tag, or `None` for a development commit pin.
+    pub tag: Option<String>,
     pub commit: String,
 }
 
@@ -35,34 +38,49 @@ impl Spec {
             None => root.join("../spec"),
         };
 
-        let resolved = git(
-            &dir,
-            &[
-                "rev-parse",
-                "--verify",
-                "--quiet",
-                &format!("refs/tags/{}^{{commit}}", lock.tag),
-            ],
-        )
-        .unwrap_or_else(|err| {
-            panic!(
-                "spec.lock pins tag {} but it does not resolve in the spec checkout at {}: {err}\n\
-                     Clone openlfcp/spec there with its tags, or set LFCP_SPEC_DIR.",
-                lock.tag,
-                dir.display(),
-            )
-        });
-        let resolved = String::from_utf8(resolved).expect("git rev-parse prints UTF-8");
-        let resolved = resolved.trim();
-        assert_eq!(
-            resolved,
-            lock.commit,
-            "spec tag {} in {} resolves to {resolved}, but spec.lock pins {}. \
-             Tags are never moved, so the checkout or spec.lock is wrong.",
-            lock.tag,
-            dir.display(),
-            lock.commit,
-        );
+        match &lock.tag {
+            Some(tag) => {
+                let resolved = git(
+                    &dir,
+                    &[
+                        "rev-parse",
+                        "--verify",
+                        "--quiet",
+                        &format!("refs/tags/{tag}^{{commit}}"),
+                    ],
+                )
+                .unwrap_or_else(|err| {
+                    panic!(
+                        "spec.lock pins tag {tag} but it does not resolve in the spec checkout at {}: {err}\n\
+                             Clone openlfcp/spec there with its tags, or set LFCP_SPEC_DIR.",
+                        dir.display(),
+                    )
+                });
+                let resolved = String::from_utf8(resolved).expect("git rev-parse prints UTF-8");
+                let resolved = resolved.trim();
+                assert_eq!(
+                    resolved,
+                    lock.commit,
+                    "spec tag {tag} in {} resolves to {resolved}, but spec.lock pins {}. \
+                     Tags are never moved, so the checkout or spec.lock is wrong.",
+                    dir.display(),
+                    lock.commit,
+                );
+            }
+            None => {
+                git(
+                    &dir,
+                    &["cat-file", "-e", &format!("{}^{{commit}}", lock.commit)],
+                )
+                .unwrap_or_else(|err| {
+                    panic!(
+                        "spec.lock pins commit {} but the spec checkout at {} does not have it: {err}",
+                        lock.commit,
+                        dir.display(),
+                    )
+                });
+            }
+        }
 
         Spec { dir, lock }
     }
@@ -141,7 +159,7 @@ fn read_lock(path: &Path) -> SpecLock {
             .to_owned()
     };
     let lock = SpecLock {
-        tag: field("tag"),
+        tag: value["tag"].as_str().map(str::to_owned),
         commit: field("commit"),
     };
     assert!(
