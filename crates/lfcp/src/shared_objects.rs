@@ -125,8 +125,9 @@ pub enum ProfileError {
     /// yet. It was not applied; hold it and offer it again once they are.
     MissingDependencies(Vec<automerge::ChangeHash>),
     /// §14.1: the actor already has a change at this sequence number
-    /// (equivocation, §26.2 of LFCP-WIRE-01, or a reused sequence). Not
-    /// applied.
+    /// (equivocation, §26.2 of LFCP-WIRE-01, or a reused sequence). The
+    /// document's apply and merge calls hold such a change instead of
+    /// returning this (POST-001, [`document::ChangeOutcome::Held`]).
     SequenceTaken {
         /// The change's sequence number.
         seq: u64,

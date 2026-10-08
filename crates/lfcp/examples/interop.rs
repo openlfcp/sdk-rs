@@ -23,7 +23,7 @@ use lfcp::base::{
 };
 use lfcp::cbor::Value;
 use lfcp::principal::{PrincipalDescriptor, PrincipalKeys};
-use lfcp::shared_objects::document::{NewTask, SharedObjects};
+use lfcp::shared_objects::document::{ChangeOutcome, NewTask, SharedObjects};
 use lfcp::shared_objects::framing;
 use lfcp::shared_objects::identity::{actor_id, principal_ref};
 use lfcp::shared_objects::values::Plain;
@@ -1147,6 +1147,7 @@ fn consume_shared_objects(so: &Json, c: &Consumer, results: &mut Results) {
                 &signer(&change["signer"]),
                 &unhex(&change["plaintext"]),
             )
+            .map(|_| ())
             .map_err(|e| format!("change {i}: {e}"))?;
         }
         Ok(())
@@ -1192,7 +1193,8 @@ fn consume_shared_objects(so: &Json, c: &Consumer, results: &mut Results) {
                     &signer(&n["signer"]),
                     &unhex(&n["plaintext"]),
                 ) {
-                    Ok(()) => "ACCEPTED".to_owned(),
+                    Ok(ChangeOutcome::Held) => "HELD".to_owned(),
+                    Ok(_) => "ACCEPTED".to_owned(),
                     Err(e) => e.diagnostic().map_or_else(
                         || e.code().map_or_else(|| e.to_string(), str::to_owned),
                         |d| d.name().to_owned(),

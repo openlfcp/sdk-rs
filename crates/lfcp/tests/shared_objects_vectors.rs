@@ -16,9 +16,9 @@ mod support;
 
 use std::collections::BTreeMap;
 
-use automerge::Change;
+use automerge::{Change, ChangeHash};
 use lfcp::base::{self, ObjectId, PrincipalId, ResourceId};
-use lfcp::shared_objects::document::{NewTask, SharedObjects};
+use lfcp::shared_objects::document::{ChangeOutcome, NewTask, SharedObjects};
 use lfcp::shared_objects::identity::{
     actor_id, actor_id_bytes, parse_principal_ref, principal_ref,
 };
@@ -1138,7 +1138,7 @@ fn the_corpus_negatives_are_not_merged() {
                 assert_eq!(change.actor_id().to_bytes(), pavel_actor, "{id}");
                 assert_eq!(
                     receiver.apply_unit_change(&f.resource, &pavel, &plaintext),
-                    Ok(())
+                    Ok(ChangeOutcome::Applied)
                 );
             }
             "SO-BYTES-change-checksum" => {
@@ -1165,7 +1165,7 @@ fn the_corpus_negatives_are_not_merged() {
                         &signer_id,
                         &framing::encode_change(&good)
                     ),
-                    Ok(()),
+                    Ok(ChangeOutcome::Applied),
                     "{id}: the uncorrupted change applies"
                 );
             }
@@ -1289,7 +1289,7 @@ fn a_change_must_carry_the_signers_actor() {
 
     assert_eq!(
         receiver.apply_unit_change(&f.resource, &andrey_id, &plaintext),
-        Ok(())
+        Ok(ChangeOutcome::Applied)
     );
     assert_eq!(receiver.heads(), vec![change.hash()]);
     // The check is per Resource: the same Principal's actor in another
@@ -1395,5 +1395,99 @@ fn the_depth_vectors_are_checked_at_admission() {
             }
             other => panic!("{id}: {other}"),
         }
+    }
+}
+
+#[test]
+fn a_change_with_a_taken_sequence_is_held_until_a_rebuild() {
+    // §14.1 (baseline.9, POST-001): the corpus `collision` section. Each
+    // case starts from its base scenario's converged document; a change
+    // step is accepted, held or a duplicate; an exclude step rebuilds
+    // without the listed changes and their dependents, then applies the
+    // held changes whose sequence is free again.
+    let corpus = corpus();
+    let suite = suite();
+    let f = Fixtures::load(&suite);
+    let decode = |hex: &Json| {
+        let bytes = base::from_hex(hex.as_str().unwrap()).unwrap();
+        framing::decode_change(&framing::encode_change(&bytes)).unwrap()
+    };
+    let hashes = |list: &Json| -> Vec<String> {
+        let mut out: Vec<String> = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| h.as_str().unwrap().to_owned())
+            .collect();
+        out.sort();
+        out
+    };
+    let cases = corpus["collision"]["cases"].as_array().unwrap();
+    assert_eq!(cases.len(), 1);
+    for case in cases {
+        let id = case["id"].as_str().unwrap();
+        let base = corpus["scenarios"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == case["base_scenario"])
+            .unwrap();
+        let mut doc = f.doc("masha");
+        let base_changes: Vec<Change> = base["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| decode(&c["change_hex"]))
+            .collect();
+        assert_eq!(doc.apply_changes(base_changes), Ok(vec![]), "{id}: base");
+        for (i, step) in case["steps"].as_array().unwrap().iter().enumerate() {
+            if let Some(change_hex) = step.get("change_hex") {
+                let change = decode(change_hex);
+                assert_eq!(change.hash().to_string(), step["hash"], "{id} #{i}: hash");
+                let want = match step["expected"].as_str().unwrap() {
+                    "accept" => ChangeOutcome::Applied,
+                    "held" => ChangeOutcome::Held,
+                    "duplicate" => ChangeOutcome::Duplicate,
+                    other => panic!("{id} #{i}: {other}"),
+                };
+                assert_eq!(doc.apply_change(change), Ok(want), "{id} #{i}");
+            } else {
+                // Before the rebuild: the state with the held change unmerged.
+                assert_eq!(
+                    doc.plain().unwrap(),
+                    plain(&case["held_state"]),
+                    "{id}: held state"
+                );
+                let exclude: Vec<ChangeHash> = step["exclude"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|h| h.as_str().unwrap().parse().unwrap())
+                    .collect();
+                let got = doc.exclude(&exclude).unwrap();
+                let mut removed: Vec<String> = got.removed.iter().map(|h| h.to_string()).collect();
+                removed.sort();
+                assert_eq!(
+                    removed,
+                    hashes(&step["expected"]["removed"]),
+                    "{id} #{i}: removed"
+                );
+                let applied: Vec<String> = got.applied.iter().map(|h| h.to_string()).collect();
+                assert_eq!(
+                    applied,
+                    hashes(&step["expected"]["applied"]),
+                    "{id} #{i}: applied"
+                );
+                assert!(doc.held().is_empty(), "{id} #{i}: nothing held");
+            }
+        }
+        let mut heads: Vec<String> = doc.heads().iter().map(|h| h.to_string()).collect();
+        heads.sort();
+        assert_eq!(heads, hashes(&case["final_heads"]), "{id}: heads");
+        assert_eq!(
+            doc.plain().unwrap(),
+            plain(&case["final_state"]),
+            "{id}: state"
+        );
     }
 }

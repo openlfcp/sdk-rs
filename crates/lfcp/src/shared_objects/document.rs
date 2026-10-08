@@ -173,6 +173,34 @@ pub struct SharedObjects {
     seqs: HashMap<ActorId, u64>,
     /// The depth of every object in `doc` (§11.2).
     depths: Depths,
+    /// §14.1 (POST-001): received changes whose actor and sequence number
+    /// another change in `doc` holds, in arrival order. Retried after every
+    /// rebuild that removes changes ([`SharedObjects::exclude`]).
+    held: Vec<Change>,
+}
+
+/// What became of one received change (§14.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChangeOutcome {
+    /// It entered the document.
+    Applied,
+    /// The document already holds it; nothing changed.
+    Duplicate,
+    /// Another change in the document holds its actor and sequence number.
+    /// It is held, not merged and not profile-invalid; its Data Unit stays
+    /// accepted. It is retried after every rebuild that removes changes
+    /// ([`SharedObjects::exclude`]).
+    Held,
+}
+
+/// What a rebuild without excluded changes did ([`SharedObjects::exclude`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Excluded {
+    /// The changes removed: the excluded ones and every change that
+    /// depends on one, in no particular order.
+    pub removed: Vec<ChangeHash>,
+    /// Held changes that applied after the rebuild, in the order applied.
+    pub applied: Vec<ChangeHash>,
 }
 
 /// `AutoCommit::load`, with an engine abort reported as
@@ -225,6 +253,7 @@ impl SharedObjects {
             time: 0,
             seqs: HashMap::new(),
             depths: Depths::new(),
+            held: Vec::new(),
         }
     }
 
@@ -236,6 +265,7 @@ impl SharedObjects {
             time,
             seqs,
             depths,
+            held: Vec::new(),
         })
     }
 
@@ -265,9 +295,11 @@ impl SharedObjects {
     ///
     /// The changes may come in any order: each is applied once its
     /// dependencies are in the document. Those still missing a dependency
-    /// are returned, never handed to the engine (§14.1). A change that
-    /// fails the §14.1 sequence check stops the call with its error;
-    /// changes applied before it stay applied.
+    /// are returned, never handed to the engine (§14.1). A change whose
+    /// actor and sequence number another change holds is held (§14.1,
+    /// [`SharedObjects::held`]), and the changes that depend on it are
+    /// returned with the others still waiting. Any other refusal stops the
+    /// call with its error; changes applied before it stay applied.
     pub fn apply_changes(&mut self, changes: Vec<Change>) -> Result<Vec<Change>, ProfileError> {
         // Admit the whole batch first (§14.1), counting the changes admitted
         // before as present, then hand them to the engine in one call:
@@ -328,6 +360,10 @@ impl SharedObjects {
                     done[i] = false;
                     continue;
                 }
+                Err(ProfileError::SequenceTaken { .. }) => {
+                    self.hold(change.clone());
+                    continue;
+                }
                 Err(err) => {
                     refused = Some(err);
                     break;
@@ -344,10 +380,12 @@ impl SharedObjects {
                 }
             }
         }
+        let held: std::collections::HashSet<ChangeHash> =
+            self.held.iter().map(Change::hash).collect();
         let waiting: Vec<Change> = changes
             .into_iter()
             .zip(done)
-            .filter(|(c, d)| !d && !batch.hashes.contains(&c.hash()))
+            .filter(|(c, d)| !d && !batch.hashes.contains(&c.hash()) && !held.contains(&c.hash()))
             .map(|(c, _)| c)
             .collect();
         // Changes admitted before a refusal stay applied, as documented.
@@ -449,12 +487,92 @@ impl SharedObjects {
         }
     }
 
-    /// Apply one admitted change; a duplicate changes nothing.
-    fn apply_one(&mut self, change: Change) -> Result<(), ProfileError> {
-        match self.admit(&change)? {
-            Admission::Duplicate => Ok(()),
-            Admission::Apply(created) => self.engine_apply(change, created),
+    /// Apply one change whose origin is already established (see
+    /// [`SharedObjects::apply_changes`]): applied, a duplicate, or held
+    /// because another change holds its actor and sequence number (§14.1).
+    /// A change missing a dependency is
+    /// [`ProfileError::MissingDependencies`].
+    pub fn apply_change(&mut self, change: Change) -> Result<ChangeOutcome, ProfileError> {
+        match self.admit(&change) {
+            Ok(Admission::Duplicate) => Ok(ChangeOutcome::Duplicate),
+            Ok(Admission::Apply(created)) => {
+                self.engine_apply(change, created)?;
+                Ok(ChangeOutcome::Applied)
+            }
+            Err(ProfileError::SequenceTaken { .. }) => {
+                self.hold(change);
+                Ok(ChangeOutcome::Held)
+            }
+            Err(err) => Err(err),
         }
+    }
+
+    /// Keep `change` held, once.
+    fn hold(&mut self, change: Change) {
+        if !self.held.iter().any(|c| c.hash() == change.hash()) {
+            self.held.push(change);
+        }
+    }
+
+    /// The changes held because another change holds their actor and
+    /// sequence number (§14.1), in arrival order.
+    pub fn held(&self) -> &[Change] {
+        &self.held
+    }
+
+    /// §14.1: rebuild the document without the changes `hashes` and every
+    /// change that depends on one, as a replica does when LFCP excludes
+    /// their units (a cutoff, LFCP-WIRE-01 §19.1, or an equivocating pair,
+    /// §26.2). Then retry the held changes: each whose actor and sequence
+    /// number are free again and whose dependencies are all here applies;
+    /// the others stay held. Hashes the document does not hold are ignored.
+    pub fn exclude(&mut self, hashes: &[ChangeHash]) -> Result<Excluded, ProfileError> {
+        let all = self.doc.get_changes(&[]);
+        let mut removed: std::collections::HashSet<ChangeHash> = hashes
+            .iter()
+            .filter(|h| self.doc.get_change_by_hash(h).is_some())
+            .copied()
+            .collect();
+        // Dependencies come first, so one pass finds every dependent.
+        for change in &all {
+            if change.deps().iter().any(|d| removed.contains(d)) {
+                removed.insert(change.hash());
+            }
+        }
+        if !removed.is_empty() {
+            let keep: Vec<Change> = all
+                .into_iter()
+                .filter(|c| !removed.contains(&c.hash()))
+                .collect();
+            let mut doc = AutoCommit::new().with_actor(self.doc.get_actor().clone());
+            doc.apply_changes(keep)?;
+            self.doc = doc;
+            self.seqs = seqs_of(&mut self.doc);
+            self.depths = depth::depths_of(&mut self.doc)?;
+        }
+        let mut applied = Vec::new();
+        loop {
+            let mut progressed = false;
+            for change in std::mem::take(&mut self.held) {
+                match self.admit(&change) {
+                    Ok(Admission::Apply(created)) => {
+                        let hash = change.hash();
+                        self.engine_apply(change, created)?;
+                        applied.push(hash);
+                        progressed = true;
+                    }
+                    Ok(Admission::Duplicate) => progressed = true,
+                    Err(_) => self.held.push(change),
+                }
+            }
+            if !progressed {
+                break;
+            }
+        }
+        Ok(Excluded {
+            removed: removed.into_iter().collect(),
+            applied,
+        })
     }
 
     /// Hand `change` to the engine. Defense in depth: on an engine error or
@@ -490,18 +608,19 @@ impl SharedObjects {
     ///
     /// §14.1: a change missing a dependency is
     /// [`ProfileError::MissingDependencies`] (hold the unit and offer it
-    /// again); a sequence gap is `INVALID_AUTOMERGE_BYTES`; a sequence its
-    /// actor already used is [`ProfileError::SequenceTaken`]. None of them
-    /// reaches the engine. A change already here is a no-op.
+    /// again); a sequence gap is `INVALID_AUTOMERGE_BYTES`; a change whose
+    /// actor and sequence number another change holds is
+    /// [`ChangeOutcome::Held`] (POST-001). None of them reaches the
+    /// engine. A change already here is [`ChangeOutcome::Duplicate`].
     pub fn apply_unit_change(
         &mut self,
         resource: &ResourceId,
         signer: &PrincipalId,
         plaintext: &[u8],
-    ) -> Result<(), ProfileError> {
+    ) -> Result<ChangeOutcome, ProfileError> {
         let change = decode_change(plaintext)?;
         check_change_actor(resource, signer, &change)?;
-        self.apply_one(change)
+        self.apply_change(change)
     }
 
     /// A copy writing as `actor`, sharing this document's history.
@@ -511,6 +630,7 @@ impl SharedObjects {
             time: self.time,
             seqs: self.seqs.clone(),
             depths: self.depths.clone(),
+            held: Vec::new(),
         }
     }
 
@@ -519,10 +639,10 @@ impl SharedObjects {
     /// The other replica's changes go through the same §14.1 admission and
     /// guarded engine call as [`SharedObjects::apply_changes`]: two
     /// histories each sound on their own can still disagree, such as two
-    /// changes of one actor at one sequence. Such a change stops the merge
-    /// with its error ([`ProfileError::SequenceTaken`]); changes admitted
-    /// before it stay merged.
-    pub fn merge(&mut self, other: &mut SharedObjects) -> Result<(), ProfileError> {
+    /// changes of one actor at one sequence. Such a change is held (§14.1,
+    /// POST-001); the changes of `other` that depend on a held one are
+    /// returned, not merged.
+    pub fn merge(&mut self, other: &mut SharedObjects) -> Result<Vec<Change>, ProfileError> {
         let new: Vec<Change> = other
             .doc
             .get_changes(&[])
@@ -530,11 +650,21 @@ impl SharedObjects {
             .filter(|c| self.doc.get_change_by_hash(&c.hash()).is_none())
             .collect();
         let waiting = self.apply_changes(new)?;
-        // A whole history has every dependency; anything left is not one.
-        match waiting.first() {
-            None => Ok(()),
-            Some(change) => Err(ProfileError::MissingDependencies(change.deps().to_vec())),
+        // A whole history has every dependency: what is left waits for a
+        // held change, or the history was not whole.
+        let mut blocked: std::collections::HashSet<ChangeHash> =
+            self.held.iter().map(Change::hash).collect();
+        for change in &waiting {
+            let waits_on_held = change
+                .deps()
+                .iter()
+                .all(|d| blocked.contains(d) || self.doc.get_change_by_hash(d).is_some());
+            if !waits_on_held {
+                return Err(ProfileError::MissingDependencies(change.deps().to_vec()));
+            }
+            blocked.insert(change.hash());
         }
+        Ok(waiting)
     }
 
     /// The current heads.
@@ -1213,20 +1343,40 @@ mod admission_tests {
     }
 
     #[test]
-    fn a_taken_sequence_is_refused_before_the_engine() {
+    fn a_taken_sequence_is_held_before_the_engine() {
+        // §14.1 (POST-001): another sequence-2 change by the same actor is
+        // held, not merged and not refused; excluding the change that holds
+        // the sequence applies it.
         let (first, second, _) = crafted();
-        // Another sequence-2 change by the same actor: equivocation.
         let mut twin = SharedObjects::new(actor(1));
         twin.apply_changes(vec![first.clone()]).unwrap();
         let other = put_root(&mut twin, "note", "other");
         assert_eq!(other.seq(), 2);
         let mut receiver = SharedObjects::new(actor(2));
-        receiver.apply_changes(vec![first, second]).unwrap();
+        receiver.apply_changes(vec![first, second.clone()]).unwrap();
         let before = state(&mut receiver);
-        let err = receiver.apply_changes(vec![other]).unwrap_err();
-        assert_eq!(err, ProfileError::SequenceTaken { seq: 2, latest: 2 });
-        assert_eq!(err.code(), Some("ACTOR_EQUIVOCATION"));
+        assert!(receiver
+            .apply_changes(vec![other.clone()])
+            .unwrap()
+            .is_empty());
+        assert_eq!(receiver.held(), std::slice::from_ref(&other));
         assert_eq!(state(&mut receiver), before);
+        // Held once, however often it arrives.
+        assert_eq!(
+            receiver.apply_change(other.clone()),
+            Ok(ChangeOutcome::Held)
+        );
+        assert_eq!(receiver.held().len(), 1);
+        // A rebuild that removes nothing leaves it held.
+        assert_eq!(receiver.exclude(&[]).unwrap(), Excluded::default());
+        assert_eq!(receiver.held().len(), 1);
+        // Excluding the change that holds the sequence applies it.
+        let excluded = receiver.exclude(&[second.hash()]).unwrap();
+        assert_eq!(excluded.removed, vec![second.hash()]);
+        assert_eq!(excluded.applied, vec![other.hash()]);
+        assert!(receiver.held().is_empty());
+        assert_eq!(receiver.heads(), vec![other.hash()]);
+        assert_eq!(receiver.apply_change(other), Ok(ChangeOutcome::Duplicate));
     }
 
     #[test]
@@ -1367,8 +1517,9 @@ mod admission_tests {
 
     #[test]
     fn merge_goes_through_admission() {
-        // M8: a replica whose history equivocates with ours is refused by
-        // merge as by apply_changes, and the document stays as it was.
+        // M8: a replica whose history equivocates with ours goes through
+        // merge as through apply_changes: its change is held (§14.1), and
+        // the document stays as it was.
         let (first, second, _) = crafted();
         let mut twin = SharedObjects::new(actor(1));
         twin.apply_changes(vec![first.clone()]).unwrap();
@@ -1378,8 +1529,8 @@ mod admission_tests {
             .apply_changes(vec![first.clone(), second.clone()])
             .unwrap();
         let before = state(&mut receiver);
-        let err = receiver.merge(&mut twin).unwrap_err();
-        assert_eq!(err, ProfileError::SequenceTaken { seq: 2, latest: 2 });
+        assert!(receiver.merge(&mut twin).unwrap().is_empty());
+        assert_eq!(receiver.held().len(), 1, "the twin's change is held");
         assert_eq!(state(&mut receiver), before);
         put_root(&mut receiver, "after", "ok");
         SharedObjects::load(&receiver.save(), actor(2)).unwrap();
@@ -1418,13 +1569,17 @@ mod admission_tests {
             .apply_changes(vec![again.clone()])
             .unwrap()
             .is_empty());
-        // One that still holds it sees the sequence taken, before the engine.
+        // One that still holds it holds the new change (§14.1), before the
+        // engine, until it rebuilds the same way.
         let mut stale = SharedObjects::new(actor(3));
-        stale.apply_changes(vec![crafted().0, second]).unwrap();
-        assert!(matches!(
-            stale.apply_changes(vec![again]),
-            Err(ProfileError::SequenceTaken { seq: 2, latest: 2 })
-        ));
+        stale
+            .apply_changes(vec![crafted().0, second.clone()])
+            .unwrap();
+        assert_eq!(stale.apply_change(again.clone()), Ok(ChangeOutcome::Held));
+        assert_eq!(
+            stale.exclude(&[second.hash()]).unwrap().applied,
+            vec![again.hash()]
+        );
     }
 
     #[test]
@@ -1461,14 +1616,19 @@ mod admission_tests {
         assert_eq!(receiver.heads(), vec![first.hash()]);
         assert!(receiver.apply_changes(vec![second]).unwrap().is_empty());
         SharedObjects::load(&receiver.save(), actor(2)).unwrap();
-        // Two changes for one actor sequence in one batch: equivocation.
+        // Two changes for one actor sequence in one batch: the later one is
+        // held (§14.1), the batch goes on.
         let mut twin = SharedObjects::new(actor(1));
         twin.apply_changes(vec![first.clone()]).unwrap();
         let other = put_root(&mut twin, "note", "other");
         let (_, second, _) = crafted();
         let mut fresh = SharedObjects::new(actor(4));
-        let err = fresh.apply_changes(vec![first, second, other]).unwrap_err();
-        assert_eq!(err.code(), Some("ACTOR_EQUIVOCATION"));
+        assert!(fresh
+            .apply_changes(vec![first, second.clone(), other.clone()])
+            .unwrap()
+            .is_empty());
+        assert_eq!(fresh.heads(), vec![second.hash()]);
+        assert_eq!(fresh.held(), std::slice::from_ref(&other));
     }
 
     #[test]
