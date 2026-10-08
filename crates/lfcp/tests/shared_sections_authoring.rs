@@ -246,8 +246,12 @@ fn invalid_intents_are_refused_before_writing() {
     );
     assert_eq!(
         doc.move_node(X, SECTION, None, &slot(1), &me),
-        Err(AuthoringError::InvalidId)
+        Err(AuthoringError::IdInUse)
     );
+    // SDK-SECTIONS-INTEGRATION-01 §3.6.
+    assert_eq!(AuthoringError::IdInUse.code(), "ID_IN_USE");
+    assert_eq!(AuthoringError::InvalidId.code(), "INVALID_INTENT");
+    assert_eq!(AuthoringError::WouldCycle.code(), "INVALID_PARENT");
     assert_eq!(
         doc.create_node(
             "not-a-uuid",

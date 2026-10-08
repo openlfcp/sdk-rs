@@ -771,8 +771,10 @@ pub enum AuthoringError {
     /// A node would become its own ancestor (a self-, descendant- or
     /// self-predecessor move).
     WouldCycle,
-    /// An ID is not a canonical UUIDv7, or is already used.
+    /// An ID is not a canonical UUIDv7.
     InvalidId,
+    /// A new ID is already used in the Resource (§3).
+    IdInUse,
     /// The node's Text changed since the base the edit was computed on
     /// (§10): its offsets must be rebased first.
     StaleBase,
@@ -782,6 +784,22 @@ pub enum AuthoringError {
     NotApplicable,
     /// The engine refused the write.
     Profile(ProfileError),
+}
+
+impl AuthoringError {
+    /// The refusal code of SDK-SECTIONS-INTEGRATION-01 §3.6, the same in
+    /// every SDK.
+    pub fn code(&self) -> &'static str {
+        match self {
+            AuthoringError::UnknownNode => "UNKNOWN_NODE",
+            AuthoringError::InvalidParent | AuthoringError::WouldCycle => "INVALID_PARENT",
+            AuthoringError::InvalidPredecessor => "INVALID_PREDECESSOR",
+            AuthoringError::InvalidId | AuthoringError::NotApplicable => "INVALID_INTENT",
+            AuthoringError::IdInUse => "ID_IN_USE",
+            AuthoringError::StaleBase => "STALE_BASE",
+            AuthoringError::Profile(_) => "PROFILE_INVALID",
+        }
+    }
 }
 
 impl From<automerge::AutomergeError> for AuthoringError {
@@ -1014,11 +1032,23 @@ impl SectionsDoc {
         Ok(())
     }
 
-    fn fresh(&self, id: &str) -> bool {
-        is_uuidv7(id)
-            && !self.nodes().contains_key(id)
-            && !self.placements().contains_key(id)
-            && !self.task_ids().contains(id)
+    /// `ids` are new IDs for one intent: canonical UUIDv7s
+    /// ([`AuthoringError::InvalidId`]) not used in the Resource nor twice
+    /// among themselves ([`AuthoringError::IdInUse`], §3).
+    fn check_new(&self, ids: &[&str]) -> Result<(), AuthoringError> {
+        if ids.iter().any(|id| !is_uuidv7(id)) {
+            return Err(AuthoringError::InvalidId);
+        }
+        let (nodes, placements, tasks) = (self.nodes(), self.placements(), self.task_ids());
+        let mut seen = HashSet::new();
+        for id in ids {
+            let used =
+                nodes.contains_key(*id) || placements.contains_key(*id) || tasks.contains(*id);
+            if used || !seen.insert(*id) {
+                return Err(AuthoringError::IdInUse);
+            }
+        }
+        Ok(())
     }
 
     /// `task.create_in_section`, `paragraph.create`, `item.create`,
@@ -1034,9 +1064,7 @@ impl SectionsDoc {
         placement_id: &str,
         author: &PrincipalId,
     ) -> Result<Change, AuthoringError> {
-        if !self.fresh(node_id) || !self.fresh(placement_id) || node_id == placement_id {
-            return Err(AuthoringError::InvalidId);
-        }
+        self.check_new(&[node_id, placement_id])?;
         let (lane, index) = self.insertion_index(parent, after)?;
         let author = crate::shared_objects::identity::principal_ref(author);
         let (intent, kind) = match content {
@@ -1161,9 +1189,7 @@ impl SectionsDoc {
         if after == Some(node) || self.is_ancestor(node, parent) {
             return Err(AuthoringError::WouldCycle);
         }
-        if !self.fresh(placement_id) {
-            return Err(AuthoringError::InvalidId);
-        }
+        self.check_new(&[placement_id])?;
         let (lane, index) = self.insertion_index(parent, after)?;
         let author = crate::shared_objects::identity::principal_ref(author);
         self.transact(intent, |d| {
@@ -1283,9 +1309,7 @@ impl SectionsDoc {
         {
             return Err(AuthoringError::NotApplicable);
         }
-        if !self.fresh(new_node) || !self.fresh(placement_id) || new_node == placement_id {
-            return Err(AuthoringError::InvalidId);
-        }
+        self.check_new(&[new_node, placement_id])?;
         let parent = self
             .placements()
             .get(&current.placements[0])
