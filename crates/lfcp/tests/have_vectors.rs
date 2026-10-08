@@ -301,3 +301,47 @@ fn control_get_follows_control_have() {
         "CONTROL_BATCH: sequences"
     );
 }
+
+#[test]
+fn have_difference_requests_and_offers() {
+    // §68.1 (SPEC-PATCH-09): what a replica requests from a peer and what it
+    // offers it, per actor, as minimal inclusive ranges.
+    let suite = Suite::load();
+    let have = |case_id: &str, field: &serde_json::Value| {
+        let value = cbor::decode_strict(&hex(case_id, field)).unwrap();
+        HaveVector::from_frontier(&Frontier::from_value(&value).unwrap())
+    };
+    let ranges = |list: &serde_json::Value| {
+        let mut out: Vec<DataRange> = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| DataRange {
+                principal: principal(&suite, r["actor"].as_str().unwrap()),
+                start: r["start"].as_u64().unwrap(),
+                end: r["end"].as_u64().unwrap(),
+            })
+            .collect();
+        out.sort_by_key(|r| (*r.principal.as_bytes(), r.start));
+        out
+    };
+    let mut checked = 0;
+    for case in suite.cases().filter(|c| c["kind"] == "have_difference") {
+        let case_id = case["id"].as_str().unwrap();
+        let local = have(case_id, &case["inputs"]["local_have_cbor"]);
+        let remote = have(case_id, &case["inputs"]["remote_have_cbor"]);
+        let got = difference(&local, &remote);
+        assert_eq!(
+            got.request,
+            ranges(&case["expected"]["request"]),
+            "{case_id}: request"
+        );
+        assert_eq!(
+            got.offer,
+            ranges(&case["expected"]["offer"]),
+            "{case_id}: offer"
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, 4, "have_difference cases");
+}
