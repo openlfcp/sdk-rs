@@ -37,6 +37,7 @@ pub mod depth;
 pub mod document;
 pub mod expansion;
 pub mod framing;
+pub(crate) mod history;
 pub mod identity;
 pub mod validate;
 pub mod values;

@@ -49,6 +49,7 @@ use crate::base::{ObjectId, PrincipalId, ResourceId};
 use crate::shared_objects::depth::{self, Depths, ObjKey};
 use crate::shared_objects::expansion;
 use crate::shared_objects::framing::decode_change;
+use crate::shared_objects::history::{Additions, History, Overlay};
 use crate::shared_objects::identity::actor_id_bytes;
 use crate::shared_objects::identity::principal_ref;
 use crate::shared_objects::validate::{self, values_of, ObjectStatus};
@@ -173,6 +174,8 @@ pub struct SharedObjects {
     seqs: HashMap<ActorId, u64>,
     /// The depth of every object in `doc` (§11.2).
     depths: Depths,
+    /// The operations and causal clocks of `doc`'s history (§11.4).
+    history: History,
     /// §14.1 (POST-001): received changes whose actor and sequence number
     /// another change in `doc` holds, in arrival order. Retried after every
     /// rebuild that removes changes ([`SharedObjects::exclude`]).
@@ -229,10 +232,16 @@ struct Batch {
     hashes: std::collections::HashSet<ChangeHash>,
     seqs: HashMap<ActorId, u64>,
     depths: Depths,
+    history: Overlay,
 }
 
-/// The objects an admitted change creates, with their depths (§11.2).
-type Created = Vec<(ObjKey, u32)>;
+/// What an admitted change adds: the objects it creates, with their
+/// depths (§11.2), and its operations (§11.4).
+#[derive(Clone, Debug, Default)]
+struct Created {
+    objects: Vec<(ObjKey, u32)>,
+    history: Additions,
+}
 
 /// What the §14.1 check decides for one received change.
 enum Admission {
@@ -253,6 +262,7 @@ impl SharedObjects {
             time: 0,
             seqs: HashMap::new(),
             depths: Depths::new(),
+            history: History::default(),
             held: Vec::new(),
         }
     }
@@ -260,11 +270,15 @@ impl SharedObjects {
     fn with_doc(mut doc: AutoCommit, time: i64) -> Result<SharedObjects, ProfileError> {
         let seqs = seqs_of(&mut doc);
         let depths = depth::depths_of(&mut doc)?;
+        // A document holding a change §11.3 or §11.4 refuses is refused
+        // whole: its changes could not be written back out.
+        let history = History::of(&mut doc)?;
         Ok(SharedObjects {
             doc,
             time,
             seqs,
             depths,
+            history,
             held: Vec::new(),
         })
     }
@@ -353,7 +367,8 @@ impl SharedObjects {
                 Ok(Admission::Apply(created)) => {
                     batch.seqs.insert(change.actor_id().clone(), change.seq());
                     batch.hashes.insert(change.hash());
-                    batch.depths.extend(created.iter().cloned());
+                    batch.depths.extend(created.objects.iter().cloned());
+                    batch.history.add(&created.history);
                     admitted.push((change.clone(), created));
                 }
                 Err(ProfileError::MissingDependencies(_)) => {
@@ -457,8 +472,12 @@ impl SharedObjects {
                 .or_else(|| self.depths.get(key))
                 .copied()
         };
-        let created = depth::created_objects(change, known, Some(depth::MAX_DEPTH))?;
-        Ok(Admission::Apply(created))
+        // §11.3, §11.4: canonical bytes, and operations that refer only to
+        // the change's own history. Checked before the depth walk decodes
+        // the change.
+        let history = self.history.check_change(change, &batch.history)?;
+        let objects = depth::created_objects(change, known, Some(depth::MAX_DEPTH))?;
+        Ok(Admission::Apply(Created { objects, history }))
     }
 
     /// Hand admitted changes to the engine in one call, with one backup. If
@@ -473,7 +492,7 @@ impl SharedObjects {
             Ok(Ok(())) => {
                 for (c, created) in changes {
                     self.seqs.insert(c.actor_id().clone(), c.seq());
-                    self.depths.extend(created);
+                    self.add(created);
                 }
                 Ok(())
             }
@@ -505,6 +524,21 @@ impl SharedObjects {
             }
             Err(err) => Err(err),
         }
+    }
+
+    /// Record what an admitted change added.
+    fn add(&mut self, created: Created) {
+        self.depths.extend(created.objects);
+        self.history.add(created.history);
+    }
+
+    /// The §11.3 or §11.4 rule `change` breaks against this document's
+    /// history ("C", "R1" to "R7"), or `None` when it keeps them. For
+    /// tests and vectors; admission refuses such a change with
+    /// `INVALID_AUTOMERGE_BYTES`.
+    #[doc(hidden)]
+    pub fn broken_rule(&mut self, change: &Change) -> Option<&'static str> {
+        self.history.rule_of(change, &Overlay::default()).err()
     }
 
     /// Keep `change` held, once.
@@ -549,6 +583,7 @@ impl SharedObjects {
             self.doc = doc;
             self.seqs = seqs_of(&mut self.doc);
             self.depths = depth::depths_of(&mut self.doc)?;
+            self.history = History::of(&mut self.doc)?;
         }
         let mut applied = Vec::new();
         loop {
@@ -587,7 +622,7 @@ impl SharedObjects {
         match outcome {
             Ok(Ok(())) => {
                 self.seqs.insert(actor, seq);
-                self.depths.extend(created);
+                self.add(created);
                 Ok(())
             }
             Ok(Err(_)) | Err(_) => {
@@ -630,6 +665,7 @@ impl SharedObjects {
             time: self.time,
             seqs: self.seqs.clone(),
             depths: self.depths.clone(),
+            history: self.history.clone(),
             held: Vec::new(),
         }
     }
@@ -825,6 +861,15 @@ impl SharedObjects {
                     return Err(ProfileError::ObjectTooDeep);
                 }
             }
+            // §11.3, §11.4: the engine writes canonical changes that refer
+            // to their own history; one that does not is taken back out.
+            match self.history.check_change(c, &Overlay::default()) {
+                Ok(added) => self.history.add(added),
+                Err(err) => {
+                    self.remove_change(&c.hash())?;
+                    return Err(err);
+                }
+            }
             self.seqs.insert(c.actor_id().clone(), c.seq());
         }
         Ok(change)
@@ -845,6 +890,7 @@ impl SharedObjects {
         self.doc = doc;
         self.seqs = seqs_of(&mut self.doc);
         self.depths = depth::depths_of(&mut self.doc)?;
+        self.history = History::of(&mut self.doc)?;
         Ok(())
     }
 
@@ -1310,7 +1356,7 @@ mod admission_tests {
         receiver.apply_changes(vec![first]).unwrap();
         let before = state(&mut receiver);
         assert_eq!(
-            receiver.engine_apply(gapped, Vec::new()),
+            receiver.engine_apply(gapped, Created::default()),
             Err(ProfileError::Invalid(Diagnostic::InvalidAutomergeBytes))
         );
         assert_eq!(state(&mut receiver), before);
