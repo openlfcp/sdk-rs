@@ -61,6 +61,8 @@ zeroize = { version = "1", default-features = false, features = ["alloc"] }
 default = []
 # lfcp::shared_objects: the Shared Objects profile on Automerge.
 shared-objects = ["dep:automerge", "dep:flate2"]
+# lfcp::shared_sections: the Shared Sections profile (MVP 0.2 Working Draft).
+shared-sections = ["shared-objects"]
 
 [[test]]
 name = "shared_objects_vectors"

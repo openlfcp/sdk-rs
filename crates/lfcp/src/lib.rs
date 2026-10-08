@@ -15,7 +15,10 @@
 //! - `shared_objects` (feature `shared-objects`): the Shared Objects profile
 //!   on Automerge (SHARED-OBJECTS-PROFILE-01), carried in Data Units and
 //!   Snapshots. The default build is the protocol core only, without
-//!   Automerge.
+//!   Automerge;
+//! - `shared_sections` (feature `shared-sections`): the Shared Sections
+//!   profile (SHARED-SECTIONS-PROFILE-01, Working Draft for MVP 0.2), which
+//!   inherits the Shared Objects engine rules.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -27,4 +30,6 @@ pub mod crypto;
 pub mod principal;
 #[cfg(feature = "shared-objects")]
 pub mod shared_objects;
+#[cfg(feature = "shared-sections")]
+pub mod shared_sections;
 pub mod wire;

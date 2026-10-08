@@ -48,6 +48,16 @@ Implemented and checked against the official vectors:
   actor sequence is taken until a rebuild frees it (§14.1); checked against
   SHARED-OBJECTS-TEST-VECTORS-01 and the Automerge reference corpus.
 
+In progress for MVP 0.2, feature `shared-sections`:
+
+- the Shared Sections profile (LFCP-02-019): dispatch on the Genesis
+  profile, actor IDs with the profile's domain, the typed view of a
+  section document (section, nodes, placements, Text versus scalar
+  fields, readiness) and the per-node problems of
+  SHARED-SECTIONS-PROFILE-01 §14.2; checked against
+  SHARED-SECTIONS-TEST-VECTORS-01 at the `spec-sections.lock` pin. The
+  tree, admission and Text operations follow (LFCP-02-020 to 022).
+
 The LFCP protocol layer of this SDK (LFCP-041 to LFCP-043) is complete
 for MVP 0.1: every LFCP-TEST-VECTORS-01 case is decided in scope.
 
