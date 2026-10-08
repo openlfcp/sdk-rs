@@ -7,3 +7,12 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/openlfcp/sdk-rs"
+
+# Automerge does the heavy lifting of the shared-objects and shared-sections
+# tests; unoptimized, the long histories of the sections corpus take minutes.
+# Debug builds optimize it; release builds are unaffected.
+[profile.dev.package.automerge]
+opt-level = 3
+
+[profile.dev.package.hexane]
+opt-level = 3
