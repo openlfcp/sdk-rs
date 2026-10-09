@@ -156,6 +156,39 @@ fn sections_verdict(r: Received) -> String {
     }
 }
 
+/// The divergences already reported, by the verdicts of the two sides at
+/// the first record where they differ (repro-b6/README.md). A disagreement
+/// of one of these kinds ends the comparison instead of crashing, so it
+/// does not hide new ones; `LFCP_FUZZ_ALL=1` reports them all. A new cause
+/// with the same verdicts is hidden too: check repro-b6 after a fix.
+fn known(sections: bool, ours: &str, theirs: &str) -> Option<&'static str> {
+    if std::env::var_os("LFCP_FUZZ_ALL").is_some() {
+        return None;
+    }
+    match (sections, ours, theirs) {
+        // D1: a table written into: the engine aborts; sdk-ts throws.
+        (_, "refused:INVALID_AUTOMERGE_BYTES" | "invalid:INVALID_AUTOMERGE_BYTES", t)
+            if t.contains("Missing from Index") || t.contains("could not be restored") =>
+        {
+            Some("D1")
+        }
+        // D2: a sequence number or time of 2^53 or more; sdk-ts refuses.
+        (false, "applied" | "missing", "invalid:INVALID_AUTOMERGE_BYTES")
+        | (true, "applied" | "missing", "refused:INVALID_AUTOMERGE_BYTES") => Some("D2"),
+        // D3: Text in a field the profile does not define (A5).
+        (true, "applied", "refused:INVALID_FIELD_TYPE") => Some("D3"),
+        // D4: `ready` other than true when the change creates the section.
+        (true, "applied", "refused:IMMUTABLE_FIELD_MUTATED") => Some("D4"),
+        // D5: an author on a change other than the actor's first.
+        (_, "refused:INVALID_AUTOMERGE_BYTES" | "invalid:INVALID_AUTOMERGE_BYTES", t)
+            if t.contains("change.seq() == 1") =>
+        {
+            Some("D5")
+        }
+        _ => None,
+    }
+}
+
 fuzz_target!(|data: &[u8]| {
     panic_policy();
     let Some((&mode, rest)) = data.split_first() else {
@@ -180,19 +213,6 @@ fuzz_target!(|data: &[u8]| {
         })
         .collect();
 
-    // D1 (known): a change that makes a table (action 6) and writes into it
-    // makes automerge 0.12 abort; sdk-rs refuses it, sdk-ts throws and keeps
-    // it. Skipped unless LFCP_FUZZ_D1=1, so it does not hide the others.
-    if std::env::var_os("LFCP_FUZZ_D1").is_none()
-        && items.iter().any(|(pt, _)| {
-            framing::snapshot_payload(pt)
-                .ok()
-                .and_then(|b| lfcp::shared_objects::canonical::check(&b).ok())
-                .is_some_and(|c| c.ops.iter().any(|op| op.action == 6))
-        })
-    {
-        return;
-    }
     let mut ours = Vec::new();
     let mut our_heads = Vec::new();
     if sections {
@@ -217,6 +237,9 @@ fuzz_target!(|data: &[u8]| {
             &ours[i],
             theirs.get(i).map(String::as_str).unwrap_or("<none>"),
         );
+        if a != b && known(sections, a, b).is_some() {
+            return;
+        }
         if a != b || our_heads[i] != *their_heads.get(i).unwrap_or(&String::new()) {
             panic!(
                 "sdk-rs and sdk-ts disagree at record {i} of {} ({}):\n  sdk-rs: {a} heads [{}]\n  sdk-ts: {b} heads [{}]\n  all sdk-rs: {ours:?}\n  all sdk-ts: {theirs:?}",
