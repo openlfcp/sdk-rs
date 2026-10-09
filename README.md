@@ -71,6 +71,15 @@ In progress for MVP 0.2, feature `shared-sections`:
   reverse with duplicates to the corpus's refusals, held changes, heads
   and tree.
 
+Not implemented: the adapter integration layer of
+SDK-SECTIONS-INTEGRATION-01, that is commit receipts and their release
+(§3), batch statuses (§4), status events (§5), write access (§6) and the
+adapter's journal (§7). sdk-rs has no local commit pipeline, outbound
+queue or sync session, so these contracts do not apply to it yet,
+including the rule that a batch released before its status is final is
+still reported until it is (§3.5, prepared for `mvp-0.2-baseline.4`).
+sdk-ts implements them.
+
 The LFCP protocol layer of this SDK (LFCP-041 to LFCP-043) is complete
 for MVP 0.1: every LFCP-TEST-VECTORS-01 case is decided in scope.
 
