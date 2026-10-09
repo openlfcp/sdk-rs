@@ -19,8 +19,7 @@ fn wire_vectors_load_at_the_locked_commit() {
 fn the_baseline_holds_the_shared_sections_corpus() {
     // mvp-0.2-baseline.1: the MVP 0.1 baseline plus the shared sections files.
     let spec = Spec::open();
-    let vectors =
-        spec.read_json("test-vectors/shared-sections-01/SHARED-SECTIONS-TEST-VECTORS-01.json");
+    let vectors = support::sections::read_sections_corpus(&spec);
     assert_eq!(vectors["suite"], "SHARED-SECTIONS-TEST-VECTORS-01");
     assert_eq!(vectors["profile"], "org.openlfcp.shared-sections.v1");
 }

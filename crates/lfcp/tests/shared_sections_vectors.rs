@@ -18,12 +18,11 @@ use automerge::Change;
 use lfcp::base::{self, PrincipalId, ResourceId};
 use lfcp::shared_sections::{self, DataProfile, NodeKind, SectionsDoc};
 use serde_json::Value as Json;
+use support::sections::read_sections_corpus;
 use support::spec::Spec;
 
-const CORPUS: &str = "test-vectors/shared-sections-01/SHARED-SECTIONS-TEST-VECTORS-01.json";
-
 fn corpus() -> Json {
-    Spec::open().read_json(CORPUS)
+    read_sections_corpus(&Spec::open())
 }
 
 /// Standard base64 with padding, as the corpus stores bytes.
