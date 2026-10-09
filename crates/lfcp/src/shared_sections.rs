@@ -1955,6 +1955,63 @@ fn object_id(doc: &AutoCommit, obj: &ObjId, key: &str) -> Option<ObjId> {
     }
 }
 
+/// A change's operations on the lists it writes into, by list.
+struct ListOps {
+    by_list: HashMap<ObjId, Vec<(automerge::legacy::OpId, automerge::legacy::Op)>>,
+}
+
+impl ListOps {
+    fn of(next: &AutoCommit, change: &Change) -> ListOps {
+        let actor = change.actor_id().clone();
+        let start = change.start_op().get();
+        let mut ids: HashMap<String, Option<ObjId>> = HashMap::new();
+        let mut by_list: HashMap<ObjId, Vec<_>> = HashMap::new();
+        for (i, op) in change.decode().operations.into_iter().enumerate() {
+            let obj = op.obj.to_string();
+            let id = ids
+                .entry(obj.clone())
+                .or_insert_with(|| next.import_obj(&obj).ok())
+                .clone();
+            if let (Some(id), automerge::legacy::Key::Seq(_)) = (id, &op.key) {
+                let op_id = automerge::legacy::OpId(start + i as u64, actor.clone());
+                by_list.entry(id).or_default().push((op_id, op));
+            }
+        }
+        ListOps { by_list }
+    }
+
+    /// The scalar strings the change adds to `list` and keeps there, when
+    /// every operation on it inserts a string or writes or deletes an
+    /// element the change itself inserted; otherwise `None`. In that case
+    /// no element the list had before is removed or changed, so the old
+    /// list is a subsequence of the new one, and the entries the new list
+    /// adds are exactly these.
+    fn added(&self, list: &ObjId) -> Option<Vec<String>> {
+        use automerge::legacy::{ElementId, Key, OpType};
+        let Some(ops) = self.by_list.get(list) else {
+            return Some(Vec::new());
+        };
+        let mut own: Vec<(automerge::legacy::OpId, Option<String>)> = Vec::new();
+        for (id, op) in ops {
+            let string = match &op.action {
+                OpType::Put(ScalarValue::Str(s)) => Some(s.to_string()),
+                OpType::Delete => None,
+                _ => return None,
+            };
+            if op.insert {
+                own.push((id.clone(), Some(string?)));
+                continue;
+            }
+            let Key::Seq(ElementId::Id(target)) = &op.key else {
+                return None;
+            };
+            let slot = own.iter_mut().find(|(e, v)| e == target && v.is_some())?;
+            slot.1 = string;
+        }
+        Some(own.into_iter().filter_map(|(_, v)| v).collect())
+    }
+}
+
 /// Whether `before` is a subsequence of `after`.
 fn is_subsequence(before: &[String], after: &[String]) -> bool {
     let mut i = 0;
@@ -2249,7 +2306,24 @@ fn structural_refusal(
         .cloned()
         .collect();
     let mut inserted_into: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let list_ops = ListOps::of(next, change);
     for (owner, old, new) in &lanes {
+        // A list the change only appends to: its entries are the ones the
+        // change inserts and keeps, read from its operations, in time
+        // linear in the change (LFCP-02-111, T1). Anything else compares
+        // the whole list before and after, as below.
+        if old.as_ref() == Some(new) {
+            if let Some(added) = list_ops.added(new) {
+                for v in added {
+                    if created.contains(&v) {
+                        inserted_into.entry(v).or_default().push(owner.clone());
+                    } else {
+                        found.insert(Refusal::PlacementNotAtomic);
+                    }
+                }
+                continue;
+            }
+        }
         let after = list_values(next, new);
         let before: Vec<String> = match old {
             Some(o) => list_strings(prev, o),
