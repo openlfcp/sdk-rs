@@ -24,15 +24,14 @@ struct State {
     held: Vec<ChangeHash>,
 }
 
-/// The replica's state, or None when reading it panics (F4).
-fn state(doc: &mut SharedObjects) -> Option<State> {
+fn state(doc: &mut SharedObjects) -> State {
     let mut heads = doc.heads();
     heads.sort();
-    Some(State {
+    State {
         heads,
-        changes: known_f4(|| doc.changes().len())?,
+        changes: doc.changes().len(),
         held: doc.held().iter().map(Change::hash).collect(),
-    })
+    }
 }
 
 type Verdict = Result<ChangeOutcome, ProfileError>;
@@ -55,25 +54,15 @@ struct Totals {
     strings: u64,
 }
 
-/// The verdicts and the final state; None once the replica is poisoned
-/// (F4), which ends the run.
-fn run(data: &[u8]) -> (Vec<Verdict>, Option<State>) {
+fn run(data: &[u8]) -> (Vec<Verdict>, State) {
     let mut doc = SharedObjects::new(ActorId::from([1u8; 32]));
     let mut verdicts = Vec::new();
     let mut totals = Totals::default();
     for record in records(data) {
         let plaintext = plaintext(&record);
-        if known_f2(&plaintext) {
-            continue;
-        }
-        let Some(before) = state(&mut doc) else {
-            return (verdicts, None);
-        };
+        let before = state(&mut doc);
         let verdict = deliver(&mut doc, &record, &plaintext);
-        let Some(after) = state(&mut doc) else {
-            verdicts.push(verdict);
-            return (verdicts, None);
-        };
+        let after = state(&mut doc);
         match &verdict {
             Ok(ChangeOutcome::Applied) => {
                 assert_eq!(
@@ -105,11 +94,7 @@ fn run(data: &[u8]) -> (Vec<Verdict>, Option<State>) {
             Ok(ChangeOutcome::Applied) => assert_eq!(again, Ok(ChangeOutcome::Duplicate)),
             v => assert_eq!(&again, v, "a repeat changed the verdict"),
         }
-        assert_eq!(
-            state(&mut doc).as_ref(),
-            Some(&after),
-            "a repeat altered the replica"
-        );
+        assert_eq!(state(&mut doc), after, "a repeat altered the replica");
         verdicts.push(verdict);
     }
     // A document of admitted changes within the floor is a Snapshot.
@@ -120,9 +105,6 @@ fn run(data: &[u8]) -> (Vec<Verdict>, Option<State>) {
     {
         let save = doc.save();
         if let Err(err) = framing::decode_snapshot(&framing::encode_snapshot(&save)) {
-            if known_f3(&save) {
-                return (verdicts, state(&mut doc));
-            }
             let limits = expansion::check_snapshot(&save, &floor).map(|_| ());
             let depth = expansion::check_snapshot_depth(&save, &floor).map(|_| ());
             let load = SharedObjects::load(&save, ActorId::from([2u8; 32])).map(|_| ());

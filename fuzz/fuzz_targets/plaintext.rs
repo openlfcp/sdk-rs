@@ -10,9 +10,6 @@ use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
     panic_policy();
-    if known_f2(data) {
-        return;
-    }
     let change = framing::decode_change(data).map(|c| c.hash());
     assert_eq!(change, framing::decode_change(data).map(|c| c.hash()));
     let snapshot = framing::decode_snapshot(data);

@@ -34,14 +34,8 @@ every panic, including those the library catches as defense in depth; the
 targets restore a printing hook so only an uncaught panic is a crash, and
 `LFCP_FUZZ_STRICT=1` keeps abort-on-any-panic.
 
-## Known findings
+## Fixed findings
 
-The targets skip inputs of findings not fixed yet, so they do not mask
-other paths. Set the variable to deliver them again (for example to check
-a fix):
-
-| Variable | Finding |
-| --- | --- |
-| `LFCP_FUZZ_F2=1` | `decode_change` panics in automerge's `OpId::new` on a counter above `u32::MAX` |
-| `LFCP_FUZZ_F3=1` | admission accepts a change Automerge applies but cannot reproduce (a non-canonical column, a predecessor on another key or list element, a delete without a predecessor, an empty change whose start op is not the actor's next); the document's save then fails to load |
-| `LFCP_FUZZ_F4=1` | on such a document `SharedObjects::changes` (`get_changes`) and a later `SectionsReplica::receive` (`get_change_by_hash`) panic in Automerge's change collector |
+F1-F4 of the first campaign are fixed (sdk-rs 4d187ac, 60dc68a, 25e45ae,
+2fc9fa5); the targets no longer skip their inputs, and their reproducers
+replay clean.
