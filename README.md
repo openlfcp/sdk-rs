@@ -121,14 +121,16 @@ builds on the stable Rust toolchain; no older minimum version is promised.
 `spec.lock` pins the specification this SDK implements:
 
 ```json
-{ "tag": "mvp-0.2-baseline.2", "commit": "4198c43ea89d681efa5654a020b2f7b578f90df7" }
+{ "tag": "mvp-0.2-baseline.3", "commit": "8076d89852be334b24e4077c30df32c8ef65d9be" }
 ```
 
-`mvp-0.2-baseline.2` is the MVP 0.1 baseline `mvp-0.1-baseline.10`
+`mvp-0.2-baseline.3` is the MVP 0.1 baseline `mvp-0.1-baseline.10`
 unchanged, plus the shared sections profile, its Markdown grammar, the SDK
 integration contracts and their corpus (in `lfcp-vector-format/1`), with
 the canonical change encoding and operation references of SPEC-PATCH-10
-(SHARED-OBJECTS-PROFILE-01 §11.3, §11.4).
+(SHARED-OBJECTS-PROFILE-01 §11.3, §11.4) and a lifecycle conflict that
+blocks its branch instead of hiding it (SHARED-SECTIONS-PROFILE-01 §7.6,
+case SS60).
 
 Vectors are never copied into this repository. The tests read them from a
 checkout of `openlfcp/spec` with `git show <commit>:<path>`, so the state of
