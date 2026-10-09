@@ -554,6 +554,44 @@ fn admission(quick: bool) {
             &typing(&writer, chars, k),
         );
     }
+    // The engine alone: the same typing changes applied one at a time to a
+    // plain Automerge document, without any admission.
+    for (chars, k) in if quick {
+        vec![(10_000, 16)]
+    } else {
+        vec![(50_000, 16)]
+    } {
+        let units = typing(&writer, chars, k);
+        let mut doc = AutoCommit::new();
+        let mut times = Vec::with_capacity(units.len());
+        for u in &units {
+            let change = framing::decode_change(u).unwrap();
+            let t = Instant::now();
+            doc.apply_changes(vec![change]).unwrap();
+            times.push(t.elapsed().as_secs_f64() * 1e6);
+        }
+        let total: f64 = times.iter().sum();
+        let tail = &times[times.len() * 9 / 10..];
+        let tail_mean = tail.iter().sum::<f64>() / tail.len() as f64;
+        let mut sorted = times.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let name = format!("engine only: typing {chars}, k = {k}");
+        println!(
+            "{:<34} {:>7} {:>8} {:>10.0} {:>10.0} {:>10.0} {:>10.0}",
+            name,
+            units.len(),
+            units.len(),
+            total / 1e3,
+            percentile(&sorted, 0.5),
+            percentile(&sorted, 0.99),
+            tail_mean
+        );
+        rows.push(json!({
+            "workload": name, "units": units.len(), "total_ms": total / 1e3,
+            "p50_us": percentile(&sorted, 0.5), "p99_us": percentile(&sorted, 0.99),
+            "last_tenth_mean_us": tail_mean,
+        }));
+    }
     println!("{}", json!({ "part": "admission", "rows": rows }));
 }
 
@@ -601,7 +639,19 @@ fn authoring(quick: bool) {
         println!("{:>8} {:>12.0}", length, per);
         rows.push(json!({ "length": length, "us_per_edit": per }));
     }
-    println!("{}", json!({ "part": "authoring", "rows": rows }));
+    // Authoring the W200 import: one create_node per node.
+    let tasks = if quick { 50 } else { 200 };
+    let t = Instant::now();
+    let units = import(&writer, tasks);
+    let import_ms = t.elapsed().as_secs_f64() * 1e3;
+    println!(
+        "W{tasks} import authored: {} changes in {import_ms:.0} ms",
+        units.len()
+    );
+    println!(
+        "{}",
+        json!({ "part": "authoring", "rows": rows, "import": { "tasks": tasks, "changes": units.len(), "ms": import_ms } })
+    );
 }
 
 fn main() {
