@@ -198,9 +198,74 @@ pub struct SectionsDoc {
 
 const ROOT_MAPS: [&str; 5] = ["section", "objects", "nodes", "placements", "extensions"];
 
+/// The values of the section's `ready`, sorted, as debug strings.
+fn ready_values(d: &impl Read, s: &ObjId) -> Vec<String> {
+    let mut v: Vec<String> = d
+        .get_values(s, "ready".into())
+        .into_iter()
+        .map(|(v, _)| format!("{v:?}"))
+        .collect();
+    v.sort();
+    v
+}
+
+/// What the structural rules read from a document (§14.1): the document
+/// itself, or the same document as it was at earlier heads ([`At`]), so the
+/// state before a change is read without copying the document (T1, T2).
+trait Read {
+    fn get_value(&self, obj: &ObjId, prop: automerge::Prop) -> Option<(Value<'_>, ObjId)>;
+    fn get_values(&self, obj: &ObjId, prop: automerge::Prop) -> Vec<(Value<'_>, ObjId)>;
+    fn key_list(&self, obj: &ObjId) -> Vec<String>;
+    /// The visible values of a list, in order, in one pass.
+    fn list_items(&self, list: &ObjId) -> Vec<Value<'static>>;
+}
+
+impl Read for AutoCommit {
+    fn get_value(&self, obj: &ObjId, prop: automerge::Prop) -> Option<(Value<'_>, ObjId)> {
+        self.get(obj, prop).ok().flatten()
+    }
+    fn get_values(&self, obj: &ObjId, prop: automerge::Prop) -> Vec<(Value<'_>, ObjId)> {
+        self.get_all(obj, prop).unwrap_or_default()
+    }
+    fn key_list(&self, obj: &ObjId) -> Vec<String> {
+        self.keys(obj).collect()
+    }
+    fn list_items(&self, list: &ObjId) -> Vec<Value<'static>> {
+        self.list_range(list, ..)
+            .map(|i| i.value.into_value())
+            .collect()
+    }
+}
+
+/// A document as it was at `heads`, read in place.
+struct At<'a> {
+    doc: &'a AutoCommit,
+    heads: &'a [ChangeHash],
+}
+
+impl Read for At<'_> {
+    fn get_value(&self, obj: &ObjId, prop: automerge::Prop) -> Option<(Value<'_>, ObjId)> {
+        self.doc.get_at(obj, prop, self.heads).ok().flatten()
+    }
+    fn get_values(&self, obj: &ObjId, prop: automerge::Prop) -> Vec<(Value<'_>, ObjId)> {
+        self.doc
+            .get_all_at(obj, prop, self.heads)
+            .unwrap_or_default()
+    }
+    fn key_list(&self, obj: &ObjId) -> Vec<String> {
+        self.doc.keys_at(obj, self.heads).collect()
+    }
+    fn list_items(&self, list: &ObjId) -> Vec<Value<'static>> {
+        self.doc
+            .list_range_at(list, .., self.heads)
+            .map(|i| i.value.into_value())
+            .collect()
+    }
+}
+
 /// The scalar string at `key` of `obj`, if it is one.
-fn scalar(doc: &AutoCommit, obj: &ObjId, key: &str) -> Option<String> {
-    match doc.get(obj, key).ok().flatten()? {
+fn scalar(doc: &impl Read, obj: &ObjId, key: &str) -> Option<String> {
+    match doc.get_value(obj, key.into())? {
         (Value::Scalar(s), _) => match s.as_ref() {
             ScalarValue::Str(s) => Some(s.to_string()),
             _ => None,
@@ -210,10 +275,9 @@ fn scalar(doc: &AutoCommit, obj: &ObjId, key: &str) -> Option<String> {
 }
 
 /// Every concurrent value at `key` of `obj` that is a scalar string.
-fn scalars(doc: &AutoCommit, obj: &ObjId, key: &str) -> Vec<String> {
+fn scalars(doc: &impl Read, obj: &ObjId, key: &str) -> Vec<String> {
     let mut out: Vec<String> = doc
-        .get_all(obj, key)
-        .unwrap_or_default()
+        .get_values(obj, key.into())
         .into_iter()
         .filter_map(|(v, _)| match v {
             Value::Scalar(s) => match s.as_ref() {
@@ -228,18 +292,19 @@ fn scalars(doc: &AutoCommit, obj: &ObjId, key: &str) -> Vec<String> {
 }
 
 /// The object of type `ty` at `key` of `obj`.
-fn object(doc: &AutoCommit, obj: &ObjId, key: &str, ty: ObjType) -> Option<ObjId> {
-    match doc.get(obj, key).ok().flatten()? {
+fn object(doc: &impl Read, obj: &ObjId, key: &str, ty: ObjType) -> Option<ObjId> {
+    match doc.get_value(obj, key.into())? {
         (Value::Object(t), id) if t == ty => Some(id),
         _ => None,
     }
 }
 
 /// The scalar strings of the list `list`, in order.
-fn list_strings(doc: &AutoCommit, list: &ObjId) -> Vec<String> {
-    (0..doc.length(list))
-        .filter_map(|i| match doc.get(list, i).ok().flatten()? {
-            (Value::Scalar(s), _) => match s.as_ref() {
+fn list_strings(doc: &impl Read, list: &ObjId) -> Vec<String> {
+    doc.list_items(list)
+        .into_iter()
+        .filter_map(|v| match v {
+            Value::Scalar(s) => match s.as_ref() {
                 ScalarValue::Str(s) => Some(s.to_string()),
                 _ => None,
             },
@@ -1858,8 +1923,16 @@ impl SectionsReplica {
             // once, and restored when a rule refuses it.
             let resource = self.resource;
             let checked = change.clone();
-            let outcome = self.engine.apply_change_checked(change, |prev, next| {
-                structural_refusal(prev, next, &checked, &resource)
+            let outcome = self.engine.apply_change_checked(change, |before, next| {
+                structural_refusal(
+                    &At {
+                        doc: next,
+                        heads: before,
+                    },
+                    next,
+                    &checked,
+                    &resource,
+                )
             });
             return match outcome {
                 Ok(Ok(ChangeOutcome::Applied)) => Received::Applied,
@@ -1948,8 +2021,8 @@ impl SectionsReplica {
 }
 
 /// The object at `key` of `obj`, as its ID.
-fn object_id(doc: &AutoCommit, obj: &ObjId, key: &str) -> Option<ObjId> {
-    match doc.get(obj, key).ok().flatten()? {
+fn object_id(doc: &impl Read, obj: &ObjId, key: &str) -> Option<ObjId> {
+    match doc.get_value(obj, key.into())? {
         (Value::Object(_), id) => Some(id),
         _ => None,
     }
@@ -2033,10 +2106,11 @@ fn is_text(doc: &AutoCommit, obj: &ObjId, key: &str) -> bool {
 
 /// Every value of a list, scalar strings as themselves and anything else
 /// as `None`.
-fn list_values(doc: &AutoCommit, list: &ObjId) -> Vec<Option<String>> {
-    (0..doc.length(list))
-        .map(|i| match doc.get(list, i).ok().flatten() {
-            Some((Value::Scalar(s), _)) => match s.as_ref() {
+fn list_values(doc: &impl Read, list: &ObjId) -> Vec<Option<String>> {
+    doc.list_items(list)
+        .into_iter()
+        .map(|v| match v {
+            Value::Scalar(s) => match s.as_ref() {
                 ScalarValue::Str(s) => Some(s.to_string()),
                 _ => None,
             },
@@ -2113,21 +2187,21 @@ fn scope_of(next: &AutoCommit, change: &Change) -> Option<Scope> {
 
 /// The keys of `map` the rules look at: those of `wanted` that `map` holds
 /// (as `keys` lists them), or every key.
-fn keys_in(doc: &AutoCommit, map: &ObjId, wanted: Option<&BTreeSet<String>>) -> Vec<String> {
+fn keys_in(doc: &impl Read, map: &ObjId, wanted: Option<&BTreeSet<String>>) -> Vec<String> {
     match wanted {
         Some(ids) => ids
             .iter()
-            .filter(|k| doc.get(map, k.as_str()).ok().flatten().is_some())
+            .filter(|k| doc.get_value(map, k.as_str().into()).is_some())
             .cloned()
             .collect(),
-        None => doc.keys(map).collect(),
+        None => doc.key_list(map),
     }
 }
 
 /// The placements among `wanted` (every one when `None`), as
 /// [`SectionsDoc::placements`] reads them.
 fn placements_in(
-    doc: &AutoCommit,
+    doc: &impl Read,
     wanted: Option<&BTreeSet<String>>,
 ) -> BTreeMap<String, Placement> {
     let Some(placements) = object(doc, &ROOT, "placements", ObjType::Map) else {
@@ -2153,7 +2227,7 @@ fn placements_in(
 /// causal history and the state `next` after it, or `None`. Only the
 /// entities the change writes into are compared ([`scope_of`]).
 fn structural_refusal(
-    prev: &AutoCommit,
+    prev: &impl Read,
     next: &AutoCommit,
     change: &Change,
     resource: &ResourceId,
@@ -2194,17 +2268,7 @@ fn structural_refusal(
                 found.insert(Refusal::ImmutableFieldMutated);
             }
         }
-        let ready = |d: &AutoCommit, s: &ObjId| -> Vec<String> {
-            let mut v: Vec<String> = d
-                .get_all(s, "ready")
-                .unwrap_or_default()
-                .into_iter()
-                .map(|(v, _)| format!("{v:?}"))
-                .collect();
-            v.sort();
-            v
-        };
-        let (before, after) = (ready(prev, ps), ready(next, ns));
+        let (before, after) = (ready_values(prev, ps), ready_values(next, ns));
         if before != after {
             let values = next.get_all(ns, "ready").unwrap_or_default();
             let all_true = !values.is_empty()

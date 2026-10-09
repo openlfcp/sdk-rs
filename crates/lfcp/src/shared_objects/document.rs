@@ -165,7 +165,9 @@ fn require(ok: bool, diagnostic: Diagnostic) -> Result<(), ProfileError> {
 /// hold, and a sequence gap is `INVALID_AUTOMERGE_BYTES` before the engine
 /// sees it (automerge 0.12 aborts on one, and a JavaScript engine corrupts
 /// the document). As defense in depth, an engine error or panic during an
-/// apply restores the document as it was before the apply.
+/// apply restores the document as it was before the apply: rebuilt at the
+/// heads it had, so an apply never copies the document (T2). If even that
+/// fails, the document is unusable and refuses every later change.
 #[derive(Debug)]
 pub struct SharedObjects {
     doc: AutoCommit,
@@ -180,6 +182,9 @@ pub struct SharedObjects {
     /// another change in `doc` holds, in arrival order. Retried after every
     /// rebuild that removes changes ([`SharedObjects::exclude`]).
     held: Vec<Change>,
+    /// The document could not be restored after a failed apply: it refuses
+    /// every change.
+    unusable: bool,
 }
 
 /// What became of one received change (§14.1).
@@ -287,6 +292,7 @@ impl SharedObjects {
             depths: Depths::new(),
             history: History::default(),
             held: Vec::new(),
+            unusable: false,
         }
     }
 
@@ -303,6 +309,7 @@ impl SharedObjects {
             depths,
             history,
             held: Vec::new(),
+            unusable: false,
         })
     }
 
@@ -438,6 +445,9 @@ impl SharedObjects {
 
     /// §14.1: whether `change` may enter the engine now.
     fn admit(&mut self, change: &Change) -> Result<Admission, ProfileError> {
+        if self.unusable {
+            return Err(ProfileError::Invalid(Diagnostic::InvalidAutomergeBytes));
+        }
         self.admit_in(change, &Batch::default())
     }
 
@@ -569,11 +579,13 @@ impl SharedObjects {
     /// before and after `change`: when `verdict` returns a refusal, the
     /// document is restored as it was and the refusal is returned. The
     /// document is copied once, as for any apply, and the change applied
-    /// once. `verdict` runs only when the change enters the document.
+    /// once. `verdict` runs only when the change enters the document, with
+    /// the heads the document had before it (to read that state in place)
+    /// and the document after it.
     pub fn apply_change_checked<R>(
         &mut self,
         change: Change,
-        verdict: impl FnOnce(&AutoCommit, &AutoCommit) -> Option<R>,
+        verdict: impl FnOnce(&[ChangeHash], &AutoCommit) -> Option<R>,
     ) -> Result<Result<ChangeOutcome, R>, ProfileError> {
         let created = match self.admit(&change) {
             Ok(Admission::Duplicate) => return Ok(Ok(ChangeOutcome::Duplicate)),
@@ -584,18 +596,18 @@ impl SharedObjects {
             }
             Err(err) => return Err(err),
         };
-        let backup = self.doc.clone();
+        let before = self.doc.get_heads();
         let (actor, seq) = (change.actor_id().clone(), change.seq());
         let doc = &mut self.doc;
         match catch_unwind(AssertUnwindSafe(|| doc.apply_changes(vec![change]))) {
             Ok(Ok(())) => {}
             Ok(Err(_)) | Err(_) => {
-                self.doc = backup;
+                self.rewind_to(&before);
                 return Err(ProfileError::Invalid(Diagnostic::InvalidAutomergeBytes));
             }
         }
-        if let Some(refusal) = verdict(&backup, &self.doc) {
-            self.doc = backup;
+        if let Some(refusal) = verdict(&before, &self.doc) {
+            self.rewind_to(&before);
             return Ok(Err(refusal));
         }
         self.seqs.insert(actor, seq);
@@ -678,7 +690,7 @@ impl SharedObjects {
     /// `INVALID_AUTOMERGE_BYTES`. The admission check makes this
     /// unreachable for the known abort; a panicked document is never kept.
     fn engine_apply(&mut self, change: Change, created: Created) -> Result<(), ProfileError> {
-        let backup = self.doc.clone();
+        let before = self.doc.get_heads();
         let (actor, seq) = (change.actor_id().clone(), change.seq());
         let doc = &mut self.doc;
         let outcome = catch_unwind(AssertUnwindSafe(|| doc.apply_changes(vec![change])));
@@ -689,9 +701,26 @@ impl SharedObjects {
                 Ok(())
             }
             Ok(Err(_)) | Err(_) => {
-                self.doc = backup;
+                self.rewind_to(&before);
                 Err(ProfileError::Invalid(Diagnostic::InvalidAutomergeBytes))
             }
+        }
+    }
+
+    /// Put the document back as it was at `heads`, after an apply it must
+    /// not keep: rebuilt from its own changes up to those heads, writing as
+    /// the same actor. Only a refused or failed apply pays for it. If the
+    /// rebuild fails too, the document is marked unusable.
+    fn rewind_to(&mut self, heads: &[ChangeHash]) {
+        let actor = self.doc.get_actor().clone();
+        let doc = &mut self.doc;
+        match catch_unwind(AssertUnwindSafe(|| doc.fork_at(heads))) {
+            Ok(Ok(mut doc)) => {
+                doc.set_actor(actor);
+                drop_patch_log(&mut doc);
+                self.doc = doc;
+            }
+            Ok(Err(_)) | Err(_) => self.unusable = true,
         }
     }
 
@@ -730,6 +759,7 @@ impl SharedObjects {
             depths: self.depths.clone(),
             history: self.history.clone(),
             held: Vec::new(),
+            unusable: self.unusable,
         }
     }
 
