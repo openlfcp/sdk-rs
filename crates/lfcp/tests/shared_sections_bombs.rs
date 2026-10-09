@@ -65,7 +65,7 @@ fn an_rle_bomb_is_refused_without_expanding_it() {
 #[test]
 fn a_compressed_chunk_is_refused_without_inflating_it() {
     // F1b: a type-2 (compressed) chunk whose DEFLATE body inflates to 256 MiB:
-    // inflation stops at the cap of 8 MiB, and no hash is recorded.
+    // it is never inflated, and no hash is recorded (§14.1).
     let mut deflate = DeflateEncoder::new(Vec::new(), Compression::fast());
     let zeros = vec![0u8; 1 << 24];
     for _ in 0..16 {
@@ -89,6 +89,45 @@ fn a_compressed_chunk_is_refused_without_inflating_it() {
         started.elapsed() < Duration::from_secs(1),
         "refused in {:?}",
         started.elapsed()
+    );
+}
+
+#[test]
+fn a_compressed_change_of_the_signer_is_refused_unnamed() {
+    // SHARED-SECTIONS-PROFILE-01 §14.1 (mvp-0.2-baseline.4, SS44): a valid
+    // change of the signer's own actor, sent as a compressed chunk, is
+    // refused and not named: naming it would mean inflating it.
+    let resource = ResourceId::from_bytes([3; 32]);
+    let a = PrincipalId::from_bytes([4; 32]);
+    let (_, change) = shared_sections::SectionsDoc::create(
+        shared_sections::actor_id(&resource, &a),
+        "019a2f85-7b31-7c42-8000-000000000001",
+        "Section",
+        &a,
+    )
+    .unwrap();
+    let raw = change.raw_bytes();
+    // Magic, checksum, type, then the ULEB128 length of the data.
+    let header = 9 + raw[9..].iter().position(|b| b & 0x80 == 0).unwrap() + 1;
+    let data = &raw[header..];
+    let mut stored = vec![0x01, data.len() as u8, (data.len() >> 8) as u8];
+    stored.push(!(data.len() as u8));
+    stored.push(!((data.len() >> 8) as u8));
+    stored.extend(data);
+    let mut chunk = raw[..8].to_vec();
+    chunk.push(0x02);
+    chunk.extend(uleb(stored.len()));
+    chunk.extend(&stored);
+    let plaintext = framing::encode_change(&chunk);
+    assert_eq!(framing::refused_change_key(&plaintext), None);
+    let mut replica = SectionsReplica::new(resource, ActorId::from([7u8; 32]));
+    assert_eq!(
+        replica.receive(&a, &plaintext),
+        Received::Refused(Refusal::InvalidAutomergeBytes)
+    );
+    assert!(
+        replica.refused().is_empty(),
+        "the refused chunk is not named"
     );
 }
 

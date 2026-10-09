@@ -77,7 +77,7 @@ SDK-SECTIONS-INTEGRATION-01, that is commit receipts and their release
 adapter's journal (§7). sdk-rs has no local commit pipeline, outbound
 queue or sync session, so these contracts do not apply to it yet,
 including the rule that a batch released before its status is final is
-still reported until it is (§3.5, prepared for `mvp-0.2-baseline.4`).
+still reported until it is (§3.5, `mvp-0.2-baseline.4`).
 sdk-ts implements them.
 
 The LFCP protocol layer of this SDK (LFCP-041 to LFCP-043) is complete
@@ -130,16 +130,20 @@ builds on the stable Rust toolchain; no older minimum version is promised.
 `spec.lock` pins the specification this SDK implements:
 
 ```json
-{ "tag": "mvp-0.2-baseline.3", "commit": "8076d89852be334b24e4077c30df32c8ef65d9be" }
+{ "tag": "mvp-0.2-baseline.4", "commit": "1e548f7f9c95820ec16d3c58cb8a93fdd6a72b6d" }
 ```
 
-`mvp-0.2-baseline.3` is the MVP 0.1 baseline `mvp-0.1-baseline.10`
+`mvp-0.2-baseline.4` is the MVP 0.1 baseline `mvp-0.1-baseline.10`
 unchanged, plus the shared sections profile, its Markdown grammar, the SDK
 integration contracts and their corpus (in `lfcp-vector-format/1`), with
 the canonical change encoding and operation references of SPEC-PATCH-10
 (SHARED-OBJECTS-PROFILE-01 §11.3, §11.4) and a lifecycle conflict that
 blocks its branch instead of hiding it (SHARED-SECTIONS-PROFILE-01 §7.6,
-case SS60).
+case SS60). It also says how a refused change is named
+(SHARED-SECTIONS-PROFILE-01 §14.1): by its hash only when it is one
+uncompressed change chunk, so a refused compressed chunk is neither
+inflated nor named (SS44), and it adds changes above the expansion limits
+on the section receive path (SS61 to SS63).
 
 Vectors are never copied into this repository. The tests read them from a
 checkout of `openlfcp/spec` with `git show <commit>:<path>`, so the state of

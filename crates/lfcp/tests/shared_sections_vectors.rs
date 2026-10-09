@@ -394,15 +394,18 @@ fn the_full_corpus_replays_through_admission() {
                 .iter()
                 .map(|(h, r)| (h.to_string(), r.name()))
                 .collect();
+            // A refusal without `change` is not named (SHARED-SECTIONS-PROFILE-01
+            // §14.1: a compressed or unreadable chunk); the replica records
+            // only named refusals.
             let want: BTreeMap<String, &str> = expected["refused"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .map(|r| {
-                    (
-                        r["change"].as_str().unwrap().to_owned(),
+                .filter_map(|r| {
+                    Some((
+                        r["change"].as_str()?.to_owned(),
                         r["diagnostic"].as_str().unwrap(),
-                    )
+                    ))
                 })
                 .collect();
             assert_eq!(refused, want, "{id} {order}: refused");

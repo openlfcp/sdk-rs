@@ -65,7 +65,6 @@ const CHUNK_MAGIC: [u8; 4] = [0x85, 0x6f, 0x4a, 0x83];
 /// Chunk types: a document, a change.
 const DOCUMENT_CHUNK: u8 = 0;
 const CHANGE_CHUNK: u8 = 1;
-const COMPRESSED_CHANGE_CHUNK: u8 = 2;
 
 /// An Automerge chunk header: magic, checksum, type, LEB128 length.
 struct ChunkHeader {
@@ -142,37 +141,27 @@ pub fn encode_snapshot(save: &[u8]) -> Vec<u8> {
     frame(save)
 }
 
-/// How much a refused compressed change chunk may inflate to while its
-/// hash is computed: more than any change within §11.1 holds.
-const REFUSED_INFLATE_CAP: u64 = 8 * 1024 * 1024;
-
 /// The change hash and actor a refused Data Unit plaintext names,
 /// computed without parsing its operations: bytes that failed §11 or §11.1
 /// are never handed to Automerge, which would expand them (an RLE or
 /// DEFLATE bomb). Automerge hashes a change as SHA-256 of its uncompressed
 /// type, length and body; the body starts with the dependencies and the
-/// actor:
-/// - an uncompressed change chunk (type 1) is read as it is, whatever its
-///   checksum says;
-/// - a compressed one (type 2) is inflated under a cap of 8 MiB first, and
-///   names nothing when it inflates to more;
-/// - anything else, or trailing bytes, names nothing.
+/// actor. SHARED-SECTIONS-PROFILE-01 §14.1 names a refused change only
+/// when its bytes are one uncompressed change chunk (type 1) whose length
+/// covers exactly the rest, read as it is whatever its checksum says.
+/// Anything else names nothing: a compressed chunk (type 2) is never
+/// inflated to be named, since inflating refused bytes has no limit.
 pub fn refused_change_key(plaintext: &[u8]) -> Option<(ChangeHash, Vec<u8>)> {
     let bytes = unframe(plaintext).ok()?;
     let header = chunk_header(&bytes).ok()?;
     if header.end != bytes.len() {
         return None;
     }
+    if header.chunk_type != CHANGE_CHUNK {
+        return None;
+    }
     let body_at = 9 + leb_len(&bytes[9..])?;
-    let inflated;
-    let body: &[u8] = match header.chunk_type {
-        CHANGE_CHUNK => &bytes[body_at..],
-        COMPRESSED_CHANGE_CHUNK => {
-            inflated = expansion::inflate_capped(&bytes[body_at..], REFUSED_INFLATE_CAP).ok()?;
-            &inflated
-        }
-        _ => return None,
-    };
+    let body: &[u8] = &bytes[body_at..];
     let mut hasher = Sha256::new();
     hasher.update([CHANGE_CHUNK]);
     hasher.update(uleb(body.len()));
