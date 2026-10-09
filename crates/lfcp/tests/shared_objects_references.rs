@@ -510,3 +510,53 @@ fn a_predecessor_concurrent_with_the_change_is_refused() {
     let c = change(3, 4, heads, vec![put("k", 5, vec![id(1, 2)])]);
     refused(&mut doc, c, "R6: predecessor outside the history");
 }
+
+/// From mvp-0.2-baseline.2 the Automerge corpus has a `canonical` (§11.3)
+/// and a `references` (§11.4) section: each case through this admission.
+/// A canonical case is the change alone, framed as a Data Unit; a
+/// references case applies its history, then the change, which is admitted
+/// or refused by the rule it names, leaving a sound document. At an
+/// earlier baseline the sections are absent and nothing runs.
+#[test]
+fn the_corpus_canonical_and_references_cases() {
+    let corpus = Spec::open().read_json(CORPUS);
+    if let Some(cases) = corpus["canonical"]["cases"].as_array() {
+        for case in cases {
+            let id = case["id"].as_str().unwrap();
+            let raw = bytes(case["change_hex"].as_str().unwrap());
+            let canonical = framing::decode_change(&framing::encode_change(&raw)).is_ok();
+            assert_eq!(
+                Some(canonical),
+                case["expected"]["canonical"].as_bool(),
+                "{id}"
+            );
+        }
+    }
+    if let Some(cases) = corpus["references"]["cases"].as_array() {
+        for case in cases {
+            let id = case["id"].as_str().unwrap();
+            let mut doc = receiver();
+            for h in case["history_hex"].as_array().unwrap() {
+                let change = Change::from_bytes(bytes(h.as_str().unwrap())).unwrap();
+                assert_eq!(
+                    doc.apply_change(change).unwrap(),
+                    ChangeOutcome::Applied,
+                    "{id} history"
+                );
+            }
+            let change = Change::from_bytes(bytes(case["change_hex"].as_str().unwrap())).unwrap();
+            let expected = &case["expected"];
+            if expected["admitted"] == true {
+                assert_eq!(doc.broken_rule(&change), None, "{id}");
+                assert_eq!(
+                    doc.apply_change(change).unwrap(),
+                    ChangeOutcome::Applied,
+                    "{id}"
+                );
+            } else {
+                let rule = expected["broken_rule"].as_str().unwrap();
+                refused(&mut doc, change, &format!("{rule}: {id}"));
+            }
+        }
+    }
+}
