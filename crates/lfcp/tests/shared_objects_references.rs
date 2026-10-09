@@ -272,7 +272,7 @@ fn honest_references_are_admitted() {
             ),
         ),
         (
-            "increment without a predecessor",
+            "increment of the counter",
             change(
                 3,
                 4,
@@ -281,7 +281,7 @@ fn honest_references_are_admitted() {
                     OpType::Increment(1),
                     ObjectId::Root,
                     Key::Map("c".into()),
-                    vec![],
+                    vec![id(1, 1)],
                     false,
                 )],
             ),
@@ -364,7 +364,24 @@ fn references_outside_the_rules_are_refused() {
             false,
         )
     };
+    let increment = |pred| {
+        op(
+            OpType::Increment(1),
+            ObjectId::Root,
+            Key::Map("c".into()),
+            pred,
+            false,
+        )
+    };
     let cases: Vec<(&str, Change)> = vec![
+        (
+            "R8: increment without a predecessor",
+            change(3, 4, heads.clone(), vec![increment(vec![])]),
+        ),
+        (
+            "R8: increment naming the increment, not the counter's put",
+            change(3, 4, heads.clone(), vec![increment(vec![id(3, 1)])]),
+        ),
         (
             "R6: predecessor on another key",
             change(3, 4, heads.clone(), vec![put("k", 5, vec![id(1, 1)])]),

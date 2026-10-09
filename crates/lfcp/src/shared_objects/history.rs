@@ -22,7 +22,10 @@
 //! - R6: a predecessor is an operation of H (or earlier in the change),
 //!   not a deletion, on the same object and key, where an insertion's key
 //!   is its own element;
-//! - R7: a deletion has at least one predecessor.
+//! - R7: a deletion has at least one predecessor;
+//! - R8: an increment has at least one predecessor, and every one is a
+//!   put of a counter value (mvp-0.2-baseline.5);
+//! - R9: no operation is a mark (mvp-0.2-baseline.5).
 //!
 //! [`History`] keeps what these need: each change's vector clock and
 //! largest counter, and the object, key and kind of each operation.
@@ -54,6 +57,9 @@ enum Kind {
     /// It creates an object of this type (the action: 0 map, 2 list, 4
     /// text, 6 table).
     Make(u64),
+    /// A put of a counter value (action 1, value type 8): what an
+    /// increment names (R8).
+    CounterPut,
     /// Anything else, except a deletion (deletions are not kept).
     Other,
 }
@@ -112,7 +118,7 @@ impl Overlay {
 }
 
 /// The §11.3 or §11.4 rule a change breaks: "C" (canonical encoding) or
-/// "R1" to "R7".
+/// "R1" to "R9".
 pub type Rule = &'static str;
 
 fn require(ok: bool, rule: Rule) -> Result<(), Rule> {
@@ -230,9 +236,26 @@ impl History {
             // R7.
             const DELETE: u64 = 3;
             require(op.action != DELETE || !op.preds.is_empty(), "R7")?;
+            // R8: an increment names the puts of a counter value it adds to
+            // (on the same object and key, by R6): one, or one per counter
+            // set concurrently.
+            const PUT: u64 = 1;
+            const INCREMENT: u64 = 5;
+            const MARK: u64 = 7;
+            const COUNTER: u8 = 8;
+            if op.action == INCREMENT {
+                let counters = !op.preds.is_empty()
+                    && op.preds.iter().all(|p| {
+                        lookup(global(*p), &mine).is_some_and(|t| t.kind == Kind::CounterPut)
+                    });
+                require(counters, "R8")?;
+            }
+            // R9.
+            require(op.action != MARK, "R9")?;
             if op.action != DELETE {
                 let kind = match op.action {
                     a @ (0 | 2 | 4 | 6) => Kind::Make(a),
+                    PUT if op.value.0 == COUNTER => Kind::CounterPut,
                     _ => Kind::Other,
                 };
                 let target = Target {
