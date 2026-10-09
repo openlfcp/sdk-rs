@@ -128,7 +128,11 @@ fn actors_use_the_sections_domain() {
 fn reference_documents_read_through_the_schema() {
     let corpus = corpus();
     let cases = corpus["cases"].as_array().unwrap();
-    assert_eq!(cases.len(), 56);
+    // 56 cases at mvp-0.2-baseline.1; later baselines only add cases, SS01 to SSnn.
+    assert!(cases.len() >= 56, "{} cases", cases.len());
+    for (i, case) in cases.iter().enumerate() {
+        assert_eq!(case["id"], format!("SS{:02}", i + 1));
+    }
     for case in cases {
         let id = case["id"].as_str().unwrap();
         let expected = &case["expected"];
