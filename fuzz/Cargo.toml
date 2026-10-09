@@ -55,3 +55,24 @@ path = "fuzz_targets/snapshot.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "objects_gen"
+path = "fuzz_targets/objects_gen.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "canonical"
+path = "fuzz_targets/canonical.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sections_gen"
+path = "fuzz_targets/sections_gen.rs"
+test = false
+doc = false
+bench = false

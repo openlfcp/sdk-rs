@@ -25,6 +25,7 @@ MAGIC = bytes([0x85, 0x6F, 0x4A, 0x83])
 # The record format of fuzz/src/lib.rs.
 CTL_REFRAME = 1 << 2
 CTL_FRAME = 1 << 3
+CTL_ORIGIN_ESTABLISHED = 1 << 4
 
 
 def spec_json(path):
@@ -175,15 +176,40 @@ def main():
             seed += record(CTL_FRAME | names.index(neg["signer"]), c)
         admission.add(neg["id"], seed)
 
+    # §11.3 / §11.4 cases (baseline.3): the history, then the change.
+    canonical = Corpus("canonical")
+    for section in ("canonical", "references"):
+        for case in objects.get(section, {}).get("cases", []):
+            history = [bytes.fromhex(h) for h in case["history_hex"]]
+            change = bytes.fromhex(case["change_hex"])
+            admission.add(case["id"], records(history + [change], so_signer))
+            admission.add(case["id"] + "-direct", records(history, so_signer) + record(
+                CTL_FRAME | CTL_ORIGIN_ESTABLISHED, change))
+            canonical.add(case["id"], bytes([0]) + change)
+            if body_of(change):
+                t, body = body_of(change)
+                canonical.add(case["id"] + "-reframe", bytes([1, t]) + body)
+    for c in chunks:
+        if c[8] == 1:
+            canonical.add("so", bytes([0]) + c)
+
     # Shared Sections: A, B, C.
-    ss_actors = {a["actor_hex"]: i for i, a in enumerate(sections["identities"]["actors"].values())}
+    identities = sections.get("identities") or sections["fixtures"]["identities"]
+    ss_actors = {a["actor_hex"]: i for i, a in enumerate(identities["actors"].values())}
     ss_signer = lambda c: ss_actors.get(change_actor(c), 3) if body_of(c)[0] == 1 else 0
-    b64 = lambda r: base64.b64decode(r["base64"])
+    def b64(r):
+        if "b64url" in r:
+            t = r["b64url"]
+            return base64.urlsafe_b64decode(t + "=" * (-len(t) % 4))
+        return base64.b64decode(r["base64"])
+
     for case in sections["cases"]:
-        chain = [b64(r) for r in case["base_changes"]]
+        # lfcp-vector-format/1 nests the scenario under "inputs".
+        inp = case.get("inputs", case)
+        chain = [b64(r) for r in inp["base_changes"]]
         for branch in ("A", "B"):
-            chain += [b64(r) for r in case["branches"][branch]]
-        chain += [b64(r) for r in case["after_merge"]]
+            chain += [b64(r) for r in inp["branches"].get(branch, [])]
+        chain += [b64(r) for r in inp.get("after_merge", [])]
         # The long-history cases (SS55: 258,162 rows) take minutes per
         # run: a receive costs O(document). Kept out of the seeds.
         cap = 64 * 1024
@@ -193,8 +219,8 @@ def main():
         for c in chain[-3:]:
             plaintext.add(case["id"], frame(c))
         for key in ("base_snapshot", "reference_snapshot"):
-            if case.get(key):
-                snapshot.add(case["id"] + "-" + key, bytes([0]) + b64(case[key]))
+            if inp.get(key) or case.get(key):
+                snapshot.add(case["id"] + "-" + key, bytes([0]) + b64(inp.get(key) or case[key]))
         if case.get("reference_snapshot_plaintext"):
             pt = b64(case["reference_snapshot_plaintext"])
             snapshot.add(case["id"] + "-plaintext", bytes([2]) + pt)
@@ -204,7 +230,7 @@ def main():
         if c[8] != 0:
             receive.add("so-expansion", records([c], lambda _: 0))
 
-    for corpus in (plaintext, admission, receive, snapshot):
+    for corpus in (plaintext, admission, receive, snapshot, canonical):
         print(f"{corpus.dir}: {corpus.count} seeds", file=sys.stderr)
 
 
