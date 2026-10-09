@@ -16,7 +16,7 @@ use automerge::legacy::{ElementId, Key, ObjectId, Op, OpId, OpType, SortedVec};
 use automerge::transaction::Transactable;
 use automerge::{ActorId, AutoCommit, Change, ExpandedChange, ObjType, ScalarValue, ROOT};
 use lfcp::shared_objects::document::{ChangeOutcome, SharedObjects};
-use lfcp::shared_objects::framing;
+use lfcp::shared_objects::{canonical, framing};
 use lfcp::shared_objects::{Diagnostic, ProfileError};
 use support::spec::Spec;
 
@@ -105,6 +105,25 @@ fn f3c_an_empty_change_with_a_wrong_start_op_is_refused() {
         change,
         "R2: start op 2 on an empty history",
     );
+}
+
+#[test]
+fn n1_a_start_op_of_2_32_is_refused_without_operations() {
+    // §11.3 rule 8 (mvp-0.2-baseline.5, CAN-8-start-op-empty): the start op
+    // is below 2^32 even when the change has no operation. F3C is a
+    // canonical change without operations, framed as a Data Unit (a 4-byte
+    // CBOR header); only its start op changes.
+    let mut content = canonical::check(&bytes(F3C)[4..]).expect("canonical");
+    assert!(content.ops.is_empty());
+    content.start_op = 1 << 32;
+    let n1 = canonical::encode(&content);
+    assert!(canonical::check(&n1).is_err());
+    assert_eq!(
+        framing::decode_change(&framing::encode_change(&n1)).err(),
+        Some(INVALID)
+    );
+    content.start_op = (1 << 32) - 1;
+    assert!(canonical::check(&canonical::encode(&content)).is_ok());
 }
 
 #[test]

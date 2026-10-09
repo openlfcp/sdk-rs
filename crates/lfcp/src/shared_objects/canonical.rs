@@ -449,6 +449,9 @@ fn rules(c: &Content) -> Result<(), &'static str> {
     let ok = |b: bool, rule: &'static str| if b { Ok(()) } else { Err(rule) };
     ok(c.deps.windows(2).all(|w| w[0] < w[1]), "deps ascending")?;
     ok(c.seq >= 1 && c.start_op >= 1, "seq and start op")?;
+    // Rule 8: the start op itself, even of a change without operations
+    // (N1; automerge 0.12 refuses a larger one).
+    ok(c.start_op < COUNTER_LIMIT, "start op")?;
     ok(
         c.others.windows(2).all(|w| w[0] < w[1]),
         "other actors ascending",
