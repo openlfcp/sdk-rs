@@ -254,6 +254,20 @@ fn the_effective_tree_matches_every_case() {
             })
             .collect();
         assert_eq!(tree, want, "{id}: tree");
+        // LFCP-02-111: the per-node walk the authoring uses decides every
+        // node as the whole tree does.
+        for node in doc.nodes().keys() {
+            let shown = effective
+                .tree
+                .iter()
+                .find(|t| &t.id == node)
+                .map(|t| t.parent.clone());
+            assert_eq!(
+                doc.visible_parent(node),
+                shown,
+                "{id}: visible_parent({node})"
+            );
+        }
         let hidden: Vec<&str> = effective.hidden.iter().map(String::as_str).collect();
         let want_hidden: Vec<&str> = expected["hidden"]
             .as_array()

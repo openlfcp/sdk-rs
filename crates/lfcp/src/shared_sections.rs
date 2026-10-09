@@ -452,81 +452,104 @@ impl SectionsDoc {
             if collided.contains(id) {
                 continue;
             }
-            let n = object(&self.doc, &nodes_map, id, ObjType::Map).expect("listed node");
-            let mut found: Vec<Diagnostic> = Vec::new();
-            if !is_uuidv7(id) {
-                found.push(Diagnostic::InvalidObjectId);
-            }
-            match scalar(&self.doc, &n, "id") {
-                Some(own) if own != *id => found.push(Diagnostic::ObjectIdMismatch),
-                Some(_) => {}
-                None => found.push(Diagnostic::MissingRequiredField),
-            }
-            for key in ["kind", "created_by", "lifecycle", "placement"] {
-                if self.doc.get(&n, key).ok().flatten().is_none() {
-                    found.push(Diagnostic::MissingRequiredField);
-                }
-            }
-            for key in [
-                "id",
-                "kind",
-                "created_by",
-                "lifecycle",
-                "placement",
-                "task_id",
-                "list_style",
-            ] {
-                if not_scalar(&self.doc, &n, key) {
-                    found.push(Diagnostic::InvalidFieldType);
-                }
-            }
-            if object(&self.doc, &n, "children", ObjType::List).is_none() {
-                found.push(Diagnostic::InvalidFieldType);
-            }
-            match node.kind {
-                None => found.push(Diagnostic::InvalidEnumValue),
-                Some(NodeKind::Task) => {
-                    if node.task_id.as_deref() != Some(id.as_str()) {
-                        found.push(Diagnostic::ObjectIdMismatch);
-                    }
-                    if !tasks.contains(id) {
-                        found.push(Diagnostic::InvalidReference);
-                    }
-                }
-                Some(_) => {
-                    if object(&self.doc, &n, "text", ObjType::Text).is_none() {
-                        found.push(Diagnostic::InvalidFieldType);
-                    }
-                }
-            }
-            if node
-                .lifecycles
-                .iter()
-                .any(|l| l != "active" && l != "deleted")
-            {
-                found.push(Diagnostic::InvalidEnumValue);
-            }
-            if node.placements.len() == 1 {
-                match placements.get(&node.placements[0]) {
-                    Some(p) if p.node_id.as_deref() == Some(id.as_str()) => {
-                        let parent = p.parent_id.as_deref();
-                        let ok = parent.is_some() && parent == section_id.as_deref()
-                            || parent
-                                .and_then(|p| nodes.get(p))
-                                .and_then(|p| p.kind)
-                                .is_some_and(NodeKind::can_parent);
-                        if !ok {
-                            found.push(Diagnostic::InvalidReference);
-                        }
-                    }
-                    _ => found.push(Diagnostic::InvalidReference),
-                }
-            }
-            if let Some(first) = found.into_iter().min() {
+            let problem = self.node_problem(
+                &nodes_map,
+                id,
+                node,
+                section_id.as_deref(),
+                |t| tasks.contains(t),
+                |p| placements.get(p).cloned(),
+                |n| nodes.get(n).and_then(|n| n.kind),
+            );
+            if let Some(first) = problem {
                 out.insert(id.clone(), first);
             }
         }
         out
+    }
+
+    /// §14.2: the first diagnostic of the node `id` (read as `node`), or
+    /// `None` when it is valid; `has_task`, `placement` and `kind_of` read
+    /// the Task IDs, a placement and another node's kind.
+    #[allow(clippy::too_many_arguments)]
+    fn node_problem(
+        &self,
+        nodes_map: &ObjId,
+        id: &str,
+        node: &Node,
+        section_id: Option<&str>,
+        has_task: impl Fn(&str) -> bool,
+        placement: impl Fn(&str) -> Option<Placement>,
+        kind_of: impl Fn(&str) -> Option<NodeKind>,
+    ) -> Option<Diagnostic> {
+        let n = object(&self.doc, nodes_map, id, ObjType::Map).expect("listed node");
+        let mut found: Vec<Diagnostic> = Vec::new();
+        if !is_uuidv7(id) {
+            found.push(Diagnostic::InvalidObjectId);
+        }
+        match scalar(&self.doc, &n, "id") {
+            Some(own) if own != id => found.push(Diagnostic::ObjectIdMismatch),
+            Some(_) => {}
+            None => found.push(Diagnostic::MissingRequiredField),
+        }
+        for key in ["kind", "created_by", "lifecycle", "placement"] {
+            if self.doc.get(&n, key).ok().flatten().is_none() {
+                found.push(Diagnostic::MissingRequiredField);
+            }
+        }
+        for key in [
+            "id",
+            "kind",
+            "created_by",
+            "lifecycle",
+            "placement",
+            "task_id",
+            "list_style",
+        ] {
+            if not_scalar(&self.doc, &n, key) {
+                found.push(Diagnostic::InvalidFieldType);
+            }
+        }
+        if object(&self.doc, &n, "children", ObjType::List).is_none() {
+            found.push(Diagnostic::InvalidFieldType);
+        }
+        match node.kind {
+            None => found.push(Diagnostic::InvalidEnumValue),
+            Some(NodeKind::Task) => {
+                if node.task_id.as_deref() != Some(id) {
+                    found.push(Diagnostic::ObjectIdMismatch);
+                }
+                if !has_task(id) {
+                    found.push(Diagnostic::InvalidReference);
+                }
+            }
+            Some(_) => {
+                if object(&self.doc, &n, "text", ObjType::Text).is_none() {
+                    found.push(Diagnostic::InvalidFieldType);
+                }
+            }
+        }
+        if node
+            .lifecycles
+            .iter()
+            .any(|l| l != "active" && l != "deleted")
+        {
+            found.push(Diagnostic::InvalidEnumValue);
+        }
+        if node.placements.len() == 1 {
+            match placement(&node.placements[0]) {
+                Some(p) if p.node_id.as_deref() == Some(id) => {
+                    let parent = p.parent_id.as_deref();
+                    let ok = parent.is_some() && parent == section_id
+                        || parent.and_then(&kind_of).is_some_and(NodeKind::can_parent);
+                    if !ok {
+                        found.push(Diagnostic::InvalidReference);
+                    }
+                }
+                _ => found.push(Diagnostic::InvalidReference),
+            }
+        }
+        found.into_iter().min()
     }
 
     /// Every concurrent value of the Task `id`'s `lifecycle`.
@@ -885,6 +908,7 @@ impl SectionsDoc {
                 .with_message(intent.to_owned())
                 .with_time(0),
         )?;
+        crate::shared_objects::document::drop_patch_log(&mut self.doc);
         Some(
             self.doc
                 .get_change_by_hash(&hash)
@@ -956,7 +980,7 @@ impl SectionsDoc {
 
     /// The children list of `parent` (the section or a node).
     fn lane(&self, parent: &str) -> Option<ObjId> {
-        if self.section().is_some_and(|s| s.id == parent) {
+        if self.section_id().as_deref() == Some(parent) {
             let section = self.root_map("section")?;
             return object(&self.doc, &section, "children", ObjType::List);
         }
@@ -972,32 +996,26 @@ impl SectionsDoc {
         parent: &str,
         after: Option<&str>,
     ) -> Result<(ObjId, usize), AuthoringError> {
-        let effective = self.effective();
-        let section_id = self
-            .section()
-            .map(|s| s.id)
-            .ok_or(AuthoringError::InvalidParent)?;
+        let section_id = self.section_id().ok_or(AuthoringError::InvalidParent)?;
         if parent != section_id {
-            let node = self
-                .nodes()
-                .get(parent)
-                .cloned()
+            let nodes = self
+                .root_map("nodes")
                 .ok_or(AuthoringError::InvalidParent)?;
-            let visible = effective.tree.iter().any(|t| t.id == parent);
+            let node = self
+                .node_in(&nodes, parent.to_owned())
+                .ok_or(AuthoringError::InvalidParent)?;
+            let visible = self.visible_parent(parent).is_some();
             if !node.kind.is_some_and(NodeKind::can_parent) || !visible {
                 return Err(AuthoringError::InvalidParent);
             }
         }
         let lane = self.lane(parent).ok_or(AuthoringError::InvalidParent)?;
-        let entries = list_strings(&self.doc, &lane);
         let index = match after {
             None => 0,
             Some(sibling) => {
-                let visible_child = effective
-                    .tree
-                    .iter()
-                    .any(|t| t.id == sibling && t.parent == parent);
+                let visible_child = self.visible_parent(sibling).as_deref() == Some(parent);
                 let slot = self.selected_placement(sibling);
+                let entries = list_strings(&self.doc, &lane);
                 match (
                     visible_child,
                     slot.and_then(|s| entries.iter().position(|e| *e == s)),
@@ -1008,6 +1026,110 @@ impl SectionsDoc {
             }
         };
         Ok((lane, index))
+    }
+
+    /// The section's ID, read on its own.
+    fn section_id(&self) -> Option<String> {
+        scalar(&self.doc, &self.root_map("section")?, "id")
+    }
+
+    /// The parent under which the effective tree (§7) shows the node `id`,
+    /// or `None` when the tree does not show it. The same decision as
+    /// [`SectionsDoc::effective`], made along the node's selected ancestors
+    /// only: each must exist, not collide (§14.2), be valid, have no
+    /// placement or lifecycle conflict (§14.3), not be deleted, and sit in
+    /// its parent's children list at the placement it selects, up to a ready
+    /// section; a cycle shows none of them.
+    #[doc(hidden)]
+    pub fn visible_parent(&self, id: &str) -> Option<String> {
+        let section = self.root_map("section")?;
+        let ready = matches!(
+            self.doc.get(&section, "ready").ok().flatten(),
+            Some((Value::Scalar(v), _)) if matches!(v.as_ref(), ScalarValue::Boolean(true))
+        );
+        if !ready {
+            return None;
+        }
+        let section_id = scalar(&self.doc, &section, "id")?;
+        let nodes = self.root_map("nodes")?;
+        let roots: Vec<ObjId> = ["nodes", "objects", "placements"]
+            .iter()
+            .filter_map(|k| self.root_map(k))
+            .collect();
+        let collides = |key: &str| {
+            roots
+                .iter()
+                .any(|m| self.doc.get_all(m, key).map_or(0, |v| v.len()) > 1)
+        };
+        let placements = self.root_map("placements");
+        let placement = |p: &str| -> Option<Placement> {
+            let m = object(&self.doc, placements.as_ref()?, p, ObjType::Map)?;
+            Some(Placement {
+                id: p.to_owned(),
+                node_id: scalar(&self.doc, &m, "node_id"),
+                parent_id: scalar(&self.doc, &m, "parent_id"),
+            })
+        };
+        let objects = self.root_map("objects");
+        let has_task = |t: &str| {
+            objects
+                .as_ref()
+                .is_some_and(|o| self.doc.get(o, t).ok().flatten().is_some())
+        };
+        let kind_of = |n: &str| self.node_in(&nodes, n.to_owned()).and_then(|n| n.kind);
+        let mut first: Option<String> = None;
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut n = id.to_owned();
+        loop {
+            if !seen.insert(n.clone()) {
+                return None; // a cycle
+            }
+            let node = self.node_in(&nodes, n.clone())?;
+            let selected = self.selected_placement(&n);
+            if collides(&n) || selected.as_deref().is_some_and(collides) {
+                return None;
+            }
+            if self
+                .node_problem(
+                    &nodes,
+                    &n,
+                    &node,
+                    Some(&section_id),
+                    has_task,
+                    placement,
+                    kind_of,
+                )
+                .is_some()
+            {
+                return None;
+            }
+            let mut lifecycles = match node.kind {
+                Some(NodeKind::Task) => self.task_lifecycles(&n),
+                _ => node.lifecycles.clone(),
+            };
+            lifecycles.dedup();
+            if node.placements.len() > 1 || lifecycles.len() > 1 {
+                return None;
+            }
+            if lifecycles.len() == 1 && lifecycles[0] == "deleted" {
+                return None;
+            }
+            let slot = selected?;
+            let p = placement(&slot)?;
+            if p.node_id.as_deref() != Some(n.as_str()) {
+                return None;
+            }
+            let parent = p.parent_id?;
+            let lane = self.lane(&parent)?;
+            if !list_strings(&self.doc, &lane).contains(&slot) {
+                return None;
+            }
+            let parent_of_id = first.get_or_insert_with(|| parent.clone()).clone();
+            if parent == section_id {
+                return Some(parent_of_id);
+            }
+            n = parent;
+        }
     }
 
     /// Write a new placement of `node` under `parent` at `index` of `lane`
@@ -1046,11 +1168,24 @@ impl SectionsDoc {
         if ids.iter().any(|id| !is_uuidv7(id)) {
             return Err(AuthoringError::InvalidId);
         }
-        let (nodes, placements, tasks) = (self.nodes(), self.placements(), self.task_ids());
+        // As nodes(), placements() and task_ids() read them: a node or a
+        // placement is a map under its key, a Task any value.
+        let (nodes, placements, objects) = (
+            self.root_map("nodes"),
+            self.root_map("placements"),
+            self.root_map("objects"),
+        );
+        let map_at = |m: &Option<ObjId>, id: &str| {
+            m.as_ref()
+                .is_some_and(|m| object(&self.doc, m, id, ObjType::Map).is_some())
+        };
         let mut seen = HashSet::new();
         for id in ids {
-            let used =
-                nodes.contains_key(*id) || placements.contains_key(*id) || tasks.contains(*id);
+            let used = map_at(&nodes, id)
+                || map_at(&placements, id)
+                || objects
+                    .as_ref()
+                    .is_some_and(|o| self.doc.get(o, *id).ok().flatten().is_some());
             if used || !seen.insert(*id) {
                 return Err(AuthoringError::IdInUse);
             }
@@ -1281,12 +1416,20 @@ impl SectionsDoc {
         insert: &str,
     ) -> Result<Change, AuthoringError> {
         let text = self.text_of(node)?;
-        let then = self
-            .doc
-            .text_at(&text, base)
-            .map_err(|_| AuthoringError::StaleBase)?;
-        if then != self.doc.text(&text)? {
-            return Err(AuthoringError::StaleBase);
+        // At the current heads the Text is the current one: nothing to
+        // compare. Otherwise its value at `base` must still be the current.
+        let mut heads = self.doc.get_heads();
+        let mut at = base.to_vec();
+        heads.sort();
+        at.sort();
+        if heads != at {
+            let then = self
+                .doc
+                .text_at(&text, base)
+                .map_err(|_| AuthoringError::StaleBase)?;
+            if then != self.doc.text(&text)? {
+                return Err(AuthoringError::StaleBase);
+            }
         }
         self.transact("text.edit", |d| {
             d.doc.splice_text(&text, index, delete as isize, insert)?;
@@ -1845,8 +1988,113 @@ fn list_values(doc: &AutoCommit, list: &ObjId) -> Vec<Option<String>> {
         .collect()
 }
 
+/// The entities a change's operations write into (LFCP-02-111). The
+/// structural rules compare a node, Task or placement before and after the
+/// change only if the change writes into it: every other one reads the same
+/// in both documents, so it cannot break a rule. `None` (from [`scope_of`])
+/// compares every entity, as for an operation on the root itself.
+#[derive(Default)]
+struct Scope {
+    nodes: BTreeSet<String>,
+    objects: BTreeSet<String>,
+    placements: BTreeSet<String>,
+    /// The change writes into the section map or its children list.
+    section: bool,
+}
+
+/// The entities `change` writes into, from each operation's object and its
+/// path from the root in `next`; `None` when one cannot be mapped to an
+/// entity (an operation on the root, an unknown object).
+fn scope_of(next: &AutoCommit, change: &Change) -> Option<Scope> {
+    let mut scope = Scope::default();
+    // An object's path from the root, once per object: a Text edit writes
+    // thousands of operations into one object.
+    let mut paths: HashMap<String, Vec<automerge::Prop>> = HashMap::new();
+    for op in change.decode().operations {
+        let obj = op.obj.to_string();
+        if obj == "_root" {
+            return None;
+        }
+        if !paths.contains_key(&obj) {
+            let id = next.import_obj(&obj).ok()?;
+            let mut path: Vec<automerge::Prop> = next.parents(&id).ok()?.map(|p| p.prop).collect();
+            path.reverse();
+            paths.insert(obj.clone(), path);
+        }
+        let path = &paths[&obj];
+        let key = |p: Option<&automerge::Prop>| match p {
+            Some(automerge::Prop::Map(k)) => Some(k.clone()),
+            _ => None,
+        };
+        let root_key = key(path.first())?;
+        // The entity's key: the second step of the path, or the operation's
+        // own key when it writes into the root map itself.
+        let entity = match path.get(1) {
+            Some(p) => key(Some(p)),
+            None => match &op.key {
+                automerge::legacy::Key::Map(k) => Some(k.to_string()),
+                _ => None,
+            },
+        };
+        match root_key.as_str() {
+            "section" => scope.section = true,
+            "nodes" => {
+                scope.nodes.insert(entity?);
+            }
+            "objects" => {
+                scope.objects.insert(entity?);
+            }
+            "placements" => {
+                scope.placements.insert(entity?);
+            }
+            "extensions" => {}
+            _ => return None,
+        }
+    }
+    Some(scope)
+}
+
+/// The keys of `map` the rules look at: those of `wanted` that `map` holds
+/// (as `keys` lists them), or every key.
+fn keys_in(doc: &AutoCommit, map: &ObjId, wanted: Option<&BTreeSet<String>>) -> Vec<String> {
+    match wanted {
+        Some(ids) => ids
+            .iter()
+            .filter(|k| doc.get(map, k.as_str()).ok().flatten().is_some())
+            .cloned()
+            .collect(),
+        None => doc.keys(map).collect(),
+    }
+}
+
+/// The placements among `wanted` (every one when `None`), as
+/// [`SectionsDoc::placements`] reads them.
+fn placements_in(
+    doc: &AutoCommit,
+    wanted: Option<&BTreeSet<String>>,
+) -> BTreeMap<String, Placement> {
+    let Some(placements) = object(doc, &ROOT, "placements", ObjType::Map) else {
+        return BTreeMap::new();
+    };
+    keys_in(doc, &placements, wanted)
+        .into_iter()
+        .filter_map(|k| {
+            let p = object(doc, &placements, &k, ObjType::Map)?;
+            Some((
+                k.clone(),
+                Placement {
+                    id: k,
+                    node_id: scalar(doc, &p, "node_id"),
+                    parent_id: scalar(doc, &p, "parent_id"),
+                },
+            ))
+        })
+        .collect()
+}
+
 /// §14.1: the structural refusal of `change`, given the state `prev` of its
-/// causal history and the state `next` after it, or `None`.
+/// causal history and the state `next` after it, or `None`. Only the
+/// entities the change writes into are compared ([`scope_of`]).
 fn structural_refusal(
     prev: &AutoCommit,
     next: &AutoCommit,
@@ -1854,8 +2102,13 @@ fn structural_refusal(
     resource: &ResourceId,
 ) -> Option<Refusal> {
     let mut found: BTreeSet<Refusal> = BTreeSet::new();
-    let a = SectionsDoc { doc: prev.clone() };
-    let b = SectionsDoc { doc: next.clone() };
+    let scope = scope_of(next, change);
+    let (in_nodes, in_objects, in_placements) = (
+        scope.as_ref().map(|s| &s.nodes),
+        scope.as_ref().map(|s| &s.objects),
+        scope.as_ref().map(|s| &s.placements),
+    );
+    let section_written = scope.as_ref().is_none_or(|s| s.section);
     let initialized = object_id(prev, &ROOT, "section").is_some();
     // A4: root containers and the profile.
     if initialized {
@@ -1914,7 +2167,7 @@ fn structural_refusal(
         object_id(next, &ROOT, "nodes"),
     );
     if let (Some(pn), Some(nn)) = (&pn, &nn) {
-        for id in prev.keys(pn).collect::<Vec<_>>() {
+        for id in keys_in(prev, pn, in_nodes) {
             let (Some(old), Some(new)) = (object_id(prev, pn, &id), object_id(next, nn, &id))
             else {
                 found.insert(Refusal::ContainerReplaced);
@@ -1943,7 +2196,7 @@ fn structural_refusal(
         object_id(next, &ROOT, "objects"),
     );
     if let (Some(po), Some(no)) = (&po, &no) {
-        for id in prev.keys(po).collect::<Vec<_>>() {
+        for id in keys_in(prev, po, in_objects) {
             if let (Some(old), Some(new)) = (object_id(prev, po, &id), object_id(next, no, &id)) {
                 for key in ["id", "type", "created_by"] {
                     if scalar(prev, &old, key) != scalar(next, &new, key) {
@@ -1954,16 +2207,19 @@ fn structural_refusal(
         }
     }
     // A3: placements are immutable once created.
-    let (old_placements, new_placements) = (a.placements(), b.placements());
+    let (old_placements, new_placements) = (
+        placements_in(prev, in_placements),
+        placements_in(next, in_placements),
+    );
     for (id, p) in &old_placements {
         if new_placements.get(id) != Some(p) {
             found.insert(Refusal::ImmutableFieldMutated);
         }
     }
     // A1, A2, A5 on the children lists.
-    let section_id = b.section().map(|s| s.id);
+    let section_id = ns.as_ref().and_then(|ns| scalar(next, ns, "id"));
     let mut lanes: Vec<(String, Option<ObjId>, ObjId)> = Vec::new();
-    if let (Some(sid), Some(ns)) = (&section_id, &ns) {
+    if let (true, Some(sid), Some(ns)) = (section_written, &section_id, &ns) {
         if let Some(l) = object_id(next, ns, "children") {
             lanes.push((
                 sid.clone(),
@@ -1973,7 +2229,7 @@ fn structural_refusal(
         }
     }
     if let Some(nn) = &nn {
-        for id in next.keys(nn).collect::<Vec<_>>() {
+        for id in keys_in(next, nn, in_nodes) {
             let Some(n) = object_id(next, nn, &id) else {
                 continue;
             };
@@ -2032,7 +2288,14 @@ fn structural_refusal(
             }
         }
     }
-    let new_nodes = b.nodes();
+    // The selected placements of the created placements' nodes, as nodes()
+    // reads them (a node is a map under its key).
+    let node_placements = |n: &str| -> Vec<String> {
+        nn.as_ref()
+            .and_then(|nn| object(next, nn, n, ObjType::Map))
+            .map(|m| scalars(next, &m, "placement"))
+            .unwrap_or_default()
+    };
     for id in &created {
         let p = &new_placements[id];
         let owners = inserted_into.get(id).cloned().unwrap_or_default();
@@ -2042,15 +2305,14 @@ fn structural_refusal(
         let selected = p
             .node_id
             .as_ref()
-            .and_then(|n| new_nodes.get(n))
-            .is_some_and(|n| n.placements.contains(id));
+            .is_some_and(|n| node_placements(n).contains(id));
         if !selected {
             found.insert(Refusal::PlacementNotAtomic);
         }
     }
     // A5: scalars stay scalar; a paragraph, item or raw node's text is Text.
     if let Some(nn) = &nn {
-        for id in next.keys(nn).collect::<Vec<_>>() {
+        for id in keys_in(next, nn, in_nodes) {
             let Some(n) = object_id(next, nn, &id) else {
                 continue;
             };
@@ -2080,7 +2342,7 @@ fn structural_refusal(
         }
     }
     if let Some(no) = &no {
-        for id in next.keys(no).collect::<Vec<_>>() {
+        for id in keys_in(next, no, in_objects) {
             let Some(t) = object_id(next, no, &id) else {
                 continue;
             };

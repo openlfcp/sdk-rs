@@ -231,6 +231,14 @@ fn holds(doc: &mut AutoCommit, hash: &ChangeHash) -> bool {
     doc.get_change_meta_by_hash(hash).is_some()
 }
 
+/// Empties the document's patch log (LFCP-02-111). This crate reads no
+/// patches, yet automerge 0.12 records some events even in an inactive
+/// log; kept, they grow with every apply and are copied by every clone of
+/// the document.
+pub(crate) fn drop_patch_log(doc: &mut AutoCommit) {
+    doc.reset_diff_cursor();
+}
+
 /// The latest sequence number of every actor of `doc`.
 fn seqs_of(doc: &mut AutoCommit) -> Result<HashMap<ActorId, u64>, ProfileError> {
     let mut seqs = HashMap::new();
@@ -543,6 +551,7 @@ impl SharedObjects {
 
     /// Record what an admitted change added.
     fn add(&mut self, created: Created) {
+        drop_patch_log(&mut self.doc);
         self.depths.extend(created.objects);
         self.history.add(created.history);
     }
@@ -633,6 +642,7 @@ impl SharedObjects {
                 .collect();
             let mut doc = AutoCommit::new().with_actor(self.doc.get_actor().clone());
             doc.apply_changes(keep)?;
+            drop_patch_log(&mut doc);
             self.doc = doc;
             self.seqs = seqs_of(&mut self.doc)?;
             self.depths = depth::depths_of(&mut self.doc)?;
@@ -941,6 +951,7 @@ impl SharedObjects {
             .collect();
         let mut doc = AutoCommit::new().with_actor(self.doc.get_actor().clone());
         doc.apply_changes(keep)?;
+        drop_patch_log(&mut doc);
         self.doc = doc;
         self.seqs = seqs_of(&mut self.doc)?;
         self.depths = depth::depths_of(&mut self.doc)?;
