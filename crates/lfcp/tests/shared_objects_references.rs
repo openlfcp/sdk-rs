@@ -375,6 +375,30 @@ fn references_outside_the_rules_are_refused() {
     };
     let cases: Vec<(&str, Change)> = vec![
         (
+            "R10: a table made and written into (finding D1)",
+            change(
+                3,
+                4,
+                heads.clone(),
+                vec![
+                    op(
+                        OpType::Make(ObjType::Table),
+                        ObjectId::Root,
+                        Key::Map("t".into()),
+                        vec![],
+                        false,
+                    ),
+                    op(
+                        OpType::Put(ScalarValue::Int(1)),
+                        ObjectId::Id(id(4, 1)),
+                        Key::Map("x".into()),
+                        vec![],
+                        false,
+                    ),
+                ],
+            ),
+        ),
+        (
             "R8: increment without a predecessor",
             change(3, 4, heads.clone(), vec![increment(vec![])]),
         ),

@@ -25,7 +25,9 @@
 //! - R7: a deletion has at least one predecessor;
 //! - R8: an increment has at least one predecessor, and every one is a
 //!   put of a counter value (mvp-0.2-baseline.5);
-//! - R9: no operation is a mark (mvp-0.2-baseline.5).
+//! - R9: no operation is a mark (mvp-0.2-baseline.5);
+//! - R10: no operation makes a table (mvp-0.2-baseline.5; automerge 0.12
+//!   aborts applying a write into one, finding D1).
 //!
 //! [`History`] keeps what these need: each change's vector clock and
 //! largest counter, and the object, key and kind of each operation.
@@ -118,7 +120,7 @@ impl Overlay {
 }
 
 /// The §11.3 or §11.4 rule a change breaks: "C" (canonical encoding) or
-/// "R1" to "R9".
+/// "R1" to "R10".
 pub type Rule = &'static str;
 
 fn require(ok: bool, rule: Rule) -> Result<(), Rule> {
@@ -252,6 +254,9 @@ impl History {
             }
             // R9.
             require(op.action != MARK, "R9")?;
+            // R10.
+            const MAKE_TABLE: u64 = 6;
+            require(op.action != MAKE_TABLE, "R10")?;
             if op.action != DELETE {
                 let kind = match op.action {
                     a @ (0 | 2 | 4 | 6) => Kind::Make(a),
