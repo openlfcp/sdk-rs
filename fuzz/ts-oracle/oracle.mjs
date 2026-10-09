@@ -1,0 +1,121 @@
+// The sdk-ts side of the diff_ts fuzz target: a long-running process that
+// reads one case per line on stdin and writes the TypeScript SDK's verdicts
+// on stdout. It uses only the public npm API of a locally built sdk-ts
+// (@openlfcp/shared-objects, its ./sections entry, @openlfcp/core): the
+// implementation is a black box here (independence rule).
+//
+// Case: {"id", "mode": "so" | "ss", "resource": hex, "principal": hex,
+//        "items": [{"b64": plaintext, "signer": hex | null}]}
+// Answer: {"id", "verdicts": [string per item], "heads": [string per item]}
+// Verdicts: applied, duplicate, missing, held, invalid:<DIAGNOSTIC>,
+// refused:<DIAGNOSTIC>, error:<CODE>.
+
+import { createInterface } from "node:readline";
+import { pathToFileURL } from "node:url";
+import { join } from "node:path";
+
+const dir = process.env.LFCP_SDK_TS_DIR;
+if (!dir) {
+  process.stderr.write("LFCP_SDK_TS_DIR is not set (a built sdk-ts checkout)\n");
+  process.exit(2);
+}
+const entry = (p) => pathToFileURL(join(dir, "packages", p)).href;
+const so = await import(entry("shared-objects/dist/index.js"));
+const ss = await import(entry("shared-objects/dist/sections/index.js"));
+const core = await import(entry("core/dist/index.js"));
+const admission = await import(entry("shared-objects/dist/admission/index.js"));
+await so.initializeAutomerge();
+
+const bytes = (b64) => new Uint8Array(Buffer.from(b64, "base64"));
+const id = (hex) => Uint8Array.from(Buffer.from(hex, "hex"));
+const hexHeads = (s) => (String(s).match(/[0-9a-f]{64}/g) ?? []).sort().join(",");
+
+function failure(e) {
+  if (e && typeof e.diagnostic === "string") return `invalid:${e.diagnostic}`;
+  if (e && typeof e.code === "string") return e.code === "ACTOR_EQUIVOCATION" ? "held" : `error:${e.code}`;
+  return `throw:${String(e && e.message ? e.message : e).slice(0, 80)}`;
+}
+
+function runObjects(c) {
+  const replica = so.SharedObjectsReplica.empty({
+    resource: core.resourceId(id(c.resource)),
+    principal: core.principalId(id(c.principal)),
+  });
+  const verdicts = [];
+  const heads = [];
+  for (const item of c.items) {
+    let v;
+    try {
+      const r = replica.receive(bytes(item.b64));
+      v = r.status === "applied" ? "applied" : r.status === "duplicate" ? "duplicate" : "missing";
+    } catch (e) {
+      v = failure(e);
+    }
+    verdicts.push(v);
+    heads.push(replica.heads().slice().sort().join(","));
+  }
+  return { verdicts, heads };
+}
+
+function runSections(c) {
+  const replica = ss.SectionReplica.empty({
+    resource: core.resourceId(id(c.resource)),
+    principal: core.principalId(id(c.principal)),
+  });
+  const verdicts = [];
+  const heads = [];
+  // receiveChanges keeps nothing between calls: as a client does, the
+  // units still missing a dependency are offered again with each new one.
+  let waiting = [];
+  for (const item of c.items) {
+    let v;
+    try {
+      // receiveChanges takes the bare change: only the Data Unit's [1, bstr]
+      // framing is removed here (no check of the change); bad framing is the
+      // receiver's INVALID_AUTOMERGE_BYTES, as SOP §11 says.
+      let chunk;
+      try {
+        chunk = so.unframeProfilePayload(bytes(item.b64));
+      } catch {
+        verdicts.push("refused:INVALID_AUTOMERGE_BYTES");
+        heads.push(hexHeads(replica.revision()));
+        continue;
+      }
+      let hash;
+      try {
+        hash = so.checkChange(chunk).hash;
+      } catch (e) {
+        hash = admission.refusedChangeHash(chunk, e);
+      }
+      const unit = { bytes: chunk, hash };
+      if (item.signer) unit.signer = core.principalId(id(item.signer));
+      const offered = [unit, ...waiting];
+      const r = replica.receiveChanges(offered);
+      const mine = r.refused.find((f) => f.index === 0);
+      if (mine) v = mine.held ? "held" : `refused:${mine.diagnostic}`;
+      else if (hash && r.admitted.includes(hash)) v = "applied";
+      else if (hash && r.duplicates.includes(hash)) v = "duplicate";
+      else if (hash && r.waiting.includes(hash)) v = "missing";
+      else v = "none";
+      waiting = offered.filter((u) => u.hash && r.waiting.includes(u.hash));
+    } catch (e) {
+      v = failure(e);
+    }
+    verdicts.push(v);
+    heads.push(hexHeads(replica.revision()));
+  }
+  return { verdicts, heads };
+}
+
+const lines = createInterface({ input: process.stdin });
+for await (const line of lines) {
+  if (!line.trim()) continue;
+  const c = JSON.parse(line);
+  let out;
+  try {
+    out = c.mode === "ss" ? runSections(c) : runObjects(c);
+  } catch (e) {
+    out = { fatal: String(e && e.stack ? e.stack : e) };
+  }
+  process.stdout.write(JSON.stringify({ id: c.id, ...out }) + "\n");
+}

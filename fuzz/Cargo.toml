@@ -76,3 +76,10 @@ path = "fuzz_targets/sections_gen.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "diff_ts"
+path = "fuzz_targets/diff_ts.rs"
+test = false
+doc = false
+bench = false
