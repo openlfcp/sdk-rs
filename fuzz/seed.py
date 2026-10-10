@@ -4,7 +4,7 @@
 Reads SHARED-OBJECTS-AUTOMERGE-REFERENCE-01 and
 SHARED-SECTIONS-TEST-VECTORS-01 at the commit spec.lock pins, with
 `git show`, from $LFCP_SPEC_DIR or ../spec next to this repository, and
-writes fuzz/corpus/<target>/<name>. Run from anywhere:
+writes fuzz/corpus/<target>/<name>. $LFCP_SPEC_COMMIT reads another commit. Run from anywhere:
 
     python3 fuzz/seed.py
 """
@@ -33,7 +33,7 @@ def spec_json(path):
     spec = os.environ.get("LFCP_SPEC_DIR", "../spec")
     spec = os.path.join(ROOT, spec)
     out = subprocess.run(
-        ["git", "-C", spec, "show", f"{lock['commit']}:{path}"],
+        ["git", "-C", spec, "show", f"{os.environ.get('LFCP_SPEC_COMMIT', lock['commit'])}:{path}"],
         check=True,
         capture_output=True,
     ).stdout
