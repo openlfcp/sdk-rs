@@ -578,3 +578,91 @@ fn a_section_created_with_ready_false_is_refused() {
         shared_sections::Received::Applied
     );
 }
+
+#[test]
+fn text_in_a_field_the_profile_does_not_define_is_refused() {
+    // A5 (finding D3 of the differential fuzzing; SS71 to SS74 from
+    // mvp-0.2-baseline.6): collaborative Text is refused in any field of the
+    // section and anywhere in a Task, whether or not the profile defines
+    // the field. A scalar string in the same field applies.
+    use automerge::transaction::Transactable;
+    use automerge::{AutoCommit, ObjType, ROOT};
+    use lfcp::shared_objects::framing;
+    let corpus = corpus();
+    let resource = ResourceId::from_bytes(
+        base::fixed(
+            &base::from_hex(corpus["identities"]["resource_hex"].as_str().unwrap()).unwrap(),
+        )
+        .unwrap(),
+    );
+    let case = &corpus["cases"][0];
+    let section = SectionsDoc::load(&bytes_of(&case["reference_snapshot"]))
+        .unwrap()
+        .section()
+        .unwrap();
+    let signer = received(&corpus, case)[0].0;
+    let last = |doc: &mut AutoCommit| {
+        framing::encode_change(doc.get_last_local_change().unwrap().raw_bytes())
+    };
+    // The section's genesis, then one more change written by `edit`.
+    let receive = |edit: &dyn Fn(&mut AutoCommit, &automerge::ObjId, &automerge::ObjId)| {
+        let mut doc = AutoCommit::new().with_actor(shared_sections::actor_id(&resource, &signer));
+        doc.put(&ROOT, "profile", "org.openlfcp.shared-sections.v1")
+            .unwrap();
+        let s = doc.put_object(&ROOT, "section", ObjType::Map).unwrap();
+        doc.put(&s, "id", section.id.as_str()).unwrap();
+        doc.put(&s, "title", "Joint launch").unwrap();
+        doc.put(&s, "created_by", section.created_by.as_deref().unwrap())
+            .unwrap();
+        doc.put(&s, "ready", true).unwrap();
+        doc.put_object(&s, "children", ObjType::List).unwrap();
+        doc.put_object(&s, "extensions", ObjType::Map).unwrap();
+        let objects = doc.put_object(&ROOT, "objects", ObjType::Map).unwrap();
+        for key in ["nodes", "placements", "extensions"] {
+            doc.put_object(&ROOT, key, ObjType::Map).unwrap();
+        }
+        doc.commit();
+        let genesis = last(&mut doc);
+        edit(&mut doc, &s, &objects);
+        doc.commit();
+        let mut replica =
+            shared_sections::SectionsReplica::new(resource, automerge::ActorId::from([7u8; 32]));
+        assert_eq!(
+            replica.receive(&signer, &genesis),
+            shared_sections::Received::Applied
+        );
+        replica.receive(&signer, &last(&mut doc))
+    };
+    let refused = shared_sections::Received::Refused(shared_sections::Refusal::InvalidFieldType);
+    assert_eq!(
+        receive(&|doc, s, _| {
+            let t = doc.put_object(s, "subtitle", ObjType::Text).unwrap();
+            doc.splice_text(&t, 0, 0, "Q3").unwrap();
+        }),
+        refused
+    );
+    assert_eq!(
+        receive(&|doc, s, _| {
+            doc.put(s, "subtitle", "Q3").unwrap();
+        }),
+        shared_sections::Received::Applied
+    );
+    assert_eq!(
+        receive(&|doc, _, objects| {
+            let task = doc
+                .put_object(
+                    objects,
+                    "019a2f85-7b31-7c42-b85a-fc843e2f40ad",
+                    ObjType::Map,
+                )
+                .unwrap();
+            let ext = doc.put_object(&task, "extensions", ObjType::Map).unwrap();
+            let notes = doc
+                .put_object(&ext, "org.example.notes", ObjType::List)
+                .unwrap();
+            let t = doc.insert_object(&notes, 0, ObjType::Text).unwrap();
+            doc.splice_text(&t, 0, 0, "Call the client").unwrap();
+        }),
+        refused
+    );
+}

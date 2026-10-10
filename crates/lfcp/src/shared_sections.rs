@@ -2104,6 +2104,34 @@ fn is_text(doc: &AutoCommit, obj: &ObjId, key: &str) -> bool {
     )
 }
 
+/// The Text objects anywhere under the map `obj`, in its maps and lists.
+fn texts_under(doc: &impl Read, obj: &ObjId) -> HashSet<ObjId> {
+    let mut texts = HashSet::new();
+    let mut stack = vec![(obj.clone(), ObjType::Map)];
+    while let Some((obj, kind)) = stack.pop() {
+        let values: Vec<(Value<'_>, ObjId)> = match kind {
+            ObjType::List => (0..doc.list_items(&obj).len())
+                .filter_map(|i| doc.get_value(&obj, i.into()))
+                .collect(),
+            _ => doc
+                .key_list(&obj)
+                .into_iter()
+                .filter_map(|k| doc.get_value(&obj, k.into()))
+                .collect(),
+        };
+        for (v, id) in values {
+            match v {
+                Value::Object(ObjType::Text) => {
+                    texts.insert(id);
+                }
+                Value::Object(t) => stack.push((id, t)),
+                Value::Scalar(_) => {}
+            }
+        }
+    }
+    texts
+}
+
 /// Every value of a list, scalar strings as themselves and anything else
 /// as `None`.
 fn list_values(doc: &impl Read, list: &ObjId) -> Vec<Option<String>> {
@@ -2467,27 +2495,38 @@ fn structural_refusal(
             found.insert(Refusal::PlacementNotAtomic);
         }
     }
-    // A5: scalars stay scalar; a paragraph, item or raw node's text is Text.
+    // A5: no Text but a node's text, in any field, whether or not the
+    // profile defines it (finding D3); a paragraph, item or raw node's text
+    // is Text.
+    let new_text = |old: Option<&ObjId>, now: &ObjId, except: &str| {
+        next.key_list(now).iter().any(|key| {
+            key != except
+                && is_text(next, now, key)
+                && old.is_none_or(|o| object_id(prev, o, key) != object_id(next, now, key))
+        })
+    };
+    if let (true, Some(ns)) = (section_written, &ns) {
+        if new_text(ps.as_ref(), ns, "") {
+            found.insert(Refusal::InvalidFieldType);
+        }
+    }
+    if let Some(pl) = object(next, &ROOT, "placements", ObjType::Map) {
+        for id in &created {
+            if let Some(p) = object(next, &pl, id, ObjType::Map) {
+                if new_text(None, &p, "") {
+                    found.insert(Refusal::InvalidFieldType);
+                }
+            }
+        }
+    }
     if let Some(nn) = &nn {
         for id in keys_in(next, nn, in_nodes) {
             let Some(n) = object_id(next, nn, &id) else {
                 continue;
             };
             let old = pn.as_ref().and_then(|pn| object_id(prev, pn, &id));
-            for key in [
-                "id",
-                "kind",
-                "created_by",
-                "lifecycle",
-                "placement",
-                "task_id",
-                "list_style",
-            ] {
-                let changed =
-                    old.as_ref().map(|o| object_id(prev, o, key)) != Some(object_id(next, &n, key));
-                if is_text(next, &n, key) && (old.is_none() || changed) {
-                    found.insert(Refusal::InvalidFieldType);
-                }
+            if new_text(old.as_ref(), &n, "text") {
+                found.insert(Refusal::InvalidFieldType);
             }
             let kind = scalar(next, &n, "kind");
             if matches!(kind.as_deref(), Some("paragraph" | "item" | "raw"))
@@ -2503,25 +2542,12 @@ fn structural_refusal(
             let Some(t) = object_id(next, no, &id) else {
                 continue;
             };
+            // SOP §30: no Text anywhere in a Task, its nested maps and
+            // lists included.
             let old = po.as_ref().and_then(|po| object_id(prev, po, &id));
-            for key in [
-                "id",
-                "type",
-                "created_by",
-                "lifecycle",
-                "title",
-                "status",
-                "priority",
-                "due",
-                "scheduled",
-                "completion_date",
-                "created_at",
-            ] {
-                let changed =
-                    old.as_ref().map(|o| object_id(prev, o, key)) != Some(object_id(next, &t, key));
-                if is_text(next, &t, key) && (old.is_none() || changed) {
-                    found.insert(Refusal::InvalidFieldType);
-                }
+            let before = old.map(|o| texts_under(prev, &o)).unwrap_or_default();
+            if texts_under(next, &t).iter().any(|x| !before.contains(x)) {
+                found.insert(Refusal::InvalidFieldType);
             }
         }
     }
