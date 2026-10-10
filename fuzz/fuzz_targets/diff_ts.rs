@@ -175,6 +175,20 @@ fn known(sections: bool, ours: &str, theirs: &str) -> Option<&'static str> {
         // D2: a sequence number or time of 2^53 or more; sdk-ts refuses.
         (false, "applied" | "missing", "invalid:INVALID_AUTOMERGE_BYTES")
         | (true, "applied" | "missing", "refused:INVALID_AUTOMERGE_BYTES") => Some("D2"),
+        // D2 too: the actor is wrong as well; sdk-rs names the actor first,
+        // sdk-ts refuses the number before it looks at the actor.
+        (true, "refused:CHANGE_ACTOR_MISMATCH", "refused:INVALID_AUTOMERGE_BYTES") => Some("D2"),
+        // D1 too: a node made as a table; sdk-ts refuses it by a section
+        // rule before its engine, sdk-rs when its engine aborts.
+        (
+            true,
+            "refused:INVALID_AUTOMERGE_BYTES",
+            "refused:PLACEMENT_NOT_ATOMIC"
+            | "refused:CONTAINER_REPLACED"
+            | "refused:CHILDREN_LIST_MUTATED"
+            | "refused:IMMUTABLE_FIELD_MUTATED"
+            | "refused:INVALID_FIELD_TYPE",
+        ) => Some("D1"),
         // D3: Text in a field the profile does not define (A5).
         (true, "applied", "refused:INVALID_FIELD_TYPE") => Some("D3"),
         // D4: `ready` other than true when the change creates the section.
