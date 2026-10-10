@@ -138,6 +138,23 @@ fn reference_documents_read_through_the_schema() {
         let expected = &case["expected"];
         let doc = SectionsDoc::load(&bytes_of(&case["reference_snapshot"]))
             .unwrap_or_else(|e| panic!("{id}: load: {e}"));
+        if expected["classification"] == "PROFILE_INVALID" {
+            // A refused genesis leaves no section (SS65): the root error,
+            // and nothing to read.
+            let errors: Vec<&str> = expected["errors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| e.as_str().unwrap())
+                .collect();
+            assert_eq!(
+                doc.validate_root().map_err(|d| d.name()),
+                Err(errors[0]),
+                "{id}: root"
+            );
+            assert_eq!(expected["nodeCount"], 0, "{id}: nodes");
+            continue;
+        }
         assert_eq!(doc.validate_root(), Ok(()), "{id}: root");
         let section = doc.section().unwrap();
         assert_eq!(
