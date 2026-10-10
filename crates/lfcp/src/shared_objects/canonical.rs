@@ -12,7 +12,9 @@
 //! The rules (N is the row count of the action column, 0 when absent):
 //! - every LEB128 number has its shortest encoding;
 //! - the dependencies are strictly ascending; the sequence number and
-//!   start op are at least 1; the message is UTF-8; the other actors are
+//!   start op are at least 1; the sequence number is below 2^53 and the
+//!   time between -2^53 and 2^53, which a JavaScript number holds exactly
+//!   (Automerge JS does not decode the others, finding D2); the message is UTF-8; the other actors are
 //!   strictly ascending, none is the change's actor, and they are exactly
 //!   the other actors the operations refer to;
 //! - only the columns of [`COLUMNS`], in ascending order, each once, none
@@ -41,6 +43,10 @@ const INVALID: ProfileError = ProfileError::Invalid(Diagnostic::InvalidAutomerge
 
 /// Counters are below this (§11.3; automerge keeps them in 32 bits).
 pub const COUNTER_LIMIT: u64 = 1 << 32;
+
+/// The sequence number and the magnitude of the time are below this
+/// (§11.3 rule 2): a JavaScript number holds them exactly.
+pub const SAFE_LIMIT: u64 = 1 << 53;
 
 const MAGIC: [u8; 4] = [0x85, 0x6f, 0x4a, 0x83];
 const CHANGE_CHUNK: u8 = 1;
@@ -449,6 +455,12 @@ fn rules(c: &Content) -> Result<(), &'static str> {
     let ok = |b: bool, rule: &'static str| if b { Ok(()) } else { Err(rule) };
     ok(c.deps.windows(2).all(|w| w[0] < w[1]), "deps ascending")?;
     ok(c.seq >= 1 && c.start_op >= 1, "seq and start op")?;
+    // Rule 2: header numbers a JavaScript number holds exactly (D2).
+    ok(c.seq < SAFE_LIMIT, "seq below 2^53")?;
+    ok(
+        c.time.unsigned_abs() < SAFE_LIMIT,
+        "time between -2^53 and 2^53",
+    )?;
     // Rule 8: the start op itself, even of a change without operations
     // (N1; automerge 0.12 refuses a larger one).
     ok(c.start_op < COUNTER_LIMIT, "start op")?;

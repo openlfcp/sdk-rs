@@ -127,6 +127,38 @@ fn n1_a_start_op_of_2_32_is_refused_without_operations() {
 }
 
 #[test]
+fn d2_header_numbers_beyond_2_53_are_refused_when_they_arrive() {
+    // §11.3 rule 2 (mvp-0.2-baseline.6, finding D2): the sequence number is
+    // below 2^53 and the time between -2^53 and 2^53. The check is part of
+    // decoding the plaintext, so it comes before the actor check and the
+    // dependency check of §14.1, here with a dependency nobody holds.
+    let mut content = canonical::check(&bytes(F3C)[4..]).expect("canonical");
+    content.deps.push([0xff; 32]);
+    let decode = |c: &canonical::Content| {
+        framing::decode_change(&framing::encode_change(&canonical::encode(c)))
+    };
+    let limit: u64 = 1 << 53;
+    for (seq, time, ok) in [
+        (limit - 1, 0, true),
+        (limit, 0, false),
+        (1, (limit - 1) as i64, true),
+        (1, -((limit - 1) as i64), true),
+        (1, limit as i64, false),
+        (1, -(limit as i64), false),
+        (1, (1 << 56) - 1, false),
+        (1, i64::MIN, false),
+    ] {
+        let mut c = content.clone();
+        c.seq = seq;
+        c.time = time;
+        assert_eq!(decode(&c).is_ok(), ok, "seq {seq}, time {time}");
+        if !ok {
+            assert_eq!(decode(&c).err(), Some(INVALID));
+        }
+    }
+}
+
+#[test]
 fn f4_a_predecessor_on_another_key_is_refused() {
     let corpus = Spec::open().read_json(CORPUS);
     let s15 = corpus["scenarios"]
