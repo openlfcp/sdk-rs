@@ -12,7 +12,10 @@
 //! or the refusal with its diagnostic) and the two replicas' heads must be
 //! the same; any difference crashes with both sides.
 //!
-//! Needs `LFCP_SDK_TS_DIR` (a built sdk-ts checkout) and `node` on PATH.
+//! `LFCP_FUZZ_TRACE=1` prints both sides' verdicts of every input.
+//!
+//! Needs `node` on PATH and either `LFCP_SDK_TS_DIR` (a built sdk-ts
+//! checkout) or `LFCP_SDK_TS_NPM` (a directory with the packages installed).
 
 #![no_main]
 
@@ -44,7 +47,7 @@ fn oracle() -> &'static Mutex<Oracle> {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
-            .expect("node runs (LFCP_SDK_TS_DIR set, node on PATH)");
+            .expect("node runs (LFCP_SDK_TS_DIR or LFCP_SDK_TS_NPM set, node on PATH)");
         let input = child.stdin.take().expect("stdin");
         let output = BufReader::new(child.stdout.take().expect("stdout"));
         Mutex::new(Oracle {
@@ -246,6 +249,9 @@ fuzz_target!(|data: &[u8]| {
         }
     }
     let (theirs, their_heads) = ask(if sections { "ss" } else { "so" }, resource_hex, &items);
+    if std::env::var_os("LFCP_FUZZ_TRACE").is_some() {
+        eprintln!("sdk-rs: {ours:?}\nsdk-ts: {theirs:?}");
+    }
     for i in 0..ours.len() {
         let (a, b) = (
             &ours[i],
