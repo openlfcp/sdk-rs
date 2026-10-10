@@ -77,7 +77,7 @@ SDK-SECTIONS-INTEGRATION-01, that is commit receipts and their release
 adapter's journal (§7). sdk-rs has no local commit pipeline, outbound
 queue or sync session, so these contracts do not apply to it yet,
 including the rule that a batch released before its status is final is
-still reported until it is (§3.5, `mvp-0.2-baseline.4`).
+still reported until it is (§3.5, `mvp-0.2-baseline.5`).
 sdk-ts implements them.
 
 The LFCP protocol layer of this SDK (LFCP-041 to LFCP-043) is complete
@@ -130,10 +130,10 @@ builds on the stable Rust toolchain; no older minimum version is promised.
 `spec.lock` pins the specification this SDK implements:
 
 ```json
-{ "tag": "mvp-0.2-baseline.4", "commit": "1e548f7f9c95820ec16d3c58cb8a93fdd6a72b6d" }
+{ "tag": "mvp-0.2-baseline.5", "commit": "45e5aadf70ca76cd2b366389102c017955ca1003" }
 ```
 
-`mvp-0.2-baseline.4` is the MVP 0.1 baseline `mvp-0.1-baseline.10`
+`mvp-0.2-baseline.5` is the MVP 0.1 baseline `mvp-0.1-baseline.10`
 unchanged, plus the shared sections profile, its Markdown grammar, the SDK
 integration contracts and their corpus (in `lfcp-vector-format/1`), with
 the canonical change encoding and operation references of SPEC-PATCH-10
@@ -143,7 +143,11 @@ case SS60). It also says how a refused change is named
 (SHARED-SECTIONS-PROFILE-01 §14.1): by its hash only when it is one
 uncompressed change chunk, so a refused compressed chunk is neither
 inflated nor named (SS44), and it adds changes above the expansion limits
-on the section receive path (SS61 to SS63).
+on the section receive path (SS61 to SS63). It bounds the start op of a
+change without operations below 2^32 (SHARED-OBJECTS-PROFILE-01 §11.3 rule
+8) and adds the operation references R8 to R10: an increment names only the
+counter puts it adds to, no operation is a mark, and none makes a table
+(§11.4, finding D1), which shared sections inherit (SS64, SS65).
 
 Vectors are never copied into this repository. The tests read them from a
 checkout of `openlfcp/spec` with `git show <commit>:<path>`, so the state of
