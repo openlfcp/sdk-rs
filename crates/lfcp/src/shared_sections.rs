@@ -1838,6 +1838,9 @@ pub struct SectionsReplica {
     engine: crate::shared_objects::document::SharedObjects,
     waiting: Vec<Change>,
     refused: BTreeMap<ChangeHash, Refusal>,
+    /// Refusals of bytes another Principal signed: named, but not held
+    /// against the change itself.
+    forwarded: BTreeSet<ChangeHash>,
 }
 
 impl SectionsReplica {
@@ -1848,6 +1851,7 @@ impl SectionsReplica {
             engine: crate::shared_objects::document::SharedObjects::new(actor),
             waiting: Vec::new(),
             refused: BTreeMap::new(),
+            forwarded: BTreeSet::new(),
         }
     }
 
@@ -1860,10 +1864,18 @@ impl SectionsReplica {
                 // §11.1 limits), computed without parsing its operations:
                 // refused bytes are never handed to Automerge, which would
                 // expand them (an RLE or DEFLATE bomb).
-                // Only a change of the signer's own actor is recorded: another
-                // Principal must not block a change by forwarding it spoiled.
+                // A change of another Principal's unit is named too (§14.1
+                // names every refused change chunk), but not held against
+                // the change: the checksum is outside the hashed bytes, so a
+                // spoiled copy forwarded by another Principal has the
+                // genuine change's hash and must not block it.
                 return match crate::shared_objects::framing::refused_change_key(plaintext) {
                     Some((hash, actor)) if actor == actor_id_bytes(&self.resource, signer) => {
+                        self.forwarded.remove(&hash);
+                        self.refuse(hash, Refusal::InvalidAutomergeBytes)
+                    }
+                    Some((hash, _)) if !self.refused.contains_key(&hash) => {
+                        self.forwarded.insert(hash);
                         self.refuse(hash, Refusal::InvalidAutomergeBytes)
                     }
                     _ => Received::Refused(Refusal::InvalidAutomergeBytes),
@@ -1894,6 +1906,9 @@ impl SectionsReplica {
 
     fn admit(&mut self, change: Change) -> Received {
         let hash = change.hash();
+        if self.forwarded.remove(&hash) {
+            self.refused.remove(&hash);
+        }
         match self.refused.get(&hash) {
             Some(Refusal::ChangeActorMismatch) => {
                 self.refused.remove(&hash);

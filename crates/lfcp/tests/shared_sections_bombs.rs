@@ -133,8 +133,10 @@ fn a_compressed_change_of_the_signer_is_refused_unnamed() {
 
 #[test]
 fn a_spoiled_change_forwarded_by_another_principal_blocks_nothing() {
-    // A refusal is recorded by change hash only for the signer's own actor:
-    // B cannot block A's change by sending its bytes with a wrong checksum.
+    // A refusal is held against the change's hash only for the signer's own
+    // actor: B cannot block A's change by sending its bytes with a wrong
+    // checksum. B's copy is named (§14.1 names every refused change chunk),
+    // and A's genuine change lifts the record.
     let resource = ResourceId::from_bytes([3; 32]);
     let (a, b) = (
         PrincipalId::from_bytes([4; 32]),
@@ -154,11 +156,15 @@ fn a_spoiled_change_forwarded_by_another_principal_blocks_nothing() {
         replica.receive(&b, &framing::encode_change(&spoiled)),
         Received::Refused(Refusal::InvalidAutomergeBytes)
     );
-    assert!(replica.refused().is_empty());
+    assert_eq!(
+        replica.refused().keys().collect::<Vec<_>>(),
+        vec![&change.hash()]
+    );
     assert_eq!(
         replica.receive(&a, &framing::encode_change(change.raw_bytes())),
         Received::Applied
     );
+    assert!(replica.refused().is_empty());
     // A's own spoiled bytes are recorded under the change's hash.
     let mut own = SectionsReplica::new(resource, ActorId::from([7u8; 32]));
     own.receive(&a, &framing::encode_change(&spoiled));
