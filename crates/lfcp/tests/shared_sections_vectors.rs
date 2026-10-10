@@ -507,3 +507,57 @@ fn snapshots_at_the_floor_are_checked_as_recorded() {
     }
     assert_eq!(checked, 2);
 }
+
+#[test]
+fn a_section_created_with_ready_false_is_refused() {
+    // §12.1 binds the change that creates the section too (finding D4 of
+    // the differential fuzzing; SS65 from mvp-0.2-baseline.5): `ready`, if
+    // it writes it, is true. The same genesis with `ready = true` applies.
+    use automerge::transaction::Transactable;
+    use automerge::{AutoCommit, ObjType, ROOT};
+    use lfcp::shared_objects::framing;
+    let corpus = corpus();
+    let resource = ResourceId::from_bytes(
+        base::fixed(
+            &base::from_hex(corpus["identities"]["resource_hex"].as_str().unwrap()).unwrap(),
+        )
+        .unwrap(),
+    );
+    // The section and the creator of SS01's genesis.
+    let case = &corpus["cases"][0];
+    let section = SectionsDoc::load(&bytes_of(&case["reference_snapshot"]))
+        .unwrap()
+        .section()
+        .unwrap();
+    let signer = received(&corpus, case)[0].0;
+    let genesis = |ready: bool| {
+        let mut doc = AutoCommit::new().with_actor(shared_sections::actor_id(&resource, &signer));
+        doc.put(&ROOT, "profile", "org.openlfcp.shared-sections.v1")
+            .unwrap();
+        let s = doc.put_object(&ROOT, "section", ObjType::Map).unwrap();
+        doc.put(&s, "id", section.id.as_str()).unwrap();
+        doc.put(&s, "title", "Joint launch").unwrap();
+        doc.put(&s, "created_by", section.created_by.as_deref().unwrap())
+            .unwrap();
+        doc.put(&s, "ready", ready).unwrap();
+        doc.put_object(&s, "children", ObjType::List).unwrap();
+        doc.put_object(&s, "extensions", ObjType::Map).unwrap();
+        for key in ["objects", "nodes", "placements", "extensions"] {
+            doc.put_object(&ROOT, key, ObjType::Map).unwrap();
+        }
+        let change = doc.get_last_local_change().unwrap().clone();
+        framing::encode_change(change.raw_bytes())
+    };
+    let mut replica =
+        shared_sections::SectionsReplica::new(resource, automerge::ActorId::from([7u8; 32]));
+    assert_eq!(
+        replica.receive(&signer, &genesis(false)),
+        shared_sections::Received::Refused(shared_sections::Refusal::ImmutableFieldMutated)
+    );
+    let mut replica =
+        shared_sections::SectionsReplica::new(resource, automerge::ActorId::from([7u8; 32]));
+    assert_eq!(
+        replica.receive(&signer, &genesis(true)),
+        shared_sections::Received::Applied
+    );
+}

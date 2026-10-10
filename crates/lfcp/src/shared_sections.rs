@@ -2223,6 +2223,24 @@ fn placements_in(
         .collect()
 }
 
+/// §12.1: every value of the section's `ready` is `true`, and the change
+/// writing it is the creator's.
+fn ready_written_by_creator(
+    next: &AutoCommit,
+    ns: &ObjId,
+    change: &Change,
+    resource: &ResourceId,
+) -> bool {
+    let values = next.get_all(ns, "ready").unwrap_or_default();
+    let all_true = !values.is_empty()
+        && values.iter().all(|(v, _)| matches!(v, Value::Scalar(s) if matches!(s.as_ref(), ScalarValue::Boolean(true))));
+    let creator = scalar(next, ns, "created_by")
+        .and_then(|r| crate::shared_objects::identity::parse_principal_ref(&r).ok());
+    let by_creator =
+        creator.is_some_and(|p| change.actor_id().to_bytes() == actor_id_bytes(resource, &p));
+    all_true && by_creator
+}
+
 /// §14.1: the structural refusal of `change`, given the state `prev` of its
 /// causal history and the state `next` after it, or `None`. Only the
 /// entities the change writes into are compared ([`scope_of`]).
@@ -2268,18 +2286,19 @@ fn structural_refusal(
                 found.insert(Refusal::ImmutableFieldMutated);
             }
         }
-        let (before, after) = (ready_values(prev, ps), ready_values(next, ns));
-        if before != after {
-            let values = next.get_all(ns, "ready").unwrap_or_default();
-            let all_true = !values.is_empty()
-                && values.iter().all(|(v, _)| matches!(v, Value::Scalar(s) if matches!(s.as_ref(), ScalarValue::Boolean(true))));
-            let creator = scalar(next, ns, "created_by")
-                .and_then(|r| crate::shared_objects::identity::parse_principal_ref(&r).ok());
-            let by_creator = creator
-                .is_some_and(|p| change.actor_id().to_bytes() == actor_id_bytes(resource, &p));
-            if !all_true || !by_creator {
-                found.insert(Refusal::ImmutableFieldMutated);
-            }
+        if ready_values(prev, ps) != ready_values(next, ns)
+            && !ready_written_by_creator(next, ns, change, resource)
+        {
+            found.insert(Refusal::ImmutableFieldMutated);
+        }
+    } else if let (None, Some(ns)) = (&ps, &ns) {
+        // §12.1 binds the change that creates the section too: `ready`, if
+        // it writes it, is true and written by the creator (an import
+        // leaves it absent).
+        if next.get_all(ns, "ready").is_ok_and(|v| !v.is_empty())
+            && !ready_written_by_creator(next, ns, change, resource)
+        {
+            found.insert(Refusal::ImmutableFieldMutated);
         }
     }
     // Existing nodes: their maps, containers and immutable fields.
