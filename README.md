@@ -77,7 +77,7 @@ SDK-SECTIONS-INTEGRATION-01, that is commit receipts and their release
 adapter's journal (§7). sdk-rs has no local commit pipeline, outbound
 queue or sync session, so these contracts do not apply to it yet,
 including the rule that a batch released before its status is final is
-still reported until it is (§3.5, `mvp-0.2-baseline.5`).
+still reported until it is (§3.5, `mvp-0.2-baseline.6`).
 sdk-ts implements them.
 
 The LFCP protocol layer of this SDK (LFCP-041 to LFCP-043) is complete
@@ -130,10 +130,10 @@ builds on the stable Rust toolchain; no older minimum version is promised.
 `spec.lock` pins the specification this SDK implements:
 
 ```json
-{ "tag": "mvp-0.2-baseline.5", "commit": "45e5aadf70ca76cd2b366389102c017955ca1003" }
+{ "tag": "mvp-0.2-baseline.6", "commit": "73c0e80ead9d3fff08beefe7b2e2cf6b86f25198" }
 ```
 
-`mvp-0.2-baseline.5` is the MVP 0.1 baseline `mvp-0.1-baseline.10`
+`mvp-0.2-baseline.6` is the MVP 0.1 baseline `mvp-0.1-baseline.10`
 unchanged, plus the shared sections profile, its Markdown grammar, the SDK
 integration contracts and their corpus (in `lfcp-vector-format/1`), with
 the canonical change encoding and operation references of SPEC-PATCH-10
@@ -147,7 +147,14 @@ on the section receive path (SS61 to SS63). It bounds the start op of a
 change without operations below 2^32 (SHARED-OBJECTS-PROFILE-01 §11.3 rule
 8) and adds the operation references R8 to R10: an increment names only the
 counter puts it adds to, no operation is a mark, and none makes a table
-(§11.4, finding D1), which shared sections inherit (SS64, SS65).
+(§11.4, finding D1), which shared sections inherit (SS64, SS65). It bounds a
+change's header numbers — the sequence number below 2^53, the time above
+-2^53 and below 2^53 (§11.3 rule 2, finding D2) — orders the checks of a
+change's bytes, then its actor, before its dependencies (§14.1), allows an
+Automerge author only in an actor's first change (§14.1, finding D5), and
+refuses collaborative Text in any field a profile does not define, not only
+the fields it names (SHARED-SECTIONS-PROFILE-01 A5, finding D3); the shared
+sections corpus gains SS66 to SS75.
 
 Vectors are never copied into this repository. The tests read them from a
 checkout of `openlfcp/spec` with `git show <commit>:<path>`, so the state of
