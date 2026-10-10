@@ -1,8 +1,9 @@
 // The sdk-ts side of the diff_ts fuzz target: a long-running process that
 // reads one case per line on stdin and writes the TypeScript SDK's verdicts
-// on stdout. It uses only the public npm API of a locally built sdk-ts
-// (@openlfcp/shared-objects, its ./sections entry, @openlfcp/core): the
-// implementation is a black box here (independence rule).
+// on stdout. It uses only the public npm API of sdk-ts, built locally or
+// installed from npm (@openlfcp/shared-objects, its ./sections and
+// ./admission entries, @openlfcp/core): the implementation is a black box
+// here (independence rule).
 //
 // Case: {"id", "mode": "so" | "ss", "resource": hex, "principal": hex,
 //        "items": [{"b64": plaintext, "signer": hex | null}]}
@@ -13,17 +14,27 @@
 import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
 import { join } from "node:path";
+import { readFileSync } from "node:fs";
 
+// Either a built sdk-ts checkout (LFCP_SDK_TS_DIR) or a directory where
+// the published packages are installed (LFCP_SDK_TS_NPM, its node_modules
+// resolved through each package's export map).
 const dir = process.env.LFCP_SDK_TS_DIR;
-if (!dir) {
-  process.stderr.write("LFCP_SDK_TS_DIR is not set (a built sdk-ts checkout)\n");
+const npm = process.env.LFCP_SDK_TS_NPM;
+if (!dir && !npm) {
+  process.stderr.write("set LFCP_SDK_TS_DIR (a built sdk-ts checkout) or LFCP_SDK_TS_NPM (an npm install)\n");
   process.exit(2);
 }
-const entry = (p) => pathToFileURL(join(dir, "packages", p)).href;
-const so = await import(entry("shared-objects/dist/index.js"));
-const ss = await import(entry("shared-objects/dist/sections/index.js"));
-const core = await import(entry("core/dist/index.js"));
-const admission = await import(entry("shared-objects/dist/admission/index.js"));
+const load = (pkg, sub, built) => {
+  if (!npm) return import(pathToFileURL(join(dir, "packages", pkg, built)).href);
+  const root = join(npm, "node_modules", "@openlfcp", pkg);
+  const exports = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).exports;
+  return import(pathToFileURL(join(root, exports[sub].import)).href);
+};
+const so = await load("shared-objects", ".", "dist/index.js");
+const ss = await load("shared-objects", "./sections", "dist/sections/index.js");
+const core = await load("core", ".", "dist/index.js");
+const admission = await load("shared-objects", "./admission", "dist/admission/index.js");
 await so.initializeAutomerge();
 
 const bytes = (b64) => new Uint8Array(Buffer.from(b64, "base64"));
