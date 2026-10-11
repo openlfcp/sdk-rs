@@ -60,11 +60,15 @@ def body_of(chunk):
 
 
 def change_actor(chunk):
-    """The hex actor of an uncompressed change chunk."""
+    """The hex actor of an uncompressed change chunk, or None when its header
+    does not read."""
     _, body = body_of(chunk)
-    deps, at = uleb(body, 0)
-    at += 32 * deps
-    n, at = uleb(body, at)
+    try:
+        deps, at = uleb(body, 0)
+        at += 32 * deps
+        n, at = uleb(body, at)
+    except IndexError:
+        return None
     return body[at : at + n].hex()
 
 
