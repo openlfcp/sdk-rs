@@ -241,8 +241,21 @@ fuzz_target!(|data: &[u8]| {
             let before: Vec<_> = replica.refused().keys().copied().collect();
             let verdict = sections_verdict(replica.receive(&signer(principals, record.ctl), pt));
             // The name the refusal gave (SS §14.1): the hash it added to
-            // the refused set, if any.
-            let named = replica.refused().keys().find(|h| !before.contains(h));
+            // the refused set, or, refused again, the hash these bytes are
+            // already kept under.
+            let again = || {
+                framing::decode_change(pt)
+                    .map(|c| c.hash())
+                    .ok()
+                    .or_else(|| framing::refused_change_key(pt).map(|(h, _)| h))
+                    .filter(|h| replica.refused().contains_key(h))
+            };
+            let named = replica
+                .refused()
+                .keys()
+                .find(|h| !before.contains(h))
+                .copied()
+                .or_else(again);
             ours.push(match named {
                 Some(h) if verdict.starts_with("refused:") => format!("{verdict} {h}"),
                 _ => verdict,
