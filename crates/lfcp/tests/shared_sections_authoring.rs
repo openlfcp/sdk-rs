@@ -305,6 +305,52 @@ fn a_child_moved_out_of_a_deleted_parent_stays_visible() {
 }
 
 #[test]
+fn a_move_concurrent_with_the_deletion_of_the_moved_node_is_surfaced() {
+    // §9 (SS80): the move is retained, hidden with the node, and reported.
+    let mut a = seeded();
+    let mut b = fork(&mut a, 2);
+    a.move_node(T, X, None, &slot(61), &principal(1)).unwrap();
+    b.delete_node(T).unwrap();
+    merge(&mut a, &mut b);
+    assert!(hidden(&a).contains(&T.to_owned()));
+    assert_eq!(
+        a.retained_concurrent_edits()
+            .into_iter()
+            .collect::<Vec<_>>(),
+        [T.to_owned()]
+    );
+}
+
+#[test]
+fn a_placement_under_a_concurrently_deleted_parent_is_surfaced() {
+    // §9 (SS81), with node.resolve_placement: Y becomes T's effective
+    // ancestor through the new placement.
+    let mut a = seeded();
+    let mut b = fork(&mut a, 2);
+    a.resolve_placement(T, Y, None, &slot(62), &principal(1))
+        .unwrap();
+    b.delete_node(Y).unwrap();
+    merge(&mut a, &mut b);
+    assert!(hidden(&a).contains(&T.to_owned()));
+    assert_eq!(
+        a.retained_concurrent_edits()
+            .into_iter()
+            .collect::<Vec<_>>(),
+        [T.to_owned()]
+    );
+}
+
+#[test]
+fn a_move_after_the_deletion_it_saw_is_not_surfaced() {
+    // §9 (SS82): the move depends on the deletion.
+    let mut a = seeded();
+    a.delete_node(T).unwrap();
+    a.move_node(T, X, None, &slot(63), &principal(1)).unwrap();
+    assert!(hidden(&a).contains(&T.to_owned()));
+    assert!(a.retained_concurrent_edits().is_empty());
+}
+
+#[test]
 fn delete_versus_restore_conflicts_and_a_fresh_restore_resolves_it() {
     let mut a = seeded();
     let mut b = fork(&mut a, 2);

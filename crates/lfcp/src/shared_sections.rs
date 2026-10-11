@@ -1614,9 +1614,10 @@ impl SectionsDoc {
     /// §9: nodes whose content changed concurrently with the deletion of
     /// the node itself or an ancestor, while they are hidden
     /// (`EDIT_UNDER_DELETED_ANCESTOR`). A content change is a node's
-    /// creation, an edit of its Text, or of its Task's title or status;
-    /// concurrency is decided from the changes' dependencies. It does not
-    /// alter convergence.
+    /// creation, an edit of its Text, or of its Task's title or status; a
+    /// new placement of an existing node (a move or `node.resolve_placement`,
+    /// a write to its `placement`) counts too. Concurrency is decided from
+    /// the changes' dependencies. It does not alter convergence.
     pub fn retained_concurrent_edits(&mut self) -> BTreeSet<String> {
         let effective = self.effective();
         let changes = self.doc.get_changes(&[]);
@@ -1626,6 +1627,20 @@ impl SectionsDoc {
         // Which node each object belongs to: its map, its Text, its Task.
         // Automerge object IDs are the same in every replica of the history.
         let owners = self.node_objects();
+        // The node maps, whose `placement` a move writes.
+        let node_maps: HashMap<String, String> = match self.root_map("nodes") {
+            Some(nodes) => self
+                .keys("nodes")
+                .into_iter()
+                .filter_map(|id| {
+                    Some((
+                        object(&self.doc, &nodes, &id, ObjType::Map)?.to_string(),
+                        id,
+                    ))
+                })
+                .collect(),
+            None => HashMap::new(),
+        };
         let nodes_map = self.root_map("nodes").map(|o| o.to_string());
         let objects_map = self.root_map("objects").map(|o| o.to_string());
         // Replay change by change and compare, for the nodes a change
@@ -1635,8 +1650,16 @@ impl SectionsDoc {
             let hash = change.hash();
             deps.insert(hash, change.deps().to_vec());
             let mut touched: BTreeSet<String> = BTreeSet::new();
+            let mut placed: BTreeSet<String> = BTreeSet::new();
             for op in change.decode().operations {
                 let obj = op.obj.to_string();
+                if let Some(node) = node_maps.get(&obj) {
+                    let placement =
+                        matches!(&op.key, automerge::legacy::Key::Map(k) if k == "placement");
+                    if placement && !matches!(op.action, automerge::legacy::OpType::Delete) {
+                        placed.insert(node.clone());
+                    }
+                }
                 if let Some(node) = owners.get(&obj) {
                     touched.insert(node.clone());
                 } else if Some(&obj) == nodes_map.as_ref() || Some(&obj) == objects_map.as_ref() {
@@ -1652,7 +1675,8 @@ impl SectionsDoc {
                 .expect("a change of this document");
             for (n, now) in replay.node_states(&touched) {
                 let old = before.get(&n);
-                if old.is_none_or(|o| o.content != now.content) {
+                let moved = old.is_some() && placed.contains(&n);
+                if moved || old.is_none_or(|o| o.content != now.content) {
                     contents.push((hash, n.clone()));
                 }
                 if now.deleted && !old.is_some_and(|o| o.deleted) {
