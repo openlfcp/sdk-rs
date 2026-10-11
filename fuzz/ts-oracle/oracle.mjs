@@ -103,7 +103,8 @@ function runSections(c) {
       const offered = [unit, ...waiting];
       const r = replica.receiveChanges(offered);
       const mine = r.refused.find((f) => f.index === 0);
-      if (mine) v = mine.held ? "held" : `refused:${mine.diagnostic}`;
+      // A refusal carries the change hash it names the bytes by (SS §14.1).
+      if (mine) v = mine.held ? "held" : `refused:${mine.diagnostic}${mine.hash ? ` ${mine.hash}` : ""}`;
       else if (hash && r.admitted.includes(hash)) v = "applied";
       else if (hash && r.duplicates.includes(hash)) v = "duplicate";
       else if (hash && r.waiting.includes(hash)) v = "missing";
