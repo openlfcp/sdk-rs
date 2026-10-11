@@ -1623,7 +1623,9 @@ impl SectionsDoc {
         let changes = self.doc.get_changes(&[]);
         let mut deps: BTreeMap<ChangeHash, Vec<ChangeHash>> = BTreeMap::new();
         let mut contents: Vec<(ChangeHash, String)> = Vec::new();
-        let mut deletes: Vec<(ChangeHash, String)> = Vec::new();
+        // Each change's last write to a node's lifecycle register, and
+        // whether it wrote `deleted`.
+        let mut lifecycle: Vec<(ChangeHash, String, bool)> = Vec::new();
         // Which node each object belongs to: its map, its Text, its Task.
         // Automerge object IDs are the same in every replica of the history.
         let owners = self.node_objects();
@@ -1641,6 +1643,26 @@ impl SectionsDoc {
                 .collect(),
             None => HashMap::new(),
         };
+        // The object holding each node's lifecycle register: the Task map
+        // of a task node, the node map of any other.
+        let registers: HashMap<String, String> = match self.root_map("nodes") {
+            Some(nodes) => {
+                let objects = self.root_map("objects");
+                self.keys("nodes")
+                    .into_iter()
+                    .filter_map(|id| {
+                        let node = self.node_in(&nodes, id.clone())?;
+                        let register = if node.kind == Some(NodeKind::Task) {
+                            object(&self.doc, objects.as_ref()?, &id, ObjType::Map)?
+                        } else {
+                            object(&self.doc, &nodes, &id, ObjType::Map)?
+                        };
+                        Some((register.to_string(), id))
+                    })
+                    .collect()
+            }
+            None => HashMap::new(),
+        };
         let nodes_map = self.root_map("nodes").map(|o| o.to_string());
         let objects_map = self.root_map("objects").map(|o| o.to_string());
         // Replay change by change and compare, for the nodes a change
@@ -1651,8 +1673,18 @@ impl SectionsDoc {
             deps.insert(hash, change.deps().to_vec());
             let mut touched: BTreeSet<String> = BTreeSet::new();
             let mut placed: BTreeSet<String> = BTreeSet::new();
+            let mut written: BTreeMap<String, bool> = BTreeMap::new();
             for op in change.decode().operations {
                 let obj = op.obj.to_string();
+                if let Some(node) = registers.get(&obj) {
+                    if matches!(&op.key, automerge::legacy::Key::Map(k) if k == "lifecycle") {
+                        let deleted = matches!(
+                            &op.action,
+                            automerge::legacy::OpType::Put(ScalarValue::Str(v)) if v.as_str() == "deleted"
+                        );
+                        written.insert(node.clone(), deleted);
+                    }
+                }
                 if let Some(node) = node_maps.get(&obj) {
                     let placement =
                         matches!(&op.key, automerge::legacy::Key::Map(k) if k == "placement");
@@ -1677,12 +1709,10 @@ impl SectionsDoc {
                 let old = before.get(&n);
                 let moved = old.is_some() && placed.contains(&n);
                 if moved || old.is_none_or(|o| o.content != now.content) {
-                    contents.push((hash, n.clone()));
-                }
-                if now.deleted && !old.is_some_and(|o| o.deleted) {
-                    deletes.push((hash, n));
+                    contents.push((hash, n));
                 }
             }
+            lifecycle.extend(written.into_iter().map(|(n, deleted)| (hash, n, deleted)));
         }
         let ancestor = |a: &ChangeHash, b: &ChangeHash| -> bool {
             let mut stack = vec![*b];
@@ -1697,6 +1727,18 @@ impl SectionsDoc {
             }
             false
         };
+        // §9: a deletion counts while the register holds it, that is while
+        // no later write to the same register depends on it.
+        let deletes: Vec<(ChangeHash, String)> = lifecycle
+            .iter()
+            .filter(|(hash, node, deleted)| {
+                *deleted
+                    && !lifecycle
+                        .iter()
+                        .any(|(h, n, _)| n == node && h != hash && ancestor(hash, h))
+            })
+            .map(|(hash, node, _)| (*hash, node.clone()))
+            .collect();
         let parents: BTreeMap<String, String> = {
             let placements = self.placements();
             self.nodes()
@@ -1755,8 +1797,7 @@ impl SectionsDoc {
     }
 
     /// For the nodes of `ids` that exist: their content (Text, or Task
-    /// title and status) and whether they are deleted, for
-    /// [`SectionsDoc::retained_concurrent_edits`].
+    /// title and status), for [`SectionsDoc::retained_concurrent_edits`].
     fn node_states(&self, ids: &BTreeSet<String>) -> BTreeMap<String, NodeState> {
         let Some(nodes) = self.root_map("nodes") else {
             return BTreeMap::new();
@@ -1764,38 +1805,23 @@ impl SectionsDoc {
         ids.iter()
             .filter_map(|id| Some((id.clone(), self.node_in(&nodes, id.clone())?)))
             .map(|(id, node)| {
-                let (content, lifecycle) = if node.kind == Some(NodeKind::Task) {
+                let content = if node.kind == Some(NodeKind::Task) {
                     let objects = self.root_map("objects");
                     let task = objects.and_then(|o| object(&self.doc, &o, &id, ObjType::Map));
                     let field = |k| task.as_ref().and_then(|t| scalar(&self.doc, t, k));
-                    (
-                        format!("{:?}|{:?}", field("title"), field("status")),
-                        field("lifecycle"),
-                    )
+                    format!("{:?}|{:?}", field("title"), field("status"))
                 } else {
-                    let nodes = self.root_map("nodes").expect("nodes");
-                    let n = object(&self.doc, &nodes, &id, ObjType::Map).expect("node");
-                    (
-                        node.text.clone().unwrap_or_default(),
-                        scalar(&self.doc, &n, "lifecycle"),
-                    )
+                    node.text.clone().unwrap_or_default()
                 };
-                (
-                    id,
-                    NodeState {
-                        content,
-                        deleted: lifecycle.as_deref() == Some("deleted"),
-                    },
-                )
+                (id, NodeState { content })
             })
             .collect()
     }
 }
 
-/// A node's content and deletion at one point of the history.
+/// A node's content at one point of the history.
 struct NodeState {
     content: String,
-    deleted: bool,
 }
 
 /// Why a received change was refused at admission (§14.1). The first two

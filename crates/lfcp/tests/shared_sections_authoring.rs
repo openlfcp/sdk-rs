@@ -350,6 +350,70 @@ fn a_move_after_the_deletion_it_saw_is_not_surfaced() {
     assert!(a.retained_concurrent_edits().is_empty());
 }
 
+fn retained(doc: &mut SectionsDoc) -> Vec<String> {
+    doc.retained_concurrent_edits().into_iter().collect()
+}
+
+#[test]
+fn deleting_again_after_a_concurrent_move_clears_the_attention() {
+    // §9 (SS83): the new deletion saw the move, and the register no longer
+    // holds the deletion the move was concurrent with.
+    let mut a = seeded();
+    let mut b = fork(&mut a, 2);
+    a.move_node(T, X, None, &slot(64), &principal(1)).unwrap();
+    b.delete_node(T).unwrap();
+    merge(&mut a, &mut b);
+    assert_eq!(retained(&mut a), [T.to_owned()]);
+    a.delete_node(T).unwrap();
+    assert!(hidden(&a).contains(&T.to_owned()));
+    assert!(retained(&mut a).is_empty());
+}
+
+#[test]
+fn deleting_again_concurrently_with_an_edit_keeps_the_attention() {
+    // §9 (SS84): the edit is concurrent with the deletion the register
+    // holds; the move before it is not.
+    let mut a = seeded();
+    let mut b = fork(&mut a, 2);
+    a.move_node(T, X, None, &slot(65), &principal(1)).unwrap();
+    b.delete_node(T).unwrap();
+    merge(&mut a, &mut b);
+    let base = a.heads();
+    a.text_edit(P, &base, 0, 0, "Edited: ").unwrap();
+    b.delete_node(T).unwrap();
+    merge(&mut a, &mut b);
+    assert_eq!(retained(&mut a), [P.to_owned()]);
+}
+
+#[test]
+fn deleting_an_ancestor_again_after_a_concurrent_move_under_it_clears_the_attention() {
+    // §9 (SS85).
+    let mut a = seeded();
+    let mut b = fork(&mut a, 2);
+    a.move_node(T, Y, None, &slot(66), &principal(1)).unwrap();
+    b.delete_node(Y).unwrap();
+    merge(&mut a, &mut b);
+    assert_eq!(retained(&mut a), [T.to_owned()]);
+    a.delete_node(Y).unwrap();
+    assert!(hidden(&a).contains(&T.to_owned()));
+    assert!(retained(&mut a).is_empty());
+}
+
+#[test]
+fn deleting_again_overrides_two_concurrent_deletions() {
+    // §9 (SS86, SS87): the move is concurrent with B's deletion, though not
+    // with A's; deleting again after both clears it.
+    let mut a = seeded();
+    let mut b = fork(&mut a, 2);
+    a.move_node(T, X, None, &slot(67), &principal(1)).unwrap();
+    a.delete_node(T).unwrap();
+    b.delete_node(T).unwrap();
+    merge(&mut a, &mut b);
+    assert_eq!(retained(&mut a), [T.to_owned()]);
+    a.delete_node(T).unwrap();
+    assert!(retained(&mut a).is_empty());
+}
+
 #[test]
 fn delete_versus_restore_conflicts_and_a_fresh_restore_resolves_it() {
     let mut a = seeded();
