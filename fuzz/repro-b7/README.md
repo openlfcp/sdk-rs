@@ -33,3 +33,24 @@ followed by its correct resend (or the same hash from a different encoding
 step). The profile does not say whether a hash named by a refusal stays
 refused for later bytes with that hash, so which side is right is a spec
 decision.
+
+## Refusal names (since sdk-rs a3b78c8)
+
+diff_ts now compares the name a Shared Sections refusal gives the bytes
+(the change hash, SS §14.1) as well as its diagnostic: sdk-rs by the hash
+the refusal adds to `SectionsReplica::refused`, sdk-ts by
+`SectionRefusal.hash`. On mvp-0.2-baseline.7, against sdk-ts 0.2.0-beta.2:
+
+| File | sdk-rs a3b78c8 | sdk-ts 0.2.0-beta.2 | Spec (baseline.7) |
+| --- | --- | --- | --- |
+| `C1-…`, `C1b-…`, `C2-…` | the copy with the wrong checksum is unnamed | named by its intact copy's hash | unnamed: sdk-rs |
+| `C3-sections-unnamed-header-past-end` | named `07d2f99c…` | unnamed (`refusedChangeHash` is undefined: "a length runs past the end") | named: a type 1 chunk, its length field exact and its checksum matching, is named without decoding; sdk-rs |
+
+C3 is one record: a type 1 chunk whose length field and checksum are
+right but whose header holds a length running past its end. sdk-ts names
+a refused chunk only when it can read its header, which the profile does
+not ask for.
+
+`LFCP_FUZZ_SKIP_NAMES=1` takes these two kinds (one side names, the other
+does not, the diagnostic the same) as equal, for a run against an sdk-ts
+that has not fixed them.
