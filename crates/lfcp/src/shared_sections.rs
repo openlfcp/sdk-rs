@@ -2096,6 +2096,15 @@ impl SectionsReplica {
         out
     }
 
+    /// The changes held because another change holds their actor and
+    /// sequence number (§14.1, SHARED-OBJECTS-PROFILE-01 POST-001), until a
+    /// rebuild.
+    pub fn held(&self) -> Vec<ChangeHash> {
+        let mut out: Vec<ChangeHash> = self.engine.held().iter().map(Change::hash).collect();
+        out.sort();
+        out
+    }
+
     /// A read view of the admitted document.
     pub fn view(&self) -> SectionsDoc {
         SectionsDoc {
