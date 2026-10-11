@@ -133,10 +133,9 @@ fn a_compressed_change_of_the_signer_is_refused_unnamed() {
 
 #[test]
 fn a_spoiled_change_forwarded_by_another_principal_blocks_nothing() {
-    // A refusal is held against the change's hash only for the signer's own
-    // actor: B cannot block A's change by sending its bytes with a wrong
-    // checksum. B's copy is named (§14.1 names every refused change chunk),
-    // and A's genuine change lifts the record.
+    // B cannot block A's change by sending its bytes with a wrong checksum:
+    // only a chunk whose checksum matches is named (§14.1), so B's copy is
+    // refused without a name and A's genuine change is applied.
     let resource = ResourceId::from_bytes([3; 32]);
     let (a, b) = (
         PrincipalId::from_bytes([4; 32]),
@@ -151,25 +150,90 @@ fn a_spoiled_change_forwarded_by_another_principal_blocks_nothing() {
     .unwrap();
     let mut spoiled = change.raw_bytes().to_vec();
     spoiled[4] ^= 0x01;
+    assert_eq!(
+        framing::refused_change_key(&framing::encode_change(&spoiled)),
+        None
+    );
     let mut replica = SectionsReplica::new(resource, ActorId::from([7u8; 32]));
     assert_eq!(
         replica.receive(&b, &framing::encode_change(&spoiled)),
         Received::Refused(Refusal::InvalidAutomergeBytes)
     );
-    assert_eq!(
-        replica.refused().keys().collect::<Vec<_>>(),
-        vec![&change.hash()]
-    );
+    assert!(replica.refused().is_empty());
     assert_eq!(
         replica.receive(&a, &framing::encode_change(change.raw_bytes())),
         Received::Applied
     );
     assert!(replica.refused().is_empty());
-    // A's own spoiled bytes are recorded under the change's hash.
-    let mut own = SectionsReplica::new(resource, ActorId::from([7u8; 32]));
-    own.receive(&a, &framing::encode_change(&spoiled));
+}
+
+#[test]
+fn a_change_refused_for_its_checksum_does_not_block_its_intact_copy() {
+    // rw finding C1 (SS76, SS77): A's own copy with a wrong checksum is
+    // refused without a name; the intact copy A sends next is applied, and
+    // so is A's change that depends on it, which waited until then.
+    let resource = ResourceId::from_bytes([3; 32]);
+    let a = PrincipalId::from_bytes([4; 32]);
+    let (mut doc, genesis) = shared_sections::SectionsDoc::create(
+        shared_sections::actor_id(&resource, &a),
+        "019a2f85-7b31-7c42-8000-000000000001",
+        "Section",
+        &a,
+    )
+    .unwrap();
+    let next = doc.set_title("Renamed").unwrap();
+    let mut spoiled = genesis.raw_bytes().to_vec();
+    spoiled[4] ^= 0x01;
+    let mut replica = SectionsReplica::new(resource, ActorId::from([7u8; 32]));
     assert_eq!(
-        own.refused().keys().collect::<Vec<_>>(),
-        vec![&change.hash()]
+        replica.receive(&a, &framing::encode_change(&spoiled)),
+        Received::Refused(Refusal::InvalidAutomergeBytes)
     );
+    assert!(replica.refused().is_empty());
+    assert_eq!(
+        replica.receive(&a, &framing::encode_change(next.raw_bytes())),
+        Received::Waiting
+    );
+    assert_eq!(
+        replica.receive(&a, &framing::encode_change(genesis.raw_bytes())),
+        Received::Applied
+    );
+    assert!(replica.waiting().is_empty());
+    assert!(replica.refused().is_empty());
+}
+
+#[test]
+fn an_intact_copy_after_a_checksum_refusal_is_checked_for_its_actor() {
+    // rw finding C2 (SS78): after A's change with a wrong checksum, its
+    // intact copy in a unit B signs is refused for its actor, not with the
+    // checksum refusal, which has no name to be remembered by.
+    let resource = ResourceId::from_bytes([3; 32]);
+    let (a, b) = (
+        PrincipalId::from_bytes([4; 32]),
+        PrincipalId::from_bytes([5; 32]),
+    );
+    let (_, change) = shared_sections::SectionsDoc::create(
+        shared_sections::actor_id(&resource, &a),
+        "019a2f85-7b31-7c42-8000-000000000001",
+        "Section",
+        &a,
+    )
+    .unwrap();
+    let mut spoiled = change.raw_bytes().to_vec();
+    spoiled[4] ^= 0x01;
+    for first in [&a, &b] {
+        let mut replica = SectionsReplica::new(resource, ActorId::from([7u8; 32]));
+        assert_eq!(
+            replica.receive(first, &framing::encode_change(&spoiled)),
+            Received::Refused(Refusal::InvalidAutomergeBytes)
+        );
+        assert_eq!(
+            replica.receive(&b, &framing::encode_change(change.raw_bytes())),
+            Received::Refused(Refusal::ChangeActorMismatch)
+        );
+        assert_eq!(
+            replica.refused().iter().collect::<Vec<_>>(),
+            vec![(&change.hash(), &Refusal::ChangeActorMismatch)]
+        );
+    }
 }

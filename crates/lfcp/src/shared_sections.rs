@@ -1864,11 +1864,11 @@ impl SectionsReplica {
                 // §11.1 limits), computed without parsing its operations:
                 // refused bytes are never handed to Automerge, which would
                 // expand them (an RLE or DEFLATE bomb).
-                // A change of another Principal's unit is named too (§14.1
-                // names every refused change chunk), but not held against
-                // the change: the checksum is outside the hashed bytes, so a
-                // spoiled copy forwarded by another Principal has the
-                // genuine change's hash and must not block it.
+                // Only a chunk whose checksum matches is named (§14.1), so a
+                // name stands for these bytes: a copy with a wrong checksum
+                // is refused unnamed and blocks neither its intact copy nor
+                // what depends on it. A change of another Principal's unit
+                // is named too, but not held against the change.
                 return match crate::shared_objects::framing::refused_change_key(plaintext) {
                     Some((hash, actor)) if actor == actor_id_bytes(&self.resource, signer) => {
                         self.forwarded.remove(&hash);

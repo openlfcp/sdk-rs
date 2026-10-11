@@ -144,13 +144,15 @@ pub fn encode_snapshot(save: &[u8]) -> Vec<u8> {
 /// The change hash and actor a refused Data Unit plaintext names,
 /// computed without parsing its operations: bytes that failed §11 or §11.1
 /// are never handed to Automerge, which would expand them (an RLE or
-/// DEFLATE bomb). Automerge hashes a change as SHA-256 of its uncompressed
-/// type, length and body; the body starts with the dependencies and the
-/// actor. SHARED-SECTIONS-PROFILE-01 §14.1 names a refused change only
-/// when its bytes are one uncompressed change chunk (type 1) whose length
-/// covers exactly the rest, read as it is whatever its checksum says.
-/// Anything else names nothing: a compressed chunk (type 2) is never
-/// inflated to be named, since inflating refused bytes has no limit.
+/// DEFLATE bomb). SHARED-SECTIONS-PROFILE-01 §14.1 names a refused change
+/// only when its bytes are one uncompressed change chunk (type 1) whose
+/// length covers exactly the rest and whose checksum matches: the name is
+/// the SHA-256 of the chunk from its type byte on, and the checksum is its
+/// first four bytes, so a name stands for exactly these bytes. A copy with
+/// a wrong checksum would otherwise carry its intact copy's hash. The body
+/// starts with the dependencies and the actor. Anything else names
+/// nothing: a compressed chunk (type 2) is never inflated to be named,
+/// since inflating refused bytes has no limit.
 pub fn refused_change_key(plaintext: &[u8]) -> Option<(ChangeHash, Vec<u8>)> {
     let bytes = unframe(plaintext).ok()?;
     let header = chunk_header(&bytes).ok()?;
@@ -160,13 +162,13 @@ pub fn refused_change_key(plaintext: &[u8]) -> Option<(ChangeHash, Vec<u8>)> {
     if header.chunk_type != CHANGE_CHUNK {
         return None;
     }
+    let digest: [u8; 32] = Sha256::digest(&bytes[8..]).into();
+    if header.checksum != digest[..4] {
+        return None;
+    }
+    let hash = ChangeHash(digest);
     let body_at = 9 + leb_len(&bytes[9..])?;
     let body: &[u8] = &bytes[body_at..];
-    let mut hasher = Sha256::new();
-    hasher.update([CHANGE_CHUNK]);
-    hasher.update(uleb(body.len()));
-    hasher.update(body);
-    let hash = ChangeHash(hasher.finalize().into());
     // Dependencies: a count and 32 bytes each; then the actor, length-prefixed.
     let (deps, at) = read_uleb(body, 0)?;
     let at = at.checked_add(deps.checked_mul(32)?)?;
@@ -190,19 +192,6 @@ fn read_uleb(bytes: &[u8], at: usize) -> Option<(usize, usize)> {
 /// The length in bytes of the ULEB128 number at the start of `bytes`.
 fn leb_len(bytes: &[u8]) -> Option<usize> {
     bytes.iter().position(|b| b & 0x80 == 0).map(|i| i + 1)
-}
-
-fn uleb(mut n: usize) -> Vec<u8> {
-    let mut out = vec![];
-    loop {
-        let byte = (n & 0x7f) as u8;
-        n >>= 7;
-        if n == 0 {
-            out.push(byte);
-            return out;
-        }
-        out.push(byte | 0x80);
-    }
 }
 
 /// The full-save bytes of a Snapshot plaintext (§13), checked: one
