@@ -1975,6 +1975,18 @@ impl SectionsReplica {
             }
             return Received::Waiting;
         }
+        // §14.1: the sequence first (SOP §14.1, POST-001), against the whole
+        // document: a change whose actor and sequence number another change
+        // holds is held whatever it writes, even when its causal history
+        // lacks that change and a structural rule would refuse it there.
+        if self.engine.sequence_taken(&change) {
+            return match self.engine.apply_change(change) {
+                Ok(ChangeOutcome::Held) => Received::Held,
+                Ok(ChangeOutcome::Applied) => Received::Applied,
+                Ok(ChangeOutcome::Duplicate) => Received::Duplicate,
+                Err(_) => self.refuse(hash, Refusal::InvalidAutomergeBytes),
+            };
+        }
         // The state of the change's causal history, before and after it.
         // When the change depends on exactly the current heads, that state
         // is the document itself; otherwise it is rebuilt from the history.

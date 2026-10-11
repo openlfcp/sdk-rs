@@ -559,6 +559,17 @@ impl SharedObjects {
         }
     }
 
+    /// Whether another change holds `change`'s actor and sequence number
+    /// (§14.1), so that [`SharedObjects::apply_change`] would hold it. A
+    /// change already here is not counted: it is a duplicate.
+    pub fn sequence_taken(&mut self, change: &Change) -> bool {
+        !holds(&mut self.doc, &change.hash())
+            && self
+                .seqs
+                .get(change.actor_id())
+                .is_some_and(|latest| change.seq() <= *latest)
+    }
+
     /// Record what an admitted change added.
     fn add(&mut self, created: Created) {
         drop_patch_log(&mut self.doc);

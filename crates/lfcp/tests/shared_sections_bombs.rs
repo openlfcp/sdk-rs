@@ -8,7 +8,8 @@
 use std::io::Write;
 use std::time::{Duration, Instant};
 
-use automerge::ActorId;
+use automerge::transaction::Transactable;
+use automerge::{ActorId, AutoCommit, ROOT};
 use flate2::write::DeflateEncoder;
 use flate2::Compression;
 use lfcp::base::{PrincipalId, ResourceId};
@@ -236,4 +237,39 @@ fn an_intact_copy_after_a_checksum_refusal_is_checked_for_its_actor() {
             vec![(&change.hash(), &Refusal::ChangeActorMismatch)]
         );
     }
+}
+
+#[test]
+fn a_change_at_a_taken_sequence_number_is_held_before_the_section_rules() {
+    // rw finding E1 (SS88): A's second change at sequence number 1 creates
+    // a section with `ready` other than true, which §12.1 refuses in its own
+    // (empty) causal history; the sequence is checked first, so it is held.
+    let resource = ResourceId::from_bytes([3; 32]);
+    let a = PrincipalId::from_bytes([4; 32]);
+    let actor = shared_sections::actor_id(&resource, &a);
+    let (_, genesis) = shared_sections::SectionsDoc::create(
+        actor.clone(),
+        "019a2f85-7b31-7c42-8000-000000000001",
+        "Section",
+        &a,
+    )
+    .unwrap();
+    let mut twin = AutoCommit::new().with_actor(actor);
+    let section = twin
+        .put_object(ROOT, "section", automerge::ObjType::Map)
+        .unwrap();
+    twin.put(&section, "ready", "yes").unwrap();
+    twin.commit();
+    let twin = twin.get_last_local_change().unwrap().clone();
+    assert_eq!((twin.seq(), twin.deps().len()), (1, 0));
+    let mut replica = SectionsReplica::new(resource, ActorId::from([7u8; 32]));
+    assert_eq!(
+        replica.receive(&a, &framing::encode_change(genesis.raw_bytes())),
+        Received::Applied
+    );
+    assert_eq!(
+        replica.receive(&a, &framing::encode_change(twin.raw_bytes())),
+        Received::Held
+    );
+    assert!(replica.refused().is_empty());
 }
