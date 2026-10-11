@@ -77,7 +77,7 @@ SDK-SECTIONS-INTEGRATION-01, that is commit receipts and their release
 adapter's journal (§7). sdk-rs has no local commit pipeline, outbound
 queue or sync session, so these contracts do not apply to it yet,
 including the rule that a batch released before its status is final is
-still reported until it is (§3.5, `mvp-0.2-baseline.8`).
+still reported until it is (§3.5, `mvp-0.2-baseline.9`).
 sdk-ts implements them.
 
 The LFCP protocol layer of this SDK (LFCP-041 to LFCP-043) is complete
@@ -130,10 +130,10 @@ builds on the stable Rust toolchain; no older minimum version is promised.
 `spec.lock` pins the specification this SDK implements:
 
 ```json
-{ "tag": "mvp-0.2-baseline.8", "commit": "a38fb27a89f766985e9cce1c8a5b1a49da88b898" }
+{ "tag": "mvp-0.2-baseline.9", "commit": "369c22b47783e71b5322d87f714d665d92e938e9" }
 ```
 
-`mvp-0.2-baseline.8` is the MVP 0.1 baseline `mvp-0.1-baseline.10`
+`mvp-0.2-baseline.9` is the MVP 0.1 baseline `mvp-0.1-baseline.10`
 unchanged, plus the shared sections profile, its Markdown grammar, the SDK
 integration contracts and their corpus (in `lfcp-vector-format/1`), with
 the canonical change encoding and operation references of SPEC-PATCH-10
@@ -161,7 +161,9 @@ findings C1 and C2; SS76 to SS78, and SS45's refusal is no longer named). To
 name one it reads only the chunk's magic, type, length and checksum, so a
 change with a malformed header is still named (SS79), and a move concurrent with
 the deletion of the node or an ancestor is a retained concurrent edit
-(SHARED-SECTIONS-PROFILE-01 §9, SS80 to SS82).
+(SHARED-SECTIONS-PROFILE-01 §9, SS80 to SS82). Only a deletion the lifecycle
+register still holds counts for that edit, so deleting the node again clears
+it (§9, SS83 to SS87).
 
 Vectors are never copied into this repository. The tests read them from a
 checkout of `openlfcp/spec` with `git show <commit>:<path>`, so the state of
