@@ -76,3 +76,10 @@ looked unnamed on the sdk-rs side).
 | File | Records | sdk-rs | sdk-ts | Spec (baseline.9) |
 | --- | --- | --- | --- | --- |
 | `F1-sections-unnamed-unreadable-header` | one framed type 1 chunk, its length field exact and its checksum matching, whose body `e9 ff ff` is an unterminated dependency count | refused:INVALID_AUTOMERGE_BYTES, unnamed | refused:INVALID_AUTOMERGE_BYTES `0624759c…` | SS §14.1: "the change header is not read, and a chunk whose header is malformed … is named all the same": sdk-ts. sdk-rs `refused_change_key` (framing.rs) reads the dependencies and the actor and names nothing when it cannot |
+
+The 60-minute run (`LFCP_FUZZ_ALL=1`, no `LFCP_FUZZ_SKIP_NAMES`, `-fork=6`,
+the corpus with the baseline.9 vectors): 1,041,344 executions, 1213
+crashes. Replayed on the final harness: 1121 are F1, 1 is E1, 3 are E2
+(genesis `initial-content`, applied against refused:INVALID_FIELD_TYPE),
+and 88 agree (the repeated-refusal harness artifact, written before the
+fix above). No new class.
