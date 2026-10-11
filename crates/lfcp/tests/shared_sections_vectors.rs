@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 
 use automerge::Change;
 use lfcp::base::{self, PrincipalId, ResourceId};
+use lfcp::shared_objects::framing;
 use lfcp::shared_sections::{self, DataProfile, NodeKind, SectionsDoc};
 use serde_json::Value as Json;
 use support::sections::read_sections_corpus;
@@ -100,17 +101,20 @@ fn actors_use_the_sections_domain() {
         let id = case["id"].as_str().unwrap();
         for (branch, name) in [("A", "A"), ("B", "B")] {
             for record in case["branches"][branch].as_array().unwrap() {
-                let change = Change::from_bytes(bytes_of(record)).unwrap();
-                assert_eq!(
-                    change.actor_id().to_hex_string(),
-                    actors[name],
-                    "{id}: branch {branch}"
-                );
-                assert_eq!(
-                    change.hash().to_string(),
-                    record["change_hash"].as_str().unwrap(),
-                    "{id}"
-                );
+                // A change whose header Automerge cannot parse (SS79, a
+                // length past its end) is read as a refusal names it
+                // (SHARED-SECTIONS-PROFILE-01 §14.1), from its chunk.
+                let (hash, actor) = match Change::from_bytes(bytes_of(record)) {
+                    Ok(change) => (change.hash().to_string(), change.actor_id().to_hex_string()),
+                    Err(_) => {
+                        let (hash, actor) =
+                            framing::refused_change_key(&framing::encode_change(&bytes_of(record)))
+                                .unwrap_or_else(|| panic!("{id}: an unparsed change is named"));
+                        (hash.to_string(), base::to_hex(&actor))
+                    }
+                };
+                assert_eq!(actor, actors[name], "{id}: branch {branch}");
+                assert_eq!(hash, record["change_hash"].as_str().unwrap(), "{id}");
             }
         }
         for record in case["after_merge"].as_array().unwrap() {
