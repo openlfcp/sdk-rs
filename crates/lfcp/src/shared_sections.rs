@@ -2597,6 +2597,7 @@ fn structural_refusal(
         }
     }
     if let Some(nn) = &nn {
+        let mut node_maps = HashSet::new();
         for id in keys_in(next, nn, in_nodes) {
             let Some(n) = object_id(next, nn, &id) else {
                 continue;
@@ -2605,13 +2606,19 @@ fn structural_refusal(
             if new_text(old.as_ref(), &n, "text") {
                 found.insert(Refusal::InvalidFieldType);
             }
-            let kind = scalar(next, &n, "kind");
-            if matches!(kind.as_deref(), Some("paragraph" | "item" | "raw"))
-                && next.get(&n, "text").ok().flatten().is_some()
-                && !is_text(next, &n, "text")
-            {
-                found.insert(Refusal::InvalidFieldType);
-            }
+            node_maps.insert(n.to_string());
+        }
+        // A5: a write of a scalar to a node's text, whatever the node's kind
+        // and whether or not the scalar is the value the merge shows (rw
+        // finding E2: beside a Text written in the same change, the Text
+        // wins and the scalar stays a conflicting value).
+        let scalar_text = change.decode().operations.iter().any(|op| {
+            matches!(&op.key, automerge::legacy::Key::Map(k) if k == "text")
+                && matches!(op.action, automerge::legacy::OpType::Put(_))
+                && node_maps.contains(&op.obj.to_string())
+        });
+        if scalar_text {
+            found.insert(Refusal::InvalidFieldType);
         }
     }
     if let Some(no) = &no {

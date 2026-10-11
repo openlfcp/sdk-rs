@@ -9,7 +9,7 @@ use std::io::Write;
 use std::time::{Duration, Instant};
 
 use automerge::transaction::Transactable;
-use automerge::{ActorId, AutoCommit, ROOT};
+use automerge::{legacy, ActorId, AutoCommit, Change, ObjType, ScalarValue, ROOT};
 use flate2::write::DeflateEncoder;
 use flate2::Compression;
 use lfcp::base::{PrincipalId, ResourceId};
@@ -272,4 +272,116 @@ fn a_change_at_a_taken_sequence_number_is_held_before_the_section_rules() {
         Received::Held
     );
     assert!(replica.refused().is_empty());
+}
+
+/// A's genesis and A's change that creates the item `NODE`, with `extra`
+/// operations appended to the latter, re-encoded; for A5 (rw finding E2).
+fn item_with(
+    extra: impl Fn(&legacy::ObjectId, &legacy::OpId) -> Vec<legacy::Op>,
+) -> (SectionsReplica, PrincipalId, Change, Change) {
+    const NODE: &str = "019a2f85-7b31-7c42-8000-000000000020";
+    let resource = ResourceId::from_bytes([3; 32]);
+    let a = PrincipalId::from_bytes([4; 32]);
+    let (mut doc, genesis) = shared_sections::SectionsDoc::create(
+        shared_sections::actor_id(&resource, &a),
+        "019a2f85-7b31-7c42-8000-000000000001",
+        "Section",
+        &a,
+    )
+    .unwrap();
+    let made = doc
+        .create_node(
+            NODE,
+            shared_sections::NewNode::Item { text: "Group A" },
+            "019a2f85-7b31-7c42-8000-000000000001",
+            None,
+            "019a2f85-7b31-7c42-8000-000000000021",
+            &a,
+        )
+        .unwrap();
+    let mut expanded = made.decode();
+    let id = |i: usize| legacy::OpId::new(expanded.start_op.get() + i as u64, &expanded.actor_id);
+    let map = expanded
+        .operations
+        .iter()
+        .position(|op| matches!(&op.key, legacy::Key::Map(k) if k == NODE))
+        .map(|i| legacy::ObjectId::Id(id(i)))
+        .unwrap();
+    let kind = expanded
+        .operations
+        .iter()
+        .position(|op| op.obj == map && matches!(&op.key, legacy::Key::Map(k) if k == "kind"))
+        .map(id)
+        .unwrap();
+    let ops = extra(&map, &kind);
+    expanded.operations.extend(ops);
+    expanded.hash = None;
+    let replica = SectionsReplica::new(resource, ActorId::from([7u8; 32]));
+    (replica, a, genesis, Change::from(expanded))
+}
+
+fn op(
+    obj: &legacy::ObjectId,
+    key: &str,
+    action: legacy::OpType,
+    pred: Vec<legacy::OpId>,
+) -> legacy::Op {
+    legacy::Op {
+        action,
+        obj: obj.clone(),
+        key: legacy::Key::Map(key.into()),
+        pred: pred.into(),
+        insert: false,
+    }
+}
+
+#[test]
+fn a_scalar_text_on_a_node_without_a_kind_is_refused() {
+    // rw finding E2 (SS89): the change removes the item's kind and writes a
+    // scalar to its text; A5 refuses the scalar whatever the node's kind.
+    let (mut replica, a, genesis, change) = item_with(|map, kind| {
+        vec![
+            op(map, "kind", legacy::OpType::Delete, vec![kind.clone()]),
+            op(
+                map,
+                "text",
+                legacy::OpType::Put(ScalarValue::Str("item".into())),
+                vec![],
+            ),
+        ]
+    });
+    assert_eq!(
+        replica.receive(&a, &framing::encode_change(genesis.raw_bytes())),
+        Received::Applied
+    );
+    assert_eq!(
+        replica.receive(&a, &framing::encode_change(change.raw_bytes())),
+        Received::Refused(Refusal::InvalidFieldType)
+    );
+}
+
+#[test]
+fn a_scalar_text_the_merge_hides_behind_text_is_refused() {
+    // rw finding E2 (SS90): the change writes a scalar and then Text to the
+    // item's text, both without predecessors; the Text wins the merge and
+    // the scalar stays a conflicting value, which A5 still refuses.
+    let (mut replica, a, genesis, change) = item_with(|map, _| {
+        vec![
+            op(
+                map,
+                "text",
+                legacy::OpType::Put(ScalarValue::Str("item".into())),
+                vec![],
+            ),
+            op(map, "text", legacy::OpType::Make(ObjType::Text), vec![]),
+        ]
+    });
+    assert_eq!(
+        replica.receive(&a, &framing::encode_change(genesis.raw_bytes())),
+        Received::Applied
+    );
+    assert_eq!(
+        replica.receive(&a, &framing::encode_change(change.raw_bytes())),
+        Received::Refused(Refusal::InvalidFieldType)
+    );
 }
