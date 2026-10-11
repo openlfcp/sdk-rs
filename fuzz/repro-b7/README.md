@@ -83,3 +83,11 @@ crashes. Replayed on the final harness: 1121 are F1, 1 is E1, 3 are E2
 (genesis `initial-content`, applied against refused:INVALID_FIELD_TYPE),
 and 88 agree (the repeated-refusal harness artifact, written before the
 fix above). No new class.
+
+## baseline.10: sdk-rs cf8dcb6 against sdk-ts 0.2.0-beta.4
+
+Every input above agrees, names included (E1, E2, F1 fixed in cf8dcb6),
+and so do the SS88–SS91 seeds of spec 0c3ee19 in their order and reversed
+(SS88: held when the genesis comes first, refused:IMMUTABLE_FIELD_MUTATED
+when the twin does, on both sides). The 60-minute run (`LFCP_FUZZ_ALL=1`,
+no `LFCP_FUZZ_SKIP_NAMES`, `-fork=6`): 1,473,601 executions, no crash.
