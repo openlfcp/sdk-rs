@@ -65,3 +65,14 @@ the spec sides with sdk-ts.
 | --- | --- | --- | --- | --- |
 | `E1-sections-equivocation-vs-structural` | genesis; another change of the same actor at sequence 1, which also writes `section.ready` against §12.1 | applied, **refused:IMMUTABLE_FIELD_MUTATED** | applied, **held** (ACTOR_EQUIVOCATION) | SS §14.1 checks the sequence (SOP §14.1) before the structural rules: held |
 | `E2-sections-scalar-node-text` | genesis; SS40's `initial-content` with one node's key `kind` turned into `text`, so the change writes a scalar string to a node's `text` | applied, **applied** | applied, **refused:INVALID_FIELD_TYPE** | A5: "writes a scalar to a node's `text`": refused |
+
+## baseline.9: sdk-rs 82901af against sdk-ts 0.2.0-beta.4
+
+The inputs above all agree, names included, but E1 and E2 (not fixed in
+82901af). diff_ts now also names a refusal of bytes already refused: the
+hash sdk-rs keeps them under (before, a second refusal of the same change
+looked unnamed on the sdk-rs side).
+
+| File | Records | sdk-rs | sdk-ts | Spec (baseline.9) |
+| --- | --- | --- | --- | --- |
+| `F1-sections-unnamed-unreadable-header` | one framed type 1 chunk, its length field exact and its checksum matching, whose body `e9 ff ff` is an unterminated dependency count | refused:INVALID_AUTOMERGE_BYTES, unnamed | refused:INVALID_AUTOMERGE_BYTES `0624759c…` | SS §14.1: "the change header is not read, and a chunk whose header is malformed … is named all the same": sdk-ts. sdk-rs `refused_change_key` (framing.rs) reads the dependencies and the actor and names nothing when it cannot |
