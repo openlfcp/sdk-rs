@@ -385,3 +385,25 @@ fn a_scalar_text_the_merge_hides_behind_text_is_refused() {
         Received::Refused(Refusal::InvalidFieldType)
     );
 }
+
+#[test]
+fn a_change_whose_dependencies_do_not_read_is_named() {
+    // rw finding F1: a type 1 chunk of exact length whose checksum matches,
+    // its body an unterminated dependency count. §14.1 names it without
+    // reading its header; no actor reads, and the name is the signer's.
+    let body = [0x01, 0x03, 0xe9, 0xff, 0xff];
+    let digest = <sha2::Sha256 as sha2::Digest>::digest(body);
+    let chunk = [&[0x85, 0x6f, 0x4a, 0x83][..], &digest[..4], &body[..]].concat();
+    let plaintext = framing::encode_change(&chunk);
+    let hash = automerge::ChangeHash(digest.into());
+    assert_eq!(framing::refused_change_key(&plaintext), Some((hash, None)));
+    let (mut replica, signer) = replica();
+    assert_eq!(
+        replica.receive(&signer, &plaintext),
+        Received::Refused(Refusal::InvalidAutomergeBytes)
+    );
+    assert_eq!(
+        replica.refused().iter().collect::<Vec<_>>(),
+        vec![(&hash, &Refusal::InvalidAutomergeBytes)]
+    );
+}

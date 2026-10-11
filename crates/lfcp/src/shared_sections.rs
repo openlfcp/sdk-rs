@@ -1918,9 +1918,16 @@ impl SectionsReplica {
                 // name stands for these bytes: a copy with a wrong checksum
                 // is refused unnamed and blocks neither its intact copy nor
                 // what depends on it. A change of another Principal's unit
-                // is named too, but not held against the change.
+                // is named too, but not held against the change. A change
+                // whose actor does not read is named as the signer's: its
+                // name stands for these very bytes, so no intact copy of
+                // another actor can share it.
                 return match crate::shared_objects::framing::refused_change_key(plaintext) {
-                    Some((hash, actor)) if actor == actor_id_bytes(&self.resource, signer) => {
+                    Some((hash, actor))
+                        if actor
+                            .as_deref()
+                            .is_none_or(|a| a == actor_id_bytes(&self.resource, signer)) =>
+                    {
                         self.forwarded.remove(&hash);
                         self.refuse(hash, Refusal::InvalidAutomergeBytes)
                     }

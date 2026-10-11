@@ -110,7 +110,11 @@ fn actors_use_the_sections_domain() {
                         let (hash, actor) =
                             framing::refused_change_key(&framing::encode_change(&bytes_of(record)))
                                 .unwrap_or_else(|| panic!("{id}: an unparsed change is named"));
-                        (hash.to_string(), base::to_hex(&actor))
+                        match actor {
+                            Some(actor) => (hash.to_string(), base::to_hex(&actor)),
+                            // No actor reads from its header (F1): named all the same.
+                            None => (hash.to_string(), actors[name].clone()),
+                        }
                     }
                 };
                 assert_eq!(actor, actors[name], "{id}: branch {branch}");

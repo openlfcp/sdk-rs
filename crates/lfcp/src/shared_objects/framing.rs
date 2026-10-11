@@ -149,11 +149,13 @@ pub fn encode_snapshot(save: &[u8]) -> Vec<u8> {
 /// length covers exactly the rest and whose checksum matches: the name is
 /// the SHA-256 of the chunk from its type byte on, and the checksum is its
 /// first four bytes, so a name stands for exactly these bytes. A copy with
-/// a wrong checksum would otherwise carry its intact copy's hash. The body
-/// starts with the dependencies and the actor. Anything else names
-/// nothing: a compressed chunk (type 2) is never inflated to be named,
-/// since inflating refused bytes has no limit.
-pub fn refused_change_key(plaintext: &[u8]) -> Option<(ChangeHash, Vec<u8>)> {
+/// a wrong checksum would otherwise carry its intact copy's hash. The name
+/// needs nothing of the change header: the actor, read after the
+/// dependencies at the start of the body, is `None` when they do not read
+/// (rw finding F1), and the chunk is named all the same. Anything else
+/// names nothing: a compressed chunk (type 2) is never inflated to be
+/// named, since inflating refused bytes has no limit.
+pub fn refused_change_key(plaintext: &[u8]) -> Option<(ChangeHash, Option<Vec<u8>>)> {
     let bytes = unframe(plaintext).ok()?;
     let header = chunk_header(&bytes).ok()?;
     if header.end != bytes.len() {
@@ -167,14 +169,19 @@ pub fn refused_change_key(plaintext: &[u8]) -> Option<(ChangeHash, Vec<u8>)> {
         return None;
     }
     let hash = ChangeHash(digest);
-    let body_at = 9 + leb_len(&bytes[9..])?;
-    let body: &[u8] = &bytes[body_at..];
-    // Dependencies: a count and 32 bytes each; then the actor, length-prefixed.
+    Some((hash, header_actor(&bytes)))
+}
+
+/// The actor at the start of a change chunk's body, after its dependencies
+/// (a count and 32 bytes each), length-prefixed; `None` when it does not
+/// read.
+fn header_actor(chunk: &[u8]) -> Option<Vec<u8>> {
+    let body_at = 9 + leb_len(chunk.get(9..)?)?;
+    let body: &[u8] = chunk.get(body_at..)?;
     let (deps, at) = read_uleb(body, 0)?;
     let at = at.checked_add(deps.checked_mul(32)?)?;
     let (len, at) = read_uleb(body, at)?;
-    let actor = body.get(at..at.checked_add(len)?)?.to_vec();
-    Some((hash, actor))
+    Some(body.get(at..at.checked_add(len)?)?.to_vec())
 }
 
 /// The ULEB128 number at `at` in `bytes` and the offset after it.
