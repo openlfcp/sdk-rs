@@ -54,3 +54,14 @@ not ask for.
 `LFCP_FUZZ_SKIP_NAMES=1` takes these two kinds (one side names, the other
 does not, the diagnostic the same) as equal, for a run against an sdk-ts
 that has not fixed them.
+
+## The 60-minute run: sdk-rs a3b78c8 against sdk-ts 0.2.0-beta.2
+
+`LFCP_FUZZ_ALL=1 LFCP_FUZZ_SKIP_NAMES=1`, `-fork=6`, the corpus with the
+baseline.7 vectors: 1,632,601 executions, 2 crashes, two classes. In both
+the spec sides with sdk-ts.
+
+| File | Records | sdk-rs | sdk-ts | Spec |
+| --- | --- | --- | --- | --- |
+| `E1-sections-equivocation-vs-structural` | genesis; another change of the same actor at sequence 1, which also writes `section.ready` against §12.1 | applied, **refused:IMMUTABLE_FIELD_MUTATED** | applied, **held** (ACTOR_EQUIVOCATION) | SS §14.1 checks the sequence (SOP §14.1) before the structural rules: held |
+| `E2-sections-scalar-node-text` | genesis; SS40's `initial-content` with one node's key `kind` turned into `text`, so the change writes a scalar string to a node's `text` | applied, **applied** | applied, **refused:INVALID_FIELD_TYPE** | A5: "writes a scalar to a node's `text`": refused |
