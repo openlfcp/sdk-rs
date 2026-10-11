@@ -9,10 +9,13 @@
 //! side binds a signer there). Both replicas start empty.
 //!
 //! After each record the two verdicts (applied, duplicate, missing, held,
-//! or the refusal with its diagnostic) and the two replicas' heads must be
+//! or the refusal with its diagnostic and, for Shared Sections, the change
+//! hash it names the refused bytes by) and the two replicas' heads must be
 //! the same; any difference crashes with both sides.
 //!
-//! `LFCP_FUZZ_TRACE=1` prints both sides' verdicts of every input.
+//! `LFCP_FUZZ_TRACE=1` prints both sides' verdicts of every input;
+//! `LFCP_FUZZ_SKIP_NAMES=1` takes a refusal one side names and the other
+//! does not as equal (repro-b7 C1, C3).
 //!
 //! Needs `node` on PATH and either `LFCP_SDK_TS_DIR` (a built sdk-ts
 //! checkout) or `LFCP_SDK_TS_NPM` (a directory with the packages installed).
@@ -235,9 +238,15 @@ fuzz_target!(|data: &[u8]| {
     if sections {
         let mut replica = SectionsReplica::new(res, ActorId::from([9u8; 32]));
         for (record, (pt, _)) in records.iter().zip(&items) {
-            ours.push(sections_verdict(
-                replica.receive(&signer(principals, record.ctl), pt),
-            ));
+            let before: Vec<_> = replica.refused().keys().copied().collect();
+            let verdict = sections_verdict(replica.receive(&signer(principals, record.ctl), pt));
+            // The name the refusal gave (SS §14.1): the hash it added to
+            // the refused set, if any.
+            let named = replica.refused().keys().find(|h| !before.contains(h));
+            ours.push(match named {
+                Some(h) if verdict.starts_with("refused:") => format!("{verdict} {h}"),
+                _ => verdict,
+            });
             our_heads.push(sorted_heads(replica.view().automerge().clone().get_heads()));
         }
     } else {
@@ -257,10 +266,20 @@ fuzz_target!(|data: &[u8]| {
             &ours[i],
             theirs.get(i).map(String::as_str).unwrap_or("<none>"),
         );
-        if a != b && known(sections, a, b).is_some() {
+        let bare = |v: &str| v.split(' ').next().unwrap_or("").to_owned();
+        if a != b && known(sections, &bare(a), &bare(b)).is_some() {
             return;
         }
-        if a != b || our_heads[i] != *their_heads.get(i).unwrap_or(&String::new()) {
+        // C1 and C3 (repro-b7): one side names a refusal the other leaves
+        // unnamed. `LFCP_FUZZ_SKIP_NAMES=1` takes those two as equal, so a
+        // run against an SDK that has not fixed them still compares the rest.
+        let unnamed = |v: &str| !v.contains(' ');
+        let name_only = bare(a) == bare(b)
+            && unnamed(a) != unnamed(b)
+            && std::env::var_os("LFCP_FUZZ_SKIP_NAMES").is_some();
+        if (a != b && !name_only)
+            || our_heads[i] != *their_heads.get(i).unwrap_or(&String::new())
+        {
             panic!(
                 "sdk-rs and sdk-ts disagree at record {i} of {} ({}):\n  sdk-rs: {a} heads [{}]\n  sdk-ts: {b} heads [{}]\n  all sdk-rs: {ours:?}\n  all sdk-ts: {theirs:?}",
                 ours.len(),
