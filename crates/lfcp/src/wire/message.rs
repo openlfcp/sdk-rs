@@ -1044,13 +1044,18 @@ impl Message {
                 None => return Err(MALFORMED),
             }
         }
+        // §32, §33: the whole envelope is checked before the message type,
+        // so a malformed envelope is MALFORMED_MESSAGE whatever its type.
         let message_type = uint(&envelope, 0)?;
-        let body = Body::from_value(message_type, field(&envelope, 4)?, options)?;
+        let message_id = bytes_n(&envelope, 1)?;
+        let correlation_id = optional(&envelope, 2, as_bytes_n)?;
+        let flags = optional(&envelope, 3, as_uint)?;
+        let body = field(&envelope, 4)?;
         Ok(Message {
-            message_id: bytes_n(&envelope, 1)?,
-            correlation_id: optional(&envelope, 2, as_bytes_n)?,
-            flags: optional(&envelope, 3, as_uint)?,
-            body,
+            message_id,
+            correlation_id,
+            flags,
+            body: Body::from_value(message_type, body, options)?,
             ignored_envelope_keys,
         })
     }
@@ -1345,6 +1350,29 @@ mod tests {
         let message = Message::decode(&envelope(entries.clone()), &options).unwrap();
         assert_eq!(message.body.message_type(), 200);
         assert_eq!(message.encode(), envelope(entries));
+    }
+
+    #[test]
+    fn the_envelope_is_checked_before_the_message_type() {
+        // §32, §33 (finding W3): a malformed envelope is MALFORMED_MESSAGE
+        // whether its type is assigned, unassigned or an extension.
+        type Break = fn(&mut Vec<(u64, Value)>);
+        let breaks: [Break; 4] = [
+            |e| e.retain(|(k, _)| *k != 1),
+            |e| e.retain(|(k, _)| *k != 4),
+            |e| e.push((2, Value::bytes(vec![0; 3]))),
+            |e| e.push((3, Value::text("0"))),
+        ];
+        for code in [5, 7, 117, 128] {
+            for broken in breaks {
+                let mut entries = ping_entries();
+                entries[0].1 = Value::Unsigned(code);
+                broken(&mut entries);
+                entries.sort_by_key(|(k, _)| *k);
+                let err = decode(&envelope(entries)).unwrap_err();
+                assert_eq!(err, Error::MessageMalformed, "{code}");
+            }
+        }
     }
 
     #[test]
