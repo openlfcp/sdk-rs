@@ -10,6 +10,13 @@
 // Answer: {"id", "verdicts": [string per item], "heads": [string per item]}
 // Verdicts: applied, duplicate, missing, held, invalid:<DIAGNOSTIC>,
 // refused:<DIAGNOSTIC>, error:<CODE>.
+//
+// Wire case (diff_wire, @openlfcp/wire): {"id", "mode": "wire",
+//        "items": [{"hex", "kind": "message" | "control" | "unit" |
+//        "package" | "snapshot", "text": bool}]}
+// Answer: {"id", "verdicts": [string per item]}: ok:<re-encoding hex>
+// or err:<wire code> close=<bool> for a message; ok:<object ID hex> or
+// err:<CODE> for an object.
 
 import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
@@ -119,13 +126,45 @@ function runSections(c) {
   return { verdicts, heads };
 }
 
+let wire;
+const hexOf = (b) => Buffer.from(b).toString("hex");
+async function runWire(c) {
+  wire ??= await load("wire", ".", "dist/index.js");
+  const parse = {
+    control: wire.parseControlRecord,
+    unit: wire.parseDataUnit,
+    package: wire.parseKeyPackage,
+    snapshot: wire.parseSnapshot,
+  };
+  const verdicts = c.items.map((item) => {
+    const b = new Uint8Array(Buffer.from(item.hex, "hex"));
+    if (item.kind === "message") {
+      const frame = item.text ? { kind: "text", data: Buffer.from(b).toString("utf8") } : { kind: "binary", data: b };
+      try {
+        const r = wire.decodeFrame(frame);
+        if (r.kind === "message") return `ok:${hexOf(wire.encodeMessage(r.message))}`;
+        return `err:${r.wireCode} close=${r.closesConnection}`;
+      } catch (e) {
+        return `throw:${failure(e)}`;
+      }
+    }
+    try {
+      parse[item.kind](b);
+      return `ok:${hexOf(wire.objectId(b))}`;
+    } catch (e) {
+      return e && typeof e.code === "string" ? `err:${e.code}` : `throw:${failure(e)}`;
+    }
+  });
+  return { verdicts };
+}
+
 const lines = createInterface({ input: process.stdin });
 for await (const line of lines) {
   if (!line.trim()) continue;
   const c = JSON.parse(line);
   let out;
   try {
-    out = c.mode === "ss" ? runSections(c) : runObjects(c);
+    out = c.mode === "wire" ? await runWire(c) : c.mode === "ss" ? runSections(c) : runObjects(c);
   } catch (e) {
     out = { fatal: String(e && e.stack ? e.stack : e) };
   }

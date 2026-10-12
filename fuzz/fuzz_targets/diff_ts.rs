@@ -14,6 +14,7 @@
 //! the same; any difference crashes with both sides.
 //!
 //! `LFCP_FUZZ_TRACE=1` prints both sides' verdicts of every input;
+//! `LFCP_FUZZ_OBJECTS_ONLY=1` skips Shared Sections inputs;
 //! `LFCP_FUZZ_SKIP_NAMES=1` takes a refusal one side names and the other
 //! does not as equal (repro-b7 C1, C3).
 //!
@@ -219,6 +220,9 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
     let sections = mode & 1 != 0;
+    if sections && std::env::var_os("LFCP_FUZZ_OBJECTS_ONLY").is_some() {
+        return;
+    }
     let (resource_hex, principals) = if sections {
         (SECTIONS_RESOURCE, &SECTIONS_PRINCIPALS)
     } else {

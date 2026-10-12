@@ -83,3 +83,9 @@ path = "fuzz_targets/diff_ts.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "diff_wire"
+path = "fuzz_targets/diff_wire.rs"
+test = false
+doc = false
