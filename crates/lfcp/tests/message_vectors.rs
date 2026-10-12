@@ -1,7 +1,9 @@
 //! LFCP-TEST-VECTORS-01 wire messages: every `wire_message` case, the AUTH
 //! handshake, stale_control_head_put with its NACK, and the message
-//! negatives unknown_message_type, control_put_null_expected_head and
-//! data_have_reversed_range; plus synthetic envelope negatives built from
+//! negatives unknown_message_type, control_put_null_expected_head,
+//! data_have_reversed_range, resource_open_reversed_range,
+//! resource_open_range_sequence_zero, resource_opened_reversed_range and
+//! unassigned_type_without_message_id; plus synthetic envelope negatives built from
 //! published messages (not spec vectors).
 //!
 //! Every assertion names its case.
@@ -327,6 +329,73 @@ fn live_have_with_a_reversed_range_is_malformed() {
         HaveVector::from_wire(&have).unwrap_err()
     });
     assert_eq!(err, Error::MessageMalformed, "data_have_reversed_range");
+}
+
+/// The error the Have of `case_id`'s RESOURCE_OPEN fails with.
+fn resource_open_have_rejected(suite: &Suite, case_id: &str) -> Error {
+    rejected(suite, case_id, |bytes| {
+        let Body::ResourceOpen { have, .. } = Message::decode(bytes, &DecodeOptions::default())
+            .unwrap_or_else(|err| panic!("{case_id}: decode failed: {err}"))
+            .body
+        else {
+            panic!("{case_id}: not a RESOURCE_OPEN")
+        };
+        HaveVector::from_wire(&have).unwrap_err()
+    })
+}
+
+#[test]
+fn resource_open_have_with_a_reversed_range_is_malformed() {
+    // §41, §48 (finding S2): the Have of RESOURCE_OPEN is a live Have.
+    let suite = Suite::load();
+    let err = resource_open_have_rejected(&suite, "resource_open_reversed_range");
+    assert_eq!(err, Error::MessageMalformed, "resource_open_reversed_range");
+}
+
+#[test]
+fn resource_open_have_with_sequence_zero_is_malformed() {
+    // §41, §48 (finding S2): sequence numbers start at 1.
+    let suite = Suite::load();
+    let err = resource_open_have_rejected(&suite, "resource_open_range_sequence_zero");
+    assert_eq!(
+        err,
+        Error::MessageMalformed,
+        "resource_open_range_sequence_zero"
+    );
+}
+
+#[test]
+fn resource_opened_have_with_a_reversed_range_is_malformed() {
+    // §42, §48 (finding S2): the client reads the Have of RESOURCE_OPENED.
+    let suite = Suite::load();
+    let err = rejected(&suite, "resource_opened_reversed_range", |bytes| {
+        let Body::ResourceOpened { have, .. } = Message::decode(bytes, &DecodeOptions::default())
+            .expect("resource_opened_reversed_range: decode")
+            .body
+        else {
+            panic!("resource_opened_reversed_range: not a RESOURCE_OPENED")
+        };
+        HaveVector::from_wire(&have).unwrap_err()
+    });
+    assert_eq!(
+        err,
+        Error::MessageMalformed,
+        "resource_opened_reversed_range"
+    );
+}
+
+#[test]
+fn unassigned_type_without_message_id_is_malformed() {
+    // §32 before §33 (finding W3): the envelope is checked first.
+    let suite = Suite::load();
+    let err = rejected(&suite, "unassigned_type_without_message_id", |bytes| {
+        Message::decode(bytes, &DecodeOptions::default()).unwrap_err()
+    });
+    assert_eq!(
+        err,
+        Error::MessageMalformed,
+        "unassigned_type_without_message_id"
+    );
 }
 
 /// Synthetic negatives: published messages with the envelope or body

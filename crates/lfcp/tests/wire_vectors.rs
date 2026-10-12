@@ -533,6 +533,10 @@ const IN_SCOPE_NEGATIVES: &[&str] = &[
     "unknown_message_type",
     "control_put_null_expected_head",
     "data_have_reversed_range",
+    "resource_open_reversed_range",
+    "resource_open_range_sequence_zero",
+    "resource_opened_reversed_range",
+    "unassigned_type_without_message_id",
     // Epochs (epoch_vectors.rs).
     "stale_epoch",
     "stale_epoch_absent_actor",

@@ -10,7 +10,8 @@
 //!   the corpus' logical state and conflicts.
 //!
 //! The vectors and the corpus are read at the `spec.lock` pin
-//! (mvp-0.2-baseline.10, which holds mvp-0.1-baseline.10 unchanged).
+//! (mvp-0.2-baseline.11, which holds the mvp-0.1-baseline.10 files unchanged
+//! except LFCP-WIRE-01 and its vectors).
 
 mod support;
 
