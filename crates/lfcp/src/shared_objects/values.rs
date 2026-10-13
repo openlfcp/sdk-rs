@@ -45,6 +45,16 @@ pub enum Plain {
 }
 
 impl Plain {
+    /// Whether two concurrent values agree (§45): the same Automerge scalar
+    /// type and the same value. An object (a map, a list or Text) agrees
+    /// with no other value, nor does a scalar of an unknown type.
+    pub fn agrees_with(&self, other: &Plain) -> bool {
+        !matches!(
+            self,
+            Plain::Text(_) | Plain::Map(_) | Plain::List(_) | Plain::Unknown
+        ) && self == other
+    }
+
     /// The string of a scalar string, and of nothing else.
     pub fn as_str(&self) -> Option<&str> {
         match self {
@@ -278,6 +288,18 @@ pub fn is_priority(s: &str) -> bool {
 /// A portable tag: non-empty and without a leading `#` (§40).
 pub fn is_tag(s: &str) -> bool {
     !s.is_empty() && !s.starts_with('#')
+}
+
+/// The distinct values of `values` (§45), in their order: a value that
+/// agrees with an earlier one ([`Plain::agrees_with`]) is left out.
+pub fn distinct(values: Vec<Plain>) -> Vec<Plain> {
+    let mut out: Vec<Plain> = Vec::with_capacity(values.len());
+    for value in values {
+        if !out.iter().any(|seen| seen.agrees_with(&value)) {
+            out.push(value);
+        }
+    }
+    out
 }
 
 #[cfg(test)]

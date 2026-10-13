@@ -904,24 +904,34 @@ impl SharedObjects {
         values_of(&self.doc, &self.object_id(key)?, field)
     }
 
-    /// The concurrent values of a scalar field, when there is more than
-    /// one: the field is conflicted and must not be shown as resolved
-    /// (§45, §46).
-    pub fn conflict(&self, key: &str, field: &str) -> Result<Option<Vec<Plain>>, ProfileError> {
-        let all = self.values(key, field)?;
-        Ok((all.len() > 1).then_some(all))
+    /// The conflict set of a property (§45): its distinct concurrent
+    /// values, in Automerge's order. Concurrent equal values agree and
+    /// appear once.
+    pub fn conflict_set(&self, key: &str, field: &str) -> Result<Vec<Plain>, ProfileError> {
+        Ok(values::distinct(self.values(key, field)?))
     }
 
-    /// Every conflicted field of an object, with its concurrent values
-    /// (§44–§46). Collections (`tags`, `assignees`) merge and are not
-    /// listed (§44).
+    /// The conflict set of a scalar field when it holds two or more
+    /// values: the field is conflicted and must not be shown as resolved
+    /// (§45, §46). Concurrent equal values agree and are no conflict.
+    pub fn conflict(&self, key: &str, field: &str) -> Result<Option<Vec<Plain>>, ProfileError> {
+        let set = self.conflict_set(key, field)?;
+        Ok((set.len() > 1).then_some(set))
+    }
+
+    /// Every conflicted field of an object, with its conflict set
+    /// (§44–§46): its distinct concurrent values, two or more. Collections
+    /// (`tags`, `assignees`) merge and are not listed (§44).
     pub fn conflicts(&self, key: &str) -> Result<BTreeMap<String, Vec<Plain>>, ProfileError> {
         let id = self.object_id(key)?;
         let mut out = BTreeMap::new();
         for field in self.doc.keys(&id) {
             let all = self.doc.get_all(&id, field.as_str())?;
             if all.len() > 1 && all.iter().all(|(v, _)| matches!(v, Value::Scalar(_))) {
-                out.insert(field.clone(), values_of(&self.doc, &id, &field)?);
+                let set = values::distinct(values_of(&self.doc, &id, &field)?);
+                if set.len() > 1 {
+                    out.insert(field.clone(), set);
+                }
             }
         }
         Ok(out)
@@ -1789,6 +1799,136 @@ mod admission_tests {
         assert_eq!(
             load_guarded(&[0x85, 0x6f, 0x4a, 0x83, 0, 0, 0, 0, 0, 1, 0]).map(|_| ()),
             Err(ProfileError::Invalid(Diagnostic::InvalidAutomergeBytes))
+        );
+    }
+}
+
+#[cfg(test)]
+mod equal_values_tests {
+    //! §45: concurrent equal values of a scalar register agree; a field is
+    //! conflicted only when its concurrent values differ, and its conflict
+    //! set holds the distinct values.
+
+    use super::*;
+
+    const KEY: &str = "019a2f85-7b31-7c42-b85a-fc843e2f40ad";
+
+    fn actor(n: u8) -> ActorId {
+        ActorId::from(vec![n; 16])
+    }
+
+    /// A document with one Task, and `n` forks of it by other actors.
+    fn forks(n: u8) -> (SharedObjects, Vec<SharedObjects>) {
+        let mut base = SharedObjects::new(actor(1));
+        base.initialize().unwrap();
+        let task = NewTask::new(
+            ObjectId::parse(KEY).unwrap(),
+            PrincipalId::from_bytes([1; 32]),
+            "Prepare contract",
+        );
+        base.create_task(&task).unwrap();
+        let forks = (0..n).map(|i| base.fork(actor(2 + i))).collect();
+        (base, forks)
+    }
+
+    /// `base` with every fork merged in.
+    fn merged(mut base: SharedObjects, mut forks: Vec<SharedObjects>) -> SharedObjects {
+        for fork in &mut forks {
+            assert!(base.merge(fork).unwrap().is_empty());
+        }
+        base
+    }
+
+    fn strs(values: &[Plain]) -> Vec<&str> {
+        let mut out: Vec<&str> = values.iter().filter_map(Plain::as_str).collect();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn equal_status_writes_agree() {
+        // S17, SS93.
+        let (base, mut forks) = forks(2);
+        for fork in &mut forks {
+            fork.set_status(KEY, "done").unwrap();
+        }
+        let doc = merged(base, forks);
+        assert_eq!(strs(&doc.values(KEY, "status").unwrap()), ["done", "done"]);
+        assert_eq!(strs(&doc.conflict_set(KEY, "status").unwrap()), ["done"]);
+        assert_eq!(doc.conflict(KEY, "status").unwrap(), None);
+        assert!(doc.conflicts(KEY).unwrap().is_empty());
+    }
+
+    #[test]
+    fn equal_restores_agree() {
+        // S18, SS92: both peers restore a deleted Task.
+        let (mut base, _) = forks(0);
+        base.delete(KEY).unwrap();
+        let mut forks: Vec<SharedObjects> = (0..2).map(|i| base.fork(actor(2 + i))).collect();
+        for fork in &mut forks {
+            fork.restore(KEY).unwrap();
+        }
+        let doc = merged(base, forks);
+        assert_eq!(doc.values(KEY, "lifecycle").unwrap().len(), 2);
+        assert_eq!(doc.conflict(KEY, "lifecycle").unwrap(), None);
+        assert!(doc.conflicts(KEY).unwrap().is_empty());
+    }
+
+    #[test]
+    fn two_equal_writes_and_a_different_one_conflict() {
+        // S19: the conflict set holds each distinct value once.
+        let (base, mut forks) = forks(3);
+        forks[0].set_status(KEY, "done").unwrap();
+        forks[1].set_status(KEY, "done").unwrap();
+        forks[2].cancel(KEY).unwrap();
+        let doc = merged(base, forks);
+        assert_eq!(doc.values(KEY, "status").unwrap().len(), 3);
+        let set = doc.conflict(KEY, "status").unwrap().unwrap();
+        assert_eq!(strs(&set), ["cancelled", "done"]);
+        assert_eq!(
+            strs(&doc.conflicts(KEY).unwrap()["status"]),
+            ["cancelled", "done"]
+        );
+    }
+
+    #[test]
+    fn different_writes_still_conflict() {
+        // S03, SS94.
+        let (base, mut forks) = forks(2);
+        forks[0].set_status(KEY, "done").unwrap();
+        forks[1].cancel(KEY).unwrap();
+        let doc = merged(base, forks);
+        let set = doc.conflict(KEY, "status").unwrap().unwrap();
+        assert_eq!(strs(&set), ["cancelled", "done"]);
+    }
+
+    #[test]
+    fn equal_means_the_same_type_and_value() {
+        assert!(Plain::Str("done".into()).agrees_with(&Plain::Str("done".into())));
+        assert!(Plain::Int(1).agrees_with(&Plain::Int(1)));
+        assert!(Plain::Null.agrees_with(&Plain::Null));
+        // Another scalar type is another value.
+        assert!(!Plain::Int(1).agrees_with(&Plain::Uint(1)));
+        assert!(!Plain::Str("1".into()).agrees_with(&Plain::Int(1)));
+        assert!(!Plain::Timestamp(5).agrees_with(&Plain::Int(5)));
+        // An object agrees with nothing, not even an equal-looking one.
+        assert!(!Plain::Text("done".into()).agrees_with(&Plain::Text("done".into())));
+        assert!(!Plain::Text("done".into()).agrees_with(&Plain::Str("done".into())));
+        assert!(!Plain::Map(BTreeMap::new()).agrees_with(&Plain::Map(BTreeMap::new())));
+        assert!(!Plain::List(vec![]).agrees_with(&Plain::List(vec![])));
+        assert!(!Plain::Unknown.agrees_with(&Plain::Unknown));
+        assert_eq!(
+            values::distinct(vec![
+                Plain::Str("a".into()),
+                Plain::Text("a".into()),
+                Plain::Str("a".into()),
+                Plain::Text("a".into()),
+            ]),
+            vec![
+                Plain::Str("a".into()),
+                Plain::Text("a".into()),
+                Plain::Text("a".into()),
+            ]
         );
     }
 }

@@ -532,3 +532,17 @@ fn setting_the_current_title_is_still_a_change() {
     assert_ne!(first.hash(), again.hash());
     assert_eq!(doc.section().unwrap().title.as_deref(), Some("Same"));
 }
+
+#[test]
+fn concurrent_equal_restores_agree() {
+    // SS92, SOP §45: both replicas restore a deleted Task; the equal values
+    // are no lifecycle conflict.
+    let mut a = seeded();
+    a.delete_node(T).unwrap();
+    let mut b = fork(&mut a, 2);
+    a.restore_node(T).unwrap();
+    b.restore_node(T).unwrap();
+    merge(&mut a, &mut b);
+    assert!(a.effective().recovery.is_empty());
+    assert!(tree(&a).iter().any(|(id, _)| id == T));
+}

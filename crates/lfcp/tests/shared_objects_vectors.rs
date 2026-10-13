@@ -530,6 +530,19 @@ fn conflicts_of(doc: &SharedObjects) -> (Conflicts, Vec<String>) {
 }
 
 /// The sorted concurrent values of a field, as strings.
+/// The conflict set of a field (§45): its distinct values as strings,
+/// sorted.
+fn conflict_set(doc: &SharedObjects, key: &str, field: &str) -> Vec<String> {
+    let mut out: Vec<String> = doc
+        .conflict_set(key, field)
+        .unwrap()
+        .iter()
+        .map(text)
+        .collect();
+    out.sort();
+    out
+}
+
 fn values(doc: &SharedObjects, key: &str, field: &str) -> Vec<String> {
     let mut out: Vec<String> = doc.values(key, field).unwrap().iter().map(text).collect();
     out.sort();
@@ -663,7 +676,7 @@ fn behavioral_scenarios_converge_to_the_expected_state() {
                     );
                 }
                 "task_status" => assert_eq!(
-                    values(&doc, task, "status"),
+                    conflict_set(&doc, task, "status"),
                     vec![want.as_str().unwrap()],
                     "{id}"
                 ),
@@ -685,12 +698,17 @@ fn behavioral_scenarios_converge_to_the_expected_state() {
                         .map(|v| v.as_str().unwrap().to_owned())
                         .collect();
                     wanted.sort();
-                    assert_eq!(values(&doc, task, field), wanted, "{id}: {field} values");
+                    assert_eq!(
+                        conflict_set(&doc, task, field),
+                        wanted,
+                        "{id}: {field} conflict set"
+                    );
                 }
                 field => {
                     // A visible scalar value: title, status, lifecycle, …
+                    // Concurrent equal values agree on it (§45).
                     assert_eq!(
-                        values(&doc, task, field),
+                        conflict_set(&doc, task, field),
                         vec![want.as_str().unwrap()],
                         "{id}: {field}"
                     );

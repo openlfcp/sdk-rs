@@ -166,10 +166,10 @@ pub struct Node {
     pub id: String,
     /// `kind`, when it is a known kind.
     pub kind: Option<NodeKind>,
-    /// Every concurrent value of the `placement` register (§7: more than
-    /// one is a placement conflict).
+    /// The distinct concurrent values of the `placement` register, sorted
+    /// (§7: more than one is a placement conflict; equal values agree).
     pub placements: Vec<String>,
-    /// Every concurrent value of `lifecycle`.
+    /// The distinct concurrent values of `lifecycle`, sorted.
     pub lifecycles: Vec<String>,
     /// `task_id`, for a Task node.
     pub task_id: Option<String>,
@@ -274,7 +274,8 @@ fn scalar(doc: &impl Read, obj: &ObjId, key: &str) -> Option<String> {
     }
 }
 
-/// Every concurrent value at `key` of `obj` that is a scalar string.
+/// The distinct concurrent values at `key` of `obj` that are scalar
+/// strings, sorted: concurrent equal values agree (SOP §45).
 fn scalars(doc: &impl Read, obj: &ObjId, key: &str) -> Vec<String> {
     let mut out: Vec<String> = doc
         .get_values(obj, key.into())
@@ -288,6 +289,7 @@ fn scalars(doc: &impl Read, obj: &ObjId, key: &str) -> Vec<String> {
         })
         .collect();
     out.sort();
+    out.dedup();
     out
 }
 
@@ -2652,4 +2654,67 @@ fn structural_refusal(
         }
     }
     found.into_iter().next()
+}
+
+#[cfg(test)]
+mod equal_values_tests {
+    //! §7 step 2 and SOP §45: concurrent assignments of one PlacementId
+    //! agree and are no placement conflict. Intents always make a fresh
+    //! placement, so the equal assignment is written directly.
+
+    use super::*;
+
+    const SECTION: &str = "019a2f85-7b31-7c42-8000-000000000001";
+    const T: &str = "019a2f85-7b31-7c42-8000-000000000010";
+    const SLOT: &str = "019a2f85-7b31-7c42-9000-000000000001";
+
+    fn principal(b: u8) -> PrincipalId {
+        PrincipalId::from_bytes([b; 32])
+    }
+
+    fn actor(b: u8) -> ActorId {
+        actor_id(&ResourceId::from_bytes([9; 32]), &principal(b))
+    }
+
+    /// Write T's current placement again: delete and put in one change, so
+    /// that the engine records a fresh assignment of the same value.
+    fn reassign(doc: &mut SectionsDoc) {
+        let nodes = doc.root_map("nodes").unwrap();
+        let t = object(&doc.doc, &nodes, T, ObjType::Map).unwrap();
+        doc.doc.delete(&t, "placement").unwrap();
+        doc.doc
+            .put(&t, "placement", ScalarValue::Str(SLOT.into()))
+            .unwrap();
+        doc.doc.commit();
+    }
+
+    #[test]
+    fn equal_placement_assignments_agree() {
+        let (mut a, _) =
+            SectionsDoc::create(actor(1), SECTION, "Joint launch", &principal(1)).unwrap();
+        a.create_node(
+            T,
+            NewNode::Task {
+                title: "Prepare contract",
+            },
+            SECTION,
+            None,
+            SLOT,
+            &principal(1),
+        )
+        .unwrap();
+        let mut b = SectionsDoc::load_as(&a.save(), actor(2)).unwrap();
+        reassign(&mut a);
+        reassign(&mut b);
+        let (ca, cb) = (a.changes(), b.changes());
+        a.apply_changes(cb).unwrap();
+        b.apply_changes(ca).unwrap();
+        let nodes = a.root_map("nodes").unwrap();
+        let t = object(&a.doc, &nodes, T, ObjType::Map).unwrap();
+        assert_eq!(a.doc.get_all(&t, "placement").unwrap().len(), 2);
+        assert_eq!(a.nodes()[T].placements, [SLOT]);
+        let effective = a.effective();
+        assert!(effective.recovery.is_empty(), "{:?}", effective.recovery);
+        assert!(effective.tree.iter().any(|n| n.id == T));
+    }
 }
