@@ -130,12 +130,13 @@ builds on the stable Rust toolchain; no older minimum version is promised.
 `spec.lock` pins the specification this SDK implements:
 
 ```json
-{ "tag": "mvp-0.2-baseline.11", "commit": "31ce592b97b799fc788852babb60fbb8bedc8b73" }
+{ "tag": "mvp-0.2-baseline.12", "commit": "bf1c78c596eef85e272c04a8a35661f814c23a40" }
 ```
 
-`mvp-0.2-baseline.11` is the MVP 0.1 baseline `mvp-0.1-baseline.10`,
-except LFCP-WIRE-01 and its vectors (below), plus the shared sections
-profile, its Markdown grammar, the SDK integration contracts and their corpus (in `lfcp-vector-format/1`), with
+`mvp-0.2-baseline.12` is the MVP 0.1 baseline `mvp-0.1-baseline.10`,
+except the files it changes (below), plus the shared sections profile, its
+Markdown grammar, the SDK integration contracts and their corpus (in
+`lfcp-vector-format/1`), with
 the canonical change encoding and operation references of SPEC-PATCH-10
 (SHARED-OBJECTS-PROFILE-01 §11.3, §11.4) and a lifecycle conflict that
 blocks its branch instead of hiding it (SHARED-SECTIONS-PROFILE-01 §7.6,
@@ -172,9 +173,14 @@ envelope before the message type, and four negative vectors are added. In
 `resource_open_reversed_range`, `resource_open_range_sequence_zero` and
 `resource_opened_reversed_range`, the Have of `RESOURCE_OPEN` and
 `RESOURCE_OPENED` is a live Have, so a reversed range or one that includes
-sequence `0` is `MALFORMED_MESSAGE` (LFCP-WIRE-01 §48, finding S2). An unassigned type without a Message ID is
+sequence `0` is `MALFORMED_MESSAGE` (LFCP-WIRE-01 §48, finding S2). An
+unassigned type without a Message ID is
 `MALFORMED_MESSAGE`, not `PROTOCOL_UNSUPPORTED`
-(`unassigned_type_without_message_id`, finding W3).
+(`unassigned_type_without_message_id`, finding W3). Concurrent equal values
+of a scalar register agree: a field is conflicted only when its values
+differ, and its conflict set holds its distinct values
+(SHARED-OBJECTS-PROFILE-01 §45, §52; S17 to S19), which shared sections
+apply to every register, placements included (SS92 to SS94).
 
 Vectors are never copied into this repository. The tests read them from a
 checkout of `openlfcp/spec` with `git show <commit>:<path>`, so the state of

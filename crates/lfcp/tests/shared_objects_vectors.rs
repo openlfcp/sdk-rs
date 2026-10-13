@@ -3,15 +3,15 @@
 //!
 //! - D01–D08: exact (actor IDs, Principal references, framing, Object IDs);
 //! - I01–I07: the expected `PROFILE_INVALID` diagnostic after the mutation;
-//! - S01–S14: each scenario's branches are run through this crate's
+//! - S01–S19: each scenario's branches are run through this crate's
 //!   intents, merged, and compared with the expected logical state and
 //!   conflict sets, and with the corpus' converged state;
 //! - the corpus: every change applies and every save image loads, giving
 //!   the corpus' logical state and conflicts.
 //!
 //! The vectors and the corpus are read at the `spec.lock` pin
-//! (mvp-0.2-baseline.11, which holds the mvp-0.1-baseline.10 files unchanged
-//! except LFCP-WIRE-01 and its vectors).
+//! (mvp-0.2-baseline.12, whose SHARED-OBJECTS-PROFILE-01 §45 says that
+//! concurrent equal values agree: S17 to S19).
 
 mod support;
 
@@ -736,7 +736,7 @@ fn behavioral_scenarios_converge_to_the_expected_state() {
         );
         checked += 1;
     }
-    assert_eq!(checked, 16, "S01-S16");
+    assert_eq!(checked, 19, "S01-S19");
 }
 
 #[test]
@@ -841,7 +841,7 @@ fn every_corpus_change_applies_and_every_save_loads() {
             );
         }
     }
-    assert_eq!(changes_applied, 61, "corpus changes");
+    assert_eq!(changes_applied, 74, "corpus changes");
 }
 
 #[test]
