@@ -15,7 +15,7 @@ jobs:
       run:
         working-directory: sdk-rs
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: sdk-rs
       # Tests read official vectors from a spec checkout next to this
@@ -24,7 +24,7 @@ jobs:
         run: echo "tag=$(jq -er .tag spec.lock)" >> "$GITHUB_OUTPUT"
       # Full history with tags, so the tests can check that the tag still
       # resolves to the commit in spec.lock.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: openlfcp/spec
           ref: refs/tags/${{ steps.spec-lock.outputs.tag }}
