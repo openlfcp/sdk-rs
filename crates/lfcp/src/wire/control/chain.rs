@@ -358,6 +358,7 @@ mod tests {
 
     fn genesis() -> ControlRecord {
         let body = ControlBody::Genesis(GenesisBody {
+            device_chain: None,
             data_profile: "lfcp.tasks.v1".into(),
             owner: owner().descriptor().clone(),
             dek_commitment: Hash32::from_bytes([5; 32]),

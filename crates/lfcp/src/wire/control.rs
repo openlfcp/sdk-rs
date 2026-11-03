@@ -21,6 +21,7 @@
 pub mod authority;
 pub mod body;
 pub mod chain;
+pub mod device;
 pub mod epoch;
 
 use crate::base::{ControlRecordId, Error, PrincipalId, ResourceId};
@@ -99,6 +100,7 @@ impl ReceivedControlRecord {
     /// Parse a Control Record from its exact signed-object bytes: canonical
     /// COSE (§10), a closed §13 payload and a typed body.
     pub fn parse(bytes: &[u8]) -> Result<ReceivedControlRecord, Error> {
+        device::scan::control_record(bytes)?;
         let object = cose::parse(bytes)?;
         let (header, body) = decode_payload(object.payload())?;
         Ok(ReceivedControlRecord {

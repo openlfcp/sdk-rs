@@ -1,6 +1,6 @@
 //! Typed Control Record bodies (LFCP-WIRE-01 §14–§24).
 //!
-//! Every core type 0–8 decodes from, and encodes to, a closed map with the
+//! Every core type 0–10 decodes from, and encodes to, a closed map with the
 //! field types its CDDL gives. Only structure is checked here; what a body
 //! means for authority, routes, epochs or ownership is evaluated elsewhere.
 //!
@@ -15,7 +15,9 @@
 //! | 6 | Owner Transfer Commit | 0 offer COSE bytes, 1 accept COSE bytes | §23.3 |
 //! | 7 | Coordinator Recovery | 0 route version, 1 endpoints (≥ 1), 2 coordinator URL, 3 reason | §22 |
 //! | 8 | Resource Tombstone | 0 reason, ?1 note | §24 |
-//! | 9–31 | reserved | rejected, `INVALID_CONTROL_CHAIN` | §14 |
+//! | 9 | Device Grant | 0 root, 1 certificate chain, ?2 pairing device | identity §2.3 |
+//! | 10 | Device Revoke | 0 root, 1 device, 2 reason, ?4 approval digest | identity §2.4 |
+//! | 11–31 | reserved | rejected, `INVALID_CONTROL_CHAIN` | §14 |
 //! | ≥ 32 | extension | kept opaque | §14 |
 //!
 //! An endpoint is `{0: URL, 1: priority, ?2: flags}` (§16).
@@ -29,6 +31,7 @@
 //! | reason and note text | any length | at most 256 UTF-8 bytes | §22, §24 |
 //! | ability lists | no repeated code, else `MALFORMED_MESSAGE` | no repeated code | §17.1 |
 
+use super::device::{CertificateChain, DeviceKind};
 use crate::base::{ControlRecordId, Error, Hash32, PrincipalId, ResourceId};
 use crate::cbor::Value;
 use crate::cose::{self, SignedObject};
@@ -93,7 +96,7 @@ impl Endpoint {
 pub struct GenesisBody {
     /// Field 0: the Data Profile identifier.
     pub data_profile: String,
-    /// Field 1: the owner, who must sign Genesis.
+    /// Field 1: the owner root.
     pub owner: PrincipalDescriptor,
     /// Field 2: the epoch-0 DEK commitment.
     pub dek_commitment: Hash32,
@@ -101,6 +104,8 @@ pub struct GenesisBody {
     pub endpoints: Vec<Endpoint>,
     /// Field 4: the initial Control Coordinator URL.
     pub coordinator: String,
+    /// Field 5: the owner device's certificate chain, when present.
+    pub device_chain: Option<CertificateChain>,
 }
 
 /// Capability Grant (§17.2), including invite grants (§18).
@@ -169,6 +174,8 @@ pub struct OwnerTransferCommitBody {
     pub offer: Vec<u8>,
     /// Field 1: the transfer accept's exact COSE_Sign1 bytes.
     pub accept: Vec<u8>,
+    /// Field 2: the new owner device's certificate chain, when present.
+    pub device_chain: Option<CertificateChain>,
 }
 
 /// Coordinator Recovery (§22).
@@ -193,6 +200,30 @@ pub struct ResourceTombstoneBody {
     pub note: Option<String>,
 }
 
+/// Device Grant (identity §2.3). Binding and registration are state checks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeviceGrantBody {
+    /// Field 0: the root the chain belongs to.
+    pub root: PrincipalId,
+    /// Field 1: exact certificates, leaf first.
+    pub chain: CertificateChain,
+    /// Field 2: consumed pairing device whose approval names this leaf.
+    pub pairing_device: Option<PrincipalId>,
+}
+
+/// Device Revoke (identity §2.4). Field 3 is reserved and rejected.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeviceRevokeBody {
+    /// Field 0: root of the revoked pair.
+    pub root: PrincipalId,
+    /// Field 1: device of the revoked pair, distinct from root.
+    pub device: PrincipalId,
+    /// Field 2: reason; unknown codes are preserved.
+    pub reason: u64,
+    /// Field 4: certificate payload digest, present exactly for reason 3.
+    pub approval: Option<Hash32>,
+}
+
 /// A typed Control Record body.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ControlBody {
@@ -214,6 +245,10 @@ pub enum ControlBody {
     CoordinatorRecovery(CoordinatorRecoveryBody),
     /// Type 8.
     ResourceTombstone(ResourceTombstoneBody),
+    /// Type 9.
+    DeviceGrant(DeviceGrantBody),
+    /// Type 10.
+    DeviceRevoke(DeviceRevokeBody),
     /// A type ≥ 32, retained but not interpreted (§14). Its body is kept
     /// as decoded; the record's exact bytes stay in the signed object.
     Extension {
@@ -237,6 +272,8 @@ impl ControlBody {
             ControlBody::OwnerTransferCommit(_) => 6,
             ControlBody::CoordinatorRecovery(_) => 7,
             ControlBody::ResourceTombstone(_) => 8,
+            ControlBody::DeviceGrant(_) => 9,
+            ControlBody::DeviceRevoke(_) => 10,
             ControlBody::Extension { control_type, .. } => *control_type,
         }
     }
@@ -246,13 +283,20 @@ impl ControlBody {
         let m = &MALFORMED;
         Ok(match control_type {
             0 => {
-                check_closed_map(body, &[0, 1, 2, 3, 4], &[], MALFORMED)?;
+                check_closed_map(body, &[0, 1, 2, 3, 4], &[5], MALFORMED)?;
+                let data_profile = text_field(body, 0, m)?.to_owned();
+                let owner = descriptor_field(body, 1)?;
+                let dek_commitment = hash_field(body, 2, m)?;
+                let endpoints = endpoints_field(body, 3)?;
+                let coordinator = url_field(body, 4)?;
+                let device_chain = optional_chain(body, 5, owner.id())?;
                 ControlBody::Genesis(GenesisBody {
-                    data_profile: text_field(body, 0, m)?.to_owned(),
-                    owner: descriptor_field(body, 1)?,
-                    dek_commitment: hash_field(body, 2, m)?,
-                    endpoints: endpoints_field(body, 3)?,
-                    coordinator: url_field(body, 4)?,
+                    data_profile,
+                    owner,
+                    dek_commitment,
+                    endpoints,
+                    coordinator,
+                    device_chain,
                 })
             }
             1 => {
@@ -307,11 +351,18 @@ impl ControlBody {
                 })
             }
             6 => {
-                check_closed_map(body, &[0, 1], &[], MALFORMED)?;
-                ControlBody::OwnerTransferCommit(OwnerTransferCommitBody {
+                check_closed_map(body, &[0, 1], &[2], MALFORMED)?;
+                let mut commit = OwnerTransferCommitBody {
                     offer: bytes_field(body, 0, m)?.to_vec(),
                     accept: bytes_field(body, 1, m)?.to_vec(),
-                })
+                    device_chain: None,
+                };
+                // §3.10: both embedded structures precede every signature,
+                // including transfers without the new field.
+                let (_, offer) = commit.offer()?;
+                commit.accept()?;
+                commit.device_chain = optional_chain(body, 2, offer.new_owner.id())?;
+                ControlBody::OwnerTransferCommit(commit)
             }
             7 => {
                 check_closed_map(body, &[0, 1, 2, 3], &[], MALFORMED)?;
@@ -332,7 +383,44 @@ impl ControlBody {
                     },
                 })
             }
-            9..=31 => return Err(Error::ControlUnknownCoreType(control_type)),
+            9 => {
+                check_closed_map(body, &[0, 1], &[2], MALFORMED)?;
+                let root = principal_field(body, 0, m)?;
+                let chain =
+                    CertificateChain::from_value(body.get_uint(1).ok_or(MALFORMED)?, &root)?;
+                let pairing_device = body
+                    .get_uint(2)
+                    .map(|_| principal_field(body, 2, m))
+                    .transpose()?;
+                if pairing_device.is_some() && chain.leaf().payload().kind == DeviceKind::Pairing {
+                    return Err(MALFORMED);
+                }
+                ControlBody::DeviceGrant(DeviceGrantBody {
+                    root,
+                    chain,
+                    pairing_device,
+                })
+            }
+            10 => {
+                check_closed_map(body, &[0, 1, 2], &[4], MALFORMED)?;
+                let root = principal_field(body, 0, m)?;
+                let device = principal_field(body, 1, m)?;
+                let reason = uint_field(body, 2, m)?;
+                let approval = body
+                    .get_uint(4)
+                    .map(|_| hash_field(body, 4, m))
+                    .transpose()?;
+                if device == root || (reason == 3) != approval.is_some() {
+                    return Err(MALFORMED);
+                }
+                ControlBody::DeviceRevoke(DeviceRevokeBody {
+                    root,
+                    device,
+                    reason,
+                    approval,
+                })
+            }
+            11..=31 => return Err(Error::ControlUnknownCoreType(control_type)),
             _ => ControlBody::Extension {
                 control_type,
                 body: body.clone(),
@@ -355,7 +443,15 @@ impl ControlBody {
             }
         };
         match self {
-            ControlBody::Genesis(b) => check_writable_endpoints(&b.endpoints, &b.coordinator),
+            ControlBody::Genesis(b) => {
+                if b.device_chain
+                    .as_ref()
+                    .is_some_and(|chain| chain.root() != b.owner.id())
+                {
+                    return Err(MALFORMED);
+                }
+                check_writable_endpoints(&b.endpoints, &b.coordinator)
+            }
             ControlBody::CapabilityGrant(b) => {
                 distinct(&b.abilities)?;
                 distinct(&b.delegable)
@@ -369,9 +465,37 @@ impl ControlBody {
             ControlBody::ResourceTombstone(b) => {
                 b.note.as_deref().map_or(Ok(()), check_writable_note)
             }
+            ControlBody::DeviceGrant(b) => {
+                if b.chain.root() != &b.root
+                    || (b.pairing_device.is_some()
+                        && b.chain.leaf().payload().kind == DeviceKind::Pairing)
+                {
+                    return Err(MALFORMED);
+                }
+                Ok(())
+            }
+            ControlBody::DeviceRevoke(b) => {
+                if b.device == b.root || (b.reason == 3) != b.approval.is_some() {
+                    return Err(MALFORMED);
+                }
+                Ok(())
+            }
+            ControlBody::OwnerTransferCommit(b) => {
+                let (_, offer) = b.offer()?;
+                b.accept()?;
+                if b.device_chain
+                    .as_ref()
+                    .is_some_and(|chain| chain.root() != offer.new_owner.id())
+                {
+                    return Err(MALFORMED);
+                }
+                Ok(())
+            }
+            ControlBody::Extension { control_type, .. } if *control_type < FIRST_EXTENSION_TYPE => {
+                Err(Error::ControlUnknownCoreType(*control_type))
+            }
             ControlBody::CapabilityRevoke(_)
             | ControlBody::KeyEpoch(_)
-            | ControlBody::OwnerTransferCommit(_)
             | ControlBody::Extension { .. } => Ok(()),
         }
     }
@@ -381,13 +505,19 @@ impl ControlBody {
         let uint = Value::Unsigned;
         let bytes32 = |b: &[u8; 32]| Value::bytes(b.to_vec());
         let entries: Vec<(u64, Value)> = match self {
-            ControlBody::Genesis(b) => vec![
-                (0, Value::text(b.data_profile.clone())),
-                (1, b.owner.to_value()),
-                (2, bytes32(b.dek_commitment.as_bytes())),
-                (3, endpoints(&b.endpoints)),
-                (4, Value::text(b.coordinator.clone())),
-            ],
+            ControlBody::Genesis(b) => {
+                let mut entries = vec![
+                    (0, Value::text(b.data_profile.clone())),
+                    (1, b.owner.to_value()),
+                    (2, bytes32(b.dek_commitment.as_bytes())),
+                    (3, endpoints(&b.endpoints)),
+                    (4, Value::text(b.coordinator.clone())),
+                ];
+                if let Some(chain) = &b.device_chain {
+                    entries.push((5, chain.to_value()));
+                }
+                entries
+            }
             ControlBody::CapabilityGrant(b) => {
                 let mut entries = vec![
                     (0, b.subject.to_value()),
@@ -419,10 +549,16 @@ impl ControlBody {
                 (1, endpoints(&b.endpoints)),
                 (2, Value::text(b.coordinator.clone())),
             ],
-            ControlBody::OwnerTransferCommit(b) => vec![
-                (0, Value::bytes(b.offer.clone())),
-                (1, Value::bytes(b.accept.clone())),
-            ],
+            ControlBody::OwnerTransferCommit(b) => {
+                let mut entries = vec![
+                    (0, Value::bytes(b.offer.clone())),
+                    (1, Value::bytes(b.accept.clone())),
+                ];
+                if let Some(chain) = &b.device_chain {
+                    entries.push((2, chain.to_value()));
+                }
+                entries
+            }
             ControlBody::CoordinatorRecovery(b) => vec![
                 (0, uint(b.version)),
                 (1, endpoints(&b.endpoints)),
@@ -436,10 +572,38 @@ impl ControlBody {
                 }
                 entries
             }
+            ControlBody::DeviceGrant(b) => {
+                let mut entries = vec![(0, bytes32(b.root.as_bytes())), (1, b.chain.to_value())];
+                if let Some(pairing) = &b.pairing_device {
+                    entries.push((2, bytes32(pairing.as_bytes())));
+                }
+                entries
+            }
+            ControlBody::DeviceRevoke(b) => {
+                let mut entries = vec![
+                    (0, bytes32(b.root.as_bytes())),
+                    (1, bytes32(b.device.as_bytes())),
+                    (2, uint(b.reason)),
+                ];
+                if let Some(digest) = &b.approval {
+                    entries.push((4, bytes32(digest.as_bytes())));
+                }
+                entries
+            }
             ControlBody::Extension { body, .. } => return body.clone(),
         };
         Value::Map(entries.into_iter().map(|(k, v)| (uint(k), v)).collect())
     }
+}
+
+fn optional_chain(
+    body: &Value,
+    key: u64,
+    root: &PrincipalId,
+) -> Result<Option<CertificateChain>, Error> {
+    body.get_uint(key)
+        .map(|value| CertificateChain::from_value(value, root))
+        .transpose()
 }
 
 fn descriptor_field(body: &Value, key: u64) -> Result<PrincipalDescriptor, Error> {
@@ -707,6 +871,7 @@ mod tests {
     fn every_core_body_round_trips() {
         let id = ControlRecordId::from_bytes([4; 32]);
         round_trip(ControlBody::Genesis(GenesisBody {
+            device_chain: None,
             data_profile: "lfcp.tasks.v1".into(),
             owner: descriptor(),
             dek_commitment: Hash32::from_bytes([5; 32]),
@@ -748,8 +913,39 @@ mod tests {
             coordinator: "wss://a.example/ws".into(),
         }));
         round_trip(ControlBody::OwnerTransferCommit(OwnerTransferCommitBody {
-            offer: vec![1, 2],
-            accept: vec![3],
+            device_chain: None,
+            offer: cose::sign(
+                &cbor::encode(
+                    &OwnerTransferOffer {
+                        resource_id: ResourceId::from_bytes([1; 32]),
+                        control_head: Hash32::from_bytes([2; 32]),
+                        next_sequence: 1,
+                        new_owner: descriptor(),
+                        nonce: [3; 16],
+                    }
+                    .to_value(),
+                )
+                .unwrap(),
+                &PrincipalKeys::from_secrets(&[1; 32], [2; 32]),
+            )
+            .unwrap()
+            .bytes()
+            .to_vec(),
+            accept: cose::sign(
+                &cbor::encode(
+                    &OwnerTransferAccept {
+                        resource_id: ResourceId::from_bytes([1; 32]),
+                        offer: Hash32::from_bytes([2; 32]),
+                        new_owner: *descriptor().id(),
+                    }
+                    .to_value(),
+                )
+                .unwrap(),
+                &PrincipalKeys::from_secrets(&[1; 32], [2; 32]),
+            )
+            .unwrap()
+            .bytes()
+            .to_vec(),
         }));
         round_trip(ControlBody::CoordinatorRecovery(CoordinatorRecoveryBody {
             version: 3,
@@ -1000,14 +1196,17 @@ mod tests {
 
     #[test]
     fn reserved_core_types_are_rejected_and_extensions_kept() {
-        for code in [9, 20, 31] {
+        for code in [11, 20, 31] {
             assert_eq!(
                 ControlBody::from_value(code, &Value::Map(vec![])),
                 Err(Error::ControlUnknownCoreType(code))
             );
         }
         assert_eq!(
-            Error::ControlUnknownCoreType(9).wire_code().unwrap().name(),
+            Error::ControlUnknownCoreType(11)
+                .wire_code()
+                .unwrap()
+                .name(),
             "INVALID_CONTROL_CHAIN",
             "§14, W1"
         );

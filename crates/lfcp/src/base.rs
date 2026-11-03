@@ -133,7 +133,9 @@ pub enum Error {
     /// A Control Record payload or body is not the closed map with the
     /// field types its CDDL gives (§13–§24).
     ControlRecordMalformed,
-    /// A Control Record type in the reserved core range 9–31 (§14:
+    /// A Device Certificate or certificate chain violates identity §2.1–2.2.
+    DeviceCertificateMalformed,
+    /// A Control Record type in the reserved core range 11–31 (§14:
     /// "Unknown core Control Record types MUST cause validation failure,
     /// with `INVALID_CONTROL_CHAIN`").
     ControlUnknownCoreType(u64),
@@ -228,6 +230,18 @@ pub enum QuarantineReason {
 /// The authority rule a Control Record, Key Package or Data Unit breaks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AuthorityRule {
+    /// An intermediate certificate is not a personal managing device.
+    DeviceIssuerNotManaging,
+    /// A certificate's mask exceeds its issuing device's mask.
+    DeviceMaskEscalation,
+    /// A pairing device's scope excludes the current Resource.
+    DevicePairingOutOfScope,
+    /// The claimed root already has the device role in the Control state.
+    DeviceRootRole,
+    /// A chain device conflicts with a role or immutable existing binding.
+    DeviceBindingConflict,
+    /// A chain device is revoked for this root in the Control state.
+    DeviceRevoked,
     /// The issuer lacks this ability (§17.1).
     MissingAbility(u64),
     /// Only the owner may issue this record.
@@ -383,6 +397,7 @@ impl Error {
             Error::SnapshotMalformed => "SNAPSHOT_MALFORMED",
             Error::SnapshotSequenceZero => "SNAPSHOT_SEQUENCE_ZERO",
             Error::ControlRecordMalformed => "CONTROL_RECORD_MALFORMED",
+            Error::DeviceCertificateMalformed => "DEVICE_CERTIFICATE_MALFORMED",
             Error::ControlUnknownCoreType(_) => "CONTROL_UNKNOWN_CORE_TYPE",
             Error::IssuerUnknown(_) => "ISSUER_UNKNOWN",
             Error::InvalidControlChain(_) => "INVALID_CONTROL_CHAIN",
@@ -453,6 +468,7 @@ impl Error {
             | Error::FrontierNotCanonical(_)
             | Error::SnapshotMalformed
             | Error::ControlRecordMalformed
+            | Error::DeviceCertificateMalformed
             | Error::KeyPackageMalformed
             | Error::MessageMalformed
             | Error::MessageReservedEnvelopeKey(_)
@@ -592,6 +608,9 @@ impl fmt::Display for Error {
             Error::SnapshotMalformed => f.write_str("malformed Snapshot payload"),
             Error::SnapshotSequenceZero => f.write_str("Snapshot Sequence 0"),
             Error::ControlRecordMalformed => f.write_str("malformed Control Record"),
+            Error::DeviceCertificateMalformed => {
+                f.write_str("malformed Device Certificate or chain")
+            }
             Error::ControlUnknownCoreType(code) => {
                 write!(f, "unknown core Control Record type {code}")
             }

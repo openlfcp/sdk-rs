@@ -258,6 +258,11 @@ pub fn apply(
     };
     let previous = match (previous, record.body()) {
         (None, ControlBody::Genesis(genesis)) => {
+            // LFCP-04-402 only provides codecs. Until LFCP-04-404 applies
+            // device bindings, never accept and silently drop this chain.
+            if genesis.device_chain.is_some() {
+                return Err(Error::UnsupportedInMvp(0));
+            }
             let mut state = ControlState {
                 resource_id: header.resource_id,
                 head,
@@ -414,11 +419,17 @@ pub fn apply(
             state.route_version = route.version;
         }
         ControlBody::OwnerTransferCommit(commit) => {
+            if commit.device_chain.is_some() {
+                return Err(Error::UnsupportedInMvp(6));
+            }
             let new_owner = check_transfer(&state, record, commit)?;
             state.learn(&new_owner);
             state.owner = new_owner;
         }
-        ControlBody::CoordinatorRecovery(_) | ControlBody::ResourceTombstone(_) => {
+        ControlBody::CoordinatorRecovery(_)
+        | ControlBody::ResourceTombstone(_)
+        | ControlBody::DeviceGrant(_)
+        | ControlBody::DeviceRevoke(_) => {
             return Err(Error::UnsupportedInMvp(record.body().control_type()));
         }
         ControlBody::Extension { .. } => {
