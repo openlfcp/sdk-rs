@@ -27,6 +27,31 @@ fn bad_certificate(cert: DeviceCertificate) -> DeviceCertificate {
 }
 
 #[test]
+fn signatures_precede_the_device_grant_limit() {
+    let mut f = Fixture::new();
+    for serial in 1..=8 {
+        f.push(
+            1,
+            device_grant(chain(vec![personal(1, 2, &[1], 1, serial)]), None),
+        );
+    }
+    let ninth = record(
+        f.state(),
+        1,
+        device_grant(chain(vec![personal(1, 2, &[1], 1, 9)]), None),
+    );
+    assert_eq!(
+        transition(f.state(), &bad_signature(ninth.signed_object().bytes())),
+        Err(Error::SignatureInvalid)
+    );
+    let bad_chain = chain(vec![bad_certificate(personal(1, 2, &[1], 1, 9))]);
+    assert_eq!(
+        f.propose(1, device_grant(bad_chain, None)),
+        Err(Error::SignatureInvalid)
+    );
+}
+
+#[test]
 fn all_dependencies_precede_outer_or_embedded_signature_failures() {
     let f = Fixture::new();
     let unknown_root = chain(vec![bad_certificate(personal(10, 2, &[1], 10, 2))]);
@@ -53,15 +78,149 @@ fn all_dependencies_precede_outer_or_embedded_signature_failures() {
         transition(f.state(), &bad_signature(candidate.signed_object().bytes())),
         Err(Error::IssuerUnknown(id(8)))
     );
+}
 
-    // Offer signer is also a dependency: an invalid outer signature cannot hide it.
+#[test]
+fn unknown_offer_signer_is_authority_not_a_dependency_after_all_signatures() {
+    let f = Fixture::new();
     for certificates in [None, Some(chain(vec![personal(10, 3, &[13], 10, 3)]))] {
         let signer = if certificates.is_some() { 3 } else { 10 };
-        let body = transfer(f.state(), 10, 8, signer, certificates);
-        let candidate = record(f.state(), signer, body);
+        let body = transfer(f.state(), 10, 8, signer, certificates.clone());
+        f.denied(signer, body.clone(), Rule::TransferOfferNotByOwner);
+        let candidate = record(f.state(), signer, body.clone());
+        // External knowledge cannot turn a valid outsider's offer into a
+        // dependency failure or an authorized transfer.
+        assert_eq!(
+            validate_authorized_with(
+                &[candidate.signed_object().bytes()],
+                Some(f.state().clone()),
+                &[keys(8).descriptor().clone()]
+            )
+            .unwrap_err()
+            .error,
+            Error::AuthorizationFailed(Rule::TransferOfferNotByOwner)
+        );
         assert_eq!(
             transition(f.state(), &bad_signature(candidate.signed_object().bytes())),
-            Err(Error::IssuerUnknown(id(8)))
+            Err(Error::SignatureInvalid)
+        );
+        let ControlBody::OwnerTransferCommit(mut broken) = body else {
+            unreachable!()
+        };
+        broken.accept = bad_signature(&broken.accept);
+        assert_eq!(
+            f.propose(signer, ControlBody::OwnerTransferCommit(broken)),
+            Err(Error::SignatureInvalid)
+        );
+        assert_eq!(
+            f.propose(signer, transfer(f.state(), 10, 8, 9, certificates)),
+            Err(Error::CoseKidMismatch)
+        );
+
+        let mut bytes = f.records.clone();
+        bytes.push(candidate.signed_object().bytes().to_vec());
+        assert_eq!(
+            validate(&bytes).unwrap_err().error,
+            Error::AuthorizationFailed(Rule::TransferOfferNotByOwner)
+        );
+        assert_eq!(
+            validate_chain(
+                &bytes.iter().map(Vec::as_slice).collect::<Vec<_>>(),
+                ChainStart::Genesis,
+                &mut SignaturesOnly
+            )
+            .unwrap_err()
+            .error,
+            Error::AuthorizationFailed(Rule::TransferOfferNotByOwner)
+        );
+    }
+}
+
+#[test]
+fn offer_from_known_non_owner_or_suspended_owner_device_is_authorization_failed() {
+    let mut f = Fixture::new();
+    f.push(1, grant(8, &[1], &[], None, None));
+    f.push(
+        1,
+        device_grant(
+            chain(vec![
+                personal(1, 4, &[13], 2, 4),
+                personal(1, 2, FULL, 1, 2),
+            ]),
+            None,
+        ),
+    );
+    f.push(1, revoke(1, 2, 2, None));
+    f.register(1, 5, &[1]); // bound to owner, but lacks owner/act
+    f.push(1, grant(10, &[1], &[], None, None));
+    f.register(10, 6, &[13]); // bound to a different root
+    assert!(!f.state().owner_action(&id(4)));
+    for offer_signer in [8, 4, 2, 5, 6, 9] {
+        for certificates in [None, Some(chain(vec![personal(10, 3, &[13], 10, 3)]))] {
+            let signer = if certificates.is_some() { 3 } else { 10 };
+            let body = transfer(f.state(), 10, offer_signer, signer, certificates);
+            f.denied(signer, body.clone(), Rule::TransferOfferNotByOwner);
+            let ControlBody::OwnerTransferCommit(mut broken) = body else {
+                unreachable!()
+            };
+            broken.offer = bad_signature(&broken.offer);
+            let expected = if [2, 4, 5].contains(&offer_signer) {
+                // Bound-to-owner includes revoked, suspended and non-owner-act
+                // devices: their signature is still checked before authority.
+                Error::SignatureInvalid
+            } else {
+                Error::AuthorizationFailed(Rule::TransferOfferNotByOwner)
+            };
+            let body = ControlBody::OwnerTransferCommit(broken.clone());
+            assert_eq!(f.propose(signer, body.clone()), Err(expected.clone()));
+            let candidate = record(f.state(), signer, body);
+            // External knowledge of an outsider never enables its signature
+            // check, including for a cryptographically invalid offer.
+            assert_eq!(
+                validate_authorized_with(
+                    &[candidate.signed_object().bytes()],
+                    Some(f.state().clone()),
+                    &[keys(offer_signer).descriptor().clone()]
+                )
+                .unwrap_err()
+                .error,
+                expected
+            );
+            let mut bytes = f.records.clone();
+            bytes.push(candidate.signed_object().bytes().to_vec());
+            assert_eq!(validate(&bytes).unwrap_err().error, expected);
+            broken.accept = bad_signature(&broken.accept);
+            assert_eq!(
+                f.propose(signer, ControlBody::OwnerTransferCommit(broken)),
+                Err(Error::SignatureInvalid)
+            );
+        }
+    }
+}
+
+#[test]
+fn competing_offers_use_owner_and_bindings_at_the_common_prefix() {
+    let mut f = Fixture::new();
+    f.register(1, 2, &[13]);
+    let first = record(f.state(), 10, transfer(f.state(), 10, 1, 10, None));
+    for offer_signer in [2, 10] {
+        let ControlBody::OwnerTransferCommit(mut body) =
+            transfer(f.state(), 11, offer_signer, 11, None)
+        else {
+            unreachable!()
+        };
+        body.offer = bad_signature(&body.offer);
+        let competing = record(f.state(), 11, ControlBody::OwnerTransferCommit(body));
+        let mut bytes = f.records.clone();
+        bytes.push(first.signed_object().bytes().to_vec());
+        bytes.push(competing.signed_object().bytes().to_vec());
+        assert_eq!(
+            validate(&bytes).unwrap_err().error,
+            if offer_signer == 2 {
+                Error::SignatureInvalid
+            } else {
+                Error::AuthorizationFailed(Rule::TransferOfferNotByOwner)
+            }
         );
     }
 }
@@ -361,5 +520,100 @@ fn public_apply_also_checks_embedded_signatures_before_authority() {
             &genesis(1, 1, Some(chain(vec![personal(1, 2, &[13], 1, 2)])))
         ),
         Err(Error::CoseKidMismatch)
+    );
+}
+
+#[test]
+fn external_descriptors_cannot_change_identity_record_rejection_classes() {
+    let f = Fixture::new();
+    for body in [
+        device_grant(chain(vec![personal(1, 2, &[1], 1, 2)]), None),
+        revoke(1, 2, 2, None),
+    ] {
+        let candidate = record(f.state(), 8, body);
+        for known in [vec![], vec![keys(8).descriptor().clone()]] {
+            let error = validate_authorized_with(
+                &[candidate.signed_object().bytes()],
+                Some(f.state().clone()),
+                &known,
+            )
+            .unwrap_err()
+            .error;
+            assert_eq!(error, Error::IssuerUnknown(id(8)));
+            assert_eq!(error.wire_code(), Some(WireCode::MissingDependency));
+        }
+    }
+}
+
+#[test]
+fn class_five_diagnostics_follow_grant_and_legacy_transfer_checks() {
+    let mut f = Fixture::new();
+    f.register(1, 2, &[1]);
+    // Both subject role and issuing authority are wrong.
+    f.denied(2, grant(2, &[1], &[], None, None), Rule::NotOwner);
+    f.push(1, grant(10, &[1, 4], &[1], None, None));
+    let parent = f.state().head.id;
+    f.register(10, 3, &[1, 4]);
+    // Both the certificate mask and the parent's delegable set exclude 2.
+    f.denied(
+        3,
+        grant(9, &[2], &[], Some(parent), None),
+        Rule::DeviceDelegationMask,
+    );
+    // A bound transferee and an unauthorized offer signer: item 1 wins.
+    f.denied(
+        2,
+        transfer(f.state(), 2, 10, 2, None),
+        Rule::TransferOfferNotByOwner,
+    );
+}
+
+#[test]
+fn identity_fork_branches_keep_distinct_revocations_and_common_state() {
+    let mut f = Fixture::new();
+    f.register(1, 2, &[1]);
+    f.register(1, 3, &[1]);
+    let common = f.state().clone();
+    let first = record(&common, 1, revoke(1, 2, 0, None));
+    let second = record(&common, 1, revoke(1, 3, 2, None));
+    let a = transition(&common, first.signed_object().bytes()).unwrap();
+    let b = transition(&common, second.signed_object().bytes()).unwrap();
+    assert!(a.revocation(&id(1), &id(2)).is_some());
+    assert!(a.revocation(&id(1), &id(3)).is_none());
+    assert!(b.revocation(&id(1), &id(2)).is_none());
+    assert!(b.revocation(&id(1), &id(3)).is_some());
+    assert_eq!(common.revocations().count(), 0);
+    let mut bytes = f.records.clone();
+    bytes.extend([
+        first.signed_object().bytes().to_vec(),
+        second.signed_object().bytes().to_vec(),
+    ]);
+    let (outcome, history) = validate(&bytes).unwrap();
+    let ChainOutcome::Conflict(conflict) = outcome else {
+        panic!("expected fork")
+    };
+    assert_eq!(conflict.common.len(), f.records.len());
+    assert_eq!(history.last(), Some(&a)); // API retains accepted prefix; no second state is appended
+    assert_eq!(&history[..f.states.len()], f.states);
+}
+
+#[test]
+fn suspended_offer_signer_is_authorization_failure() {
+    let mut f = Fixture::new();
+    f.push(
+        1,
+        device_grant(
+            chain(vec![
+                personal(1, 3, &[13], 2, 3),
+                personal(1, 2, FULL, 1, 2),
+            ]),
+            None,
+        ),
+    );
+    f.push(1, revoke(1, 2, 2, None));
+    f.denied(
+        10,
+        transfer(f.state(), 10, 3, 10, None),
+        Rule::TransferOfferNotByOwner,
     );
 }

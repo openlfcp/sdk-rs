@@ -30,7 +30,7 @@ fn genesis_device_requires_leaf_signature_and_owner_act() {
     assert_eq!(f.state().role(&id(2)), Some(Role::Device));
     assert!(f.state().owner_action(&id(2)));
     assert!(f.state().holds(&id(2), 1)); // owner/act overrides mask
-    for code in [9, 12, 13, 99] {
+    for code in [9, 11, 12, 13, 99] {
         assert!(!f.state().holds(&id(2), code));
     }
     for (kind, mask, scope) in [
@@ -80,7 +80,7 @@ fn masks_scope_and_binding_equality_are_sets_and_immutable() {
     let mut f = Fixture::new();
     f.register(1, 2, &[1, 2, 99]);
     f.push(
-        2,
+        1,
         device_grant(chain(vec![personal(1, 2, &[99, 2, 1], 1, 4)]), None),
     );
     f.denied(
@@ -206,8 +206,13 @@ fn cascade_recertification_keeps_bindings_but_never_clears_a_revocation() {
     assert!(before.holds(&id(3), 2));
     assert!(!f.state().holds(&id(3), 2));
     assert_eq!(f.state().root_of(&id(3)), id(1));
-    f.push(
+    f.denied(
         3,
+        device_grant(chain(vec![personal(1, 3, &[1, 2], 1, 9)]), None),
+        Rule::DeviceGrantIssuer,
+    );
+    f.push(
+        1,
         device_grant(chain(vec![personal(1, 3, &[1, 2], 1, 9)]), None),
     );
     assert!(f.state().active_device(&id(3)).is_some());
@@ -628,7 +633,7 @@ fn transfer_registers_new_leaf_recertifies_suspended_leaf_and_refuses_revoked_pa
     f.push(1, transfer(f.state(), 1, 3, 1, None));
     let manager = personal(10, 2, FULL, 10, 2);
     f.push(
-        3,
+        10,
         device_grant(chain(vec![personal(10, 3, &[13], 2, 9), manager]), None),
     );
     f.push(1, revoke(10, 2, 2, None));
@@ -823,4 +828,61 @@ fn mask_reservations_do_not_become_grants_and_a_bound_root_cannot_accept_through
     f.register(10, 4, &[1, 11]);
     assert!(f.state().holds(&id(10), 11));
     assert!(!f.state().holds(&id(4), 11)); // §7.3 mask code 11 confers nothing
+}
+
+#[test]
+fn owner_act_never_confers_invite_claim_even_with_root_invitation_grants() {
+    use lfcp::wire::control::authority::abilities_at;
+    for mask in [&[13][..], &[11, 13][..]] {
+        let mut f = Fixture::new();
+        f.push(1, grant(1, &[1, 11], &[], None, Some(1)));
+        f.register(1, 2, mask);
+        assert!(f.state().owner_action(&id(2)));
+        assert!(!f.state().holds(&id(2), 11));
+        let expected = [1, 2, 3, 4, 5, 6, 7, 8, 10].into_iter().collect();
+        assert_eq!(f.state().abilities(&id(2)), expected);
+        assert_eq!(
+            abilities_at(&f.states, &f.state().head.id, &id(2)),
+            Some(expected)
+        );
+        f.replay();
+    }
+}
+
+#[test]
+fn exposure_matches_reader_loss_and_shares_unaffected_certificates() {
+    use std::sync::Arc;
+    let mut f = Fixture::new();
+    // Manager and child both have 13 but only the leaf is registered. The
+    // intermediate's revocation removes a reader through the cascade alone.
+    f.push(
+        1,
+        device_grant(
+            chain(vec![
+                personal(1, 3, &[13], 2, 3),
+                personal(1, 2, FULL, 1, 2),
+            ]),
+            None,
+        ),
+    );
+    f.register(1, 4, &[1]);
+    let previous = f.state().clone();
+    f.push(1, revoke(1, 2, 2, None));
+    assert_eq!(f.state().last_exposing_revocation, Some(f.state().head));
+    assert!(!previous.device(&id(2)).unwrap().registered);
+    assert!(previous.holds(&id(3), 1));
+    assert!(!f.state().holds(&id(3), 1));
+    assert_eq!(f.state().may_read(&id(3)), ReadAccess::Denied);
+    let old = previous.device(&id(4)).unwrap().chain.as_ref().unwrap();
+    let new = f.state().device(&id(4)).unwrap().chain.as_ref().unwrap();
+    assert!(Arc::ptr_eq(old, new));
+    // The reference definition remains true for each Device Revoke in history.
+    for pair in f.states.windows(2) {
+        if pair[1].last_exposing_revocation == Some(pair[1].head) {
+            assert!(pair[0]
+                .devices()
+                .any(|(p, d)| d.registered && pair[0].holds(&p, 1) && !pair[1].holds(&p, 1)));
+        }
+    }
+    f.replay();
 }

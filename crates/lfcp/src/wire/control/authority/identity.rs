@@ -1,6 +1,6 @@
 //! Resource-local identity state and transitions (§7.3, §17.4–17.5, §80.1).
 
-use super::{ability, deny, ControlState};
+use super::{ability, deny, ControlState, PersistentMap};
 use crate::base::{AuthorityRule, Error, Hash32, PrincipalId, ResourceId};
 use crate::wire::control::body::{DeviceGrantBody, DeviceRevokeBody};
 use crate::wire::control::chain::ChainHead;
@@ -8,7 +8,20 @@ use crate::wire::control::device::{
     CertificateChain, ChainStateChecks, DeviceCertificatePayload, DeviceKind, DEVICE_MANAGE,
     OWNER_ACT,
 };
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, sync::Arc};
+
+const MAX_LIVE_DEVICES: usize = 32;
+const MAX_DEVICE_GRANTS: u8 = 8;
+const MAX_PREEMPTIVE_REVOCATIONS: usize = 64;
+
+/// Cached Resource-local totals; all binding paths contribute, including
+/// Genesis and transfers. A direct revocation releases one live binding slot;
+/// a cascade does not. Only currently unbound targets spend the revocation quota.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct DeviceCounts {
+    live_bound: usize,
+    preemptive_revocations: usize,
+}
 
 /// A permanent role in one Resource (§79).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,9 +46,12 @@ pub struct DeviceBinding {
     /// Whether an accepted record registered this device as an in-scope leaf.
     pub registered: bool,
     /// Latest chain accepted with this device as its leaf, exact bytes retained.
-    pub chain: Option<CertificateChain>,
+    pub chain: Option<Arc<CertificateChain>>,
     /// Certificate ID of that chain's leaf (not its payload digest).
     pub leaf_id: Option<Hash32>,
+    /// Accepted DEVICE_GRANT records for this leaf, including out-of-scope
+    /// registrations. Genesis, transfer and intermediate bindings do not count.
+    pub grants_accepted: u8,
     /// Device issuers in the current chain, nearest first; excludes the root.
     pub issuers: Vec<PrincipalId>,
 }
@@ -68,6 +84,14 @@ fn scope_set(scope: &[ResourceId]) -> Vec<ResourceId> {
 }
 
 impl ControlState {
+    fn device_counts_mut(&mut self, root: &PrincipalId) -> &mut DeviceCounts {
+        if !self.device_counts.contains_key(root.as_bytes()) {
+            self.device_counts
+                .insert(*root.as_bytes(), DeviceCounts::default());
+        }
+        self.device_counts.get_mut(root.as_bytes()).unwrap()
+    }
+
     /// The Principal's permanent Resource-local role, if assigned.
     pub fn role(&self, principal: &PrincipalId) -> Option<Role> {
         self.roles.get(principal.as_bytes()).copied()
@@ -191,7 +215,9 @@ impl ControlState {
         if self.bound(principal) {
             return Err(deny(AuthorityRule::SubjectIsDevice));
         }
-        self.roles.insert(*principal.as_bytes(), Role::NonDevice);
+        if self.role(principal).is_none() {
+            self.roles.insert(*principal.as_bytes(), Role::NonDevice);
+        }
         Ok(())
     }
 
@@ -205,19 +231,38 @@ impl ControlState {
     ) {
         for cert in chain.certificates() {
             let p = cert.payload();
-            self.devices
-                .entry(*p.device.id().as_bytes())
-                .or_insert_with(|| DeviceBinding {
-                    root: p.root,
-                    kind: p.kind,
-                    mask: p.mask.iter().copied().collect(),
-                    scope: scope_set(&p.scope),
-                    registered: false,
-                    chain: None,
-                    leaf_id: None,
-                    issuers: Vec::new(),
-                });
-            self.roles.insert(*p.device.id().as_bytes(), Role::Device);
+            if !self.bound(p.device.id()) {
+                // A foreign-root tombstone cannot prevent this binding, but
+                // its target is no longer unbound anywhere in this Resource.
+                // Use the reverse index rather than scan the revoked history.
+                if let Some(roots) = self
+                    .preemptive_revokers
+                    .get(p.device.id().as_bytes())
+                    .cloned()
+                {
+                    for (root, ()) in roots.iter() {
+                        self.device_counts_mut(&PrincipalId::from_bytes(*root))
+                            .preemptive_revocations -= 1;
+                    }
+                }
+                self.devices.insert(
+                    *p.device.id().as_bytes(),
+                    DeviceBinding {
+                        root: p.root,
+                        kind: p.kind,
+                        mask: p.mask.iter().copied().collect(),
+                        scope: scope_set(&p.scope),
+                        registered: false,
+                        chain: None,
+                        leaf_id: None,
+                        grants_accepted: 0,
+                        issuers: Vec::new(),
+                    },
+                );
+                self.roles.insert(*p.device.id().as_bytes(), Role::Device);
+                // Chain state checks reject every directly revoked chain pair.
+                self.device_counts_mut(&p.root).live_bound += 1;
+            }
             self.learn(&p.device);
         }
         let leaf = self
@@ -227,7 +272,7 @@ impl ControlState {
         if keep_registered_leaf && leaf.registered && leaf.leaf_id == Some(chain.leaf().id()) {
             return;
         }
-        leaf.chain = Some(chain.clone());
+        leaf.chain = Some(Arc::new(chain.clone()));
         leaf.leaf_id = Some(chain.leaf().id());
         leaf.issuers = chain.issuers().copied().collect();
         leaf.registered |= in_scope;
@@ -252,7 +297,7 @@ impl ControlState {
         issuer: &PrincipalId,
         grant: &DeviceGrantBody,
     ) -> Result<(), Error> {
-        // §17.4 rules 4–7, after every dependency and signature.
+        // §17.4 rules 4–8, after every dependency and signature.
         if !self.root_standing(&grant.root) {
             return Err(deny(AuthorityRule::DeviceRootNotStanding));
         }
@@ -267,11 +312,17 @@ impl ControlState {
         {
             return Err(deny(AuthorityRule::DeviceAlreadyBound));
         }
-        let allowed = issuer == &grant.root
-            || (p.kind == DeviceKind::Personal
-                && (issuer == p.device.id() || chain.issuers().any(|id| id == issuer)))
-            || self.manages(issuer, &grant.root)
-            || (self.is_owner(&grant.root) && self.owner_action(issuer));
+        let allowed = if issuer == p.device.id() {
+            // Self-submission is only a first leaf registration, including an
+            // intermediate-only binding. Management/owner masks do not allow
+            // a previously registered device to re-certify itself.
+            p.kind == DeviceKind::Personal && self.device(issuer).is_none_or(|d| d.chain.is_none())
+        } else {
+            issuer == &grant.root
+                || (p.kind == DeviceKind::Personal && chain.issuers().any(|id| id == issuer))
+                || self.manages(issuer, &grant.root)
+                || (self.is_owner(&grant.root) && self.owner_action(issuer))
+        };
         if !allowed {
             return Err(deny(AuthorityRule::DeviceGrantIssuer));
         }
@@ -286,7 +337,29 @@ impl ControlState {
                 return Err(deny(AuthorityRule::DeviceApprovalMismatch));
             }
         }
+        let live_bound = self
+            .device_counts
+            .get(grant.root.as_bytes())
+            .map_or(0, |c| c.live_bound);
+        let new_bindings = chain
+            .certificates()
+            .iter()
+            .filter(|cert| !self.bound(cert.payload().device.id()))
+            .count();
+        if live_bound + new_bindings > MAX_LIVE_DEVICES {
+            return Err(deny(AuthorityRule::DeviceBindingLimit));
+        }
+        if self
+            .device(p.device.id())
+            .is_some_and(|d| d.grants_accepted >= MAX_DEVICE_GRANTS)
+        {
+            return Err(deny(AuthorityRule::DeviceGrantLimit));
+        }
         self.bind_chain(chain, in_scope, false);
+        self.devices
+            .get_mut(p.device.id().as_bytes())
+            .unwrap()
+            .grants_accepted += 1;
         Ok(())
     }
 
@@ -324,14 +397,41 @@ impl ControlState {
         if existing {
             return Err(deny(AuthorityRule::DeviceAlreadyRevoked));
         }
-        let readers: Vec<_> = self
-            .devices()
-            .filter(|(id, d)| d.registered && self.holds(id, ability::DATA_READ))
-            .map(|(id, _)| id)
-            .collect();
+        let bound = binding.is_some();
+        if !bound
+            && self
+                .device_counts
+                .get(revoke.root.as_bytes())
+                .is_some_and(|c| c.preemptive_revocations >= MAX_PREEMPTIVE_REVOCATIONS)
+        {
+            return Err(deny(AuthorityRule::DeviceRevocationLimit));
+        }
+        // This transition cannot change standing, root abilities or other
+        // roots. Compute these once, not once for every device's holds().
+        let standing = self.root_standing(&revoke.root);
+        let root_reads = self.direct(&revoke.root, ability::DATA_READ);
+        let root_owns = self.is_owner(&revoke.root);
+        let was_reader = |id: &PrincipalId, d: &DeviceBinding| {
+            standing
+                && d.root == revoke.root
+                && d.registered
+                && ((root_owns && d.mask.contains(&OWNER_ACT))
+                    || (root_reads && d.mask.contains(&ability::DATA_READ)))
+                && self.revocation(&d.root, id).is_none()
+                && d.issuers
+                    .iter()
+                    .all(|issuer| self.revocation(&d.root, issuer).is_none())
+        };
+        let proof_read = binding.is_some_and(|d| was_reader(&revoke.device, d));
+        // Only readers whose current path includes this pair can be removed.
+        let exposing = proof_read
+            || (standing
+                && self
+                    .devices()
+                    .any(|(id, d)| d.issuers.contains(&revoke.device) && was_reader(&id, d)));
         // Only a direct revocation of a registered reader grants proof read.
         // A cascade or loss of root standing does not (§41).
-        if readers.contains(&revoke.device) {
+        if proof_read {
             self.revoked_read_heads
                 .insert(*revoke.device.as_bytes(), head);
         }
@@ -342,7 +442,21 @@ impl ControlState {
                 approval: revoke.approval,
             },
         );
-        if readers.iter().any(|id| !self.holds(id, ability::DATA_READ)) {
+        if bound {
+            self.device_counts_mut(&revoke.root).live_bound -= 1;
+        } else {
+            self.device_counts_mut(&revoke.root).preemptive_revocations += 1;
+            let device = *revoke.device.as_bytes();
+            if !self.preemptive_revokers.contains_key(&device) {
+                self.preemptive_revokers
+                    .insert(device, PersistentMap::new());
+            }
+            self.preemptive_revokers
+                .get_mut(&device)
+                .unwrap()
+                .insert(*revoke.root.as_bytes(), ());
+        }
+        if exposing {
             self.last_exposing_revocation = Some(head);
         }
         Ok(())
