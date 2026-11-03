@@ -25,6 +25,8 @@
 
 use crate::base::Error;
 
+pub(crate) mod scan;
+
 /// The deepest nesting of arrays and maps the codec accepts. LFCP
 /// structures nest a few levels; the limit only bounds recursion on hostile
 /// input.

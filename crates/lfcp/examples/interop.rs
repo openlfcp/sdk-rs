@@ -313,6 +313,7 @@ fn produce(dir: &Path) {
             issuer: p.id("owner"),
         },
         ControlBody::Genesis(GenesisBody {
+            device_chain: None,
             data_profile: PROFILE.into(),
             owner: p.desc("owner"),
             dek_commitment: dek_commitment(&resource, 0, &dek0),

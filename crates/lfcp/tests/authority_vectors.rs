@@ -379,7 +379,10 @@ fn control_record_negatives() -> Vec<(&'static str, Outcome)> {
         // §14 (W1).
         (
             "unknown_core_type_C1",
-            Rejected(Error::ControlUnknownCoreType(9)),
+            // The baseline.12 bytes use type 9 with a Capability Grant
+            // body. Identity assigns 9 to DEVICE_GRANT: still rejected,
+            // now structurally malformed. Type 11 is covered locally.
+            Rejected(Error::ControlRecordMalformed),
         ),
         // §14 (DV2).
         (
@@ -447,9 +450,16 @@ fn control_record_negatives_are_rejected() {
             (_, other) => panic!("{case_id}: unexpected {other:?}"),
         };
         // Every negative names its code at baseline.4 (§62 general rule).
-        let code = expected["error"]["code"]
+        let baseline_code = expected["error"]["code"]
             .as_str()
             .unwrap_or_else(|| panic!("{case_id}: no code"));
+        // LFCP-04-401 must replace this obsolete unknown-type fixture.
+        let code = if case_id == "unknown_core_type_C1" {
+            assert_eq!(baseline_code, "INVALID_CONTROL_CHAIN");
+            "MALFORMED_MESSAGE"
+        } else {
+            baseline_code
+        };
         assert_eq!(
             error.wire_code().map(|c| c.name()),
             Some(code),
@@ -885,6 +895,7 @@ mod synthetic {
             )
             .unwrap();
             ControlBody::OwnerTransferCommit(OwnerTransferCommitBody {
+                device_chain: None,
                 offer: offer.bytes().to_vec(),
                 accept: accept.bytes().to_vec(),
             })
