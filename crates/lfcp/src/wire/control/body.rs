@@ -260,6 +260,16 @@ pub enum ControlBody {
 }
 
 impl ControlBody {
+    /// The certificate chain embedded by a Device Grant, Genesis or transfer.
+    pub fn device_chain(&self) -> Option<&CertificateChain> {
+        match self {
+            Self::Genesis(b) => b.device_chain.as_ref(),
+            Self::OwnerTransferCommit(b) => b.device_chain.as_ref(),
+            Self::DeviceGrant(b) => Some(&b.chain),
+            _ => None,
+        }
+    }
+
     /// The §14 type code.
     pub fn control_type(&self) -> u64 {
         match self {

@@ -967,6 +967,16 @@ mod synthetic {
             ),
         ];
         for (label, transfer, committer, rule) in cases {
+            // §62 now checks the embedded accept under its required signer
+            // before payload/authority comparisons, also without field 2.
+            if label == "wrong acceptor" {
+                assert_eq!(
+                    propose(c3, &record(c3, committer, transfer.body(c3))),
+                    Err(Error::CoseKidMismatch),
+                    "{label}"
+                );
+                continue;
+            }
             denied(
                 propose(c3, &record(c3, committer, transfer.body(c3))),
                 rule,

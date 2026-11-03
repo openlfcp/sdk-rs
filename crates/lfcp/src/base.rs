@@ -135,6 +135,9 @@ pub enum Error {
     ControlRecordMalformed,
     /// A Device Certificate or certificate chain violates identity §2.1–2.2.
     DeviceCertificateMalformed,
+    /// A caller supplied a descriptor for a different certificate-chain root.
+    /// This is a local API error, not a failure of a received signature.
+    DeviceRootDescriptorMismatch,
     /// A Control Record type in the reserved core range 11–31 (§14:
     /// "Unknown core Control Record types MUST cause validation failure,
     /// with `INVALID_CONTROL_CHAIN`").
@@ -242,6 +245,30 @@ pub enum AuthorityRule {
     DeviceBindingConflict,
     /// A chain device is revoked for this root in the Control state.
     DeviceRevoked,
+    /// The device root has no ownership or active non-invitation grant.
+    DeviceRootNotStanding,
+    /// A Device Grant repeats the leaf certificate of the last accepted chain.
+    DeviceAlreadyBound,
+    /// The Device Grant issuer satisfies none of §17.4 rule 6's alternatives.
+    DeviceGrantIssuer,
+    /// The pairing session has no matching consumed approval (§17.4 rule 7).
+    DeviceApprovalMismatch,
+    /// A device-only role is required for the revocation target (§17.5 rule 3).
+    DeviceRevokeRole,
+    /// A revocation names a root different from the device's binding.
+    DeviceRevokeRootMismatch,
+    /// Reason 3 can consume only a bound pairing device.
+    DeviceConsumeNotPairing,
+    /// The revoker satisfies none of §17.5 rule 4's alternatives.
+    DeviceRevokeIssuer,
+    /// A revocation for this exact root/device pair already exists.
+    DeviceAlreadyRevoked,
+    /// Genesis/transfer requires a personal leaf with owner/act.
+    DeviceCannotActAsOwner,
+    /// A grant subject, claimant or transferee is already bound as a device.
+    SubjectIsDevice,
+    /// A device delegates a code in 1–10 outside its immutable mask.
+    DeviceDelegationMask,
     /// The issuer lacks this ability (§17.1).
     MissingAbility(u64),
     /// Only the owner may issue this record.
@@ -398,6 +425,7 @@ impl Error {
             Error::SnapshotSequenceZero => "SNAPSHOT_SEQUENCE_ZERO",
             Error::ControlRecordMalformed => "CONTROL_RECORD_MALFORMED",
             Error::DeviceCertificateMalformed => "DEVICE_CERTIFICATE_MALFORMED",
+            Error::DeviceRootDescriptorMismatch => "DEVICE_ROOT_DESCRIPTOR_MISMATCH",
             Error::ControlUnknownCoreType(_) => "CONTROL_UNKNOWN_CORE_TYPE",
             Error::IssuerUnknown(_) => "ISSUER_UNKNOWN",
             Error::InvalidControlChain(_) => "INVALID_CONTROL_CHAIN",
@@ -431,6 +459,7 @@ impl Error {
     pub fn wire_code(&self) -> Option<WireCode> {
         match self {
             Error::InvalidLength { .. }
+            | Error::DeviceRootDescriptorMismatch
             | Error::InvalidHex
             | Error::InvalidBase64Url
             | Error::InvalidObjectId => None,
@@ -608,6 +637,12 @@ impl fmt::Display for Error {
             Error::SnapshotMalformed => f.write_str("malformed Snapshot payload"),
             Error::SnapshotSequenceZero => f.write_str("Snapshot Sequence 0"),
             Error::ControlRecordMalformed => f.write_str("malformed Control Record"),
+            Error::DeviceRootDescriptorMismatch => {
+                write!(
+                    f,
+                    "descriptor does not match the requested certificate-chain root"
+                )
+            }
             Error::DeviceCertificateMalformed => {
                 f.write_str("malformed Device Certificate or chain")
             }

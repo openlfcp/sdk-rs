@@ -4,7 +4,7 @@
 //!
 //! | Record or object | Required authority | § |
 //! | --- | --- | --- |
-//! | Genesis | self-signed by the owner in its body (chain rule) | §15 |
+//! | Genesis | signed by its owner, or the owner-acting leaf of field 5 | §15 |
 //! | Capability Grant, no parent | owner; a non-owner cannot prove authority without a parent | §17.2 |
 //! | Capability Grant, with parent | parent exists and is active; issuer is its subject; abilities ⊆ parent delegable; delegable ⊆ parent delegable; a non-owner also holds `capability/grant` | §17.2 |
 //! | Capability Revoke | owner, or `capability/revoke` covering the grant (issued by the revoker or delegated from a grant it issued); the grant is not already revoked | §17.3 |
@@ -14,7 +14,8 @@
 //! | Owner Transfer Commit | §23.3 rules 1–6 and §23.2: offer by the current owner at the current head, accept by the named Principal for this offer, commit by that Principal at the offered sequence | §23 |
 //! | Coordinator Recovery, Resource Tombstone | refused: not applied in MVP 0.1 | §22, §24, MVP-SCOPE §4 |
 //! | extension type | owner only | §14 |
-//! | Key Package | epoch known, sender holds `key/distribute`, recipient holds `data/read` or is the subject of an active grant that includes and still confers `invite/claim`, at the package's Control Head | §25.2, §19 |
+//! | Device Grant, Device Revoke | standing, immutable binding, issuer and approval rules | §17.4–17.5 |
+//! | Key Package | epoch known; sender holds `key/distribute` or same-root rule; recipient holds `data/read` or the invitation exception | §25.2, §19 |
 //! | Data Unit | actor holds `data/write` at the unit's Control Head; epoch per [`super::epoch`] | §26.3 |
 //! | Snapshot | epoch known and publisher holds `snapshot/publish` at its Control Head | §29, §29.2 |
 //!
@@ -35,11 +36,13 @@
 //! [`CapabilityEngine`] is the [`ChainPolicy`] for full validation: it
 //! derives a [`ControlState`] after every accepted record, so authority can
 //! be evaluated at any historical head ([`state_at`], [`abilities_at`]).
+//! Device authority is Resource-local (§80.1): only an active registered
+//! device acts for its root. The engine also derives exposure and the
+//! restricted Control-prefix read of a revoked reader (§17.5, §41).
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::base::{AuthorityRule, ControlRecordId, Error, Hash32, PrincipalId, ResourceId};
-use crate::cose;
 use crate::principal::PrincipalDescriptor;
 use crate::wire::control::body::{CapabilityGrantBody, ControlBody, OwnerTransferCommitBody};
 use crate::wire::control::chain::{
@@ -50,6 +53,9 @@ use crate::wire::control::ControlRecord;
 use crate::wire::data_unit::DataUnitHeader;
 use crate::wire::frontier::Frontier;
 use crate::wire::key_package::KeyPackageHeader;
+
+mod identity;
+pub use identity::{DeviceBinding, DeviceRevocation, ReadAccess, Role};
 
 /// Standard ability codes (§17.1).
 pub mod ability {
@@ -98,6 +104,8 @@ pub struct Grant {
     pub id: ControlRecordId,
     /// Who issued the record.
     pub issuer: PrincipalId,
+    /// `actsFor(issuer)` at the previous head; used for revoke coverage.
+    pub issuer_root: PrincipalId,
     /// Who holds the grant.
     pub subject: PrincipalId,
     /// Granted ability codes, as written (unknown codes included).
@@ -133,8 +141,15 @@ pub struct ControlState {
     /// The final frontier of each closed epoch, from the Key Epoch that
     /// closed it (§19, §19.1).
     pub closed_frontiers: BTreeMap<u64, Frontier>,
+    /// Latest Device Revoke that removed a registered reader, directly or
+    /// through a cascade (§17.5). Compare its sequence with a rotation's.
+    pub last_exposing_revocation: Option<ChainHead>,
     grants: BTreeMap<[u8; 32], Grant>,
     principals: BTreeMap<[u8; 32], PrincipalDescriptor>,
+    roles: BTreeMap<[u8; 32], Role>,
+    devices: BTreeMap<[u8; 32], DeviceBinding>,
+    revoked: BTreeMap<([u8; 32], [u8; 32]), DeviceRevocation>,
+    revoked_read_heads: BTreeMap<[u8; 32], ChainHead>,
 }
 
 impl ControlState {
@@ -173,17 +188,24 @@ impl ControlState {
         }
     }
 
-    /// The abilities `principal` holds: every conferring standard ability
-    /// for the owner, otherwise the union of what its active grants confer.
+    /// The standard abilities held through §80.1, including device activity,
+    /// mask intersection and the owning root's owner/act exception.
     pub fn abilities(&self, principal: &PrincipalId) -> BTreeSet<u64> {
-        if self.is_owner(principal) {
-            return ability::STANDARD.filter(|&c| ability::confers(c)).collect();
-        }
-        self.grants
-            .values()
-            .filter(|g| &g.subject == principal && self.is_active(&g.id))
-            .flat_map(|g| self.conferred(g))
+        ability::STANDARD
+            .filter(|&code| self.holds(principal, code))
             .collect()
+    }
+
+    /// Direct authority of a root, before device mask intersection (§80.1).
+    fn direct(&self, principal: &PrincipalId, code: u64) -> bool {
+        self.is_owner(principal)
+            || self.grants.values().any(|g| {
+                &g.subject == principal
+                    && g.abilities.contains(&code)
+                    && self.is_active(&g.id)
+                    && !(code == ability::INVITE_CLAIM
+                        && g.claim_limit.is_some_and(|limit| g.claims_used >= limit))
+            })
     }
 
     /// What one grant confers, active or not: its abilities that confer
@@ -213,7 +235,23 @@ impl ControlState {
 
     /// Whether `principal` holds `code`.
     pub fn holds(&self, principal: &PrincipalId, code: u64) -> bool {
-        self.abilities(principal).contains(&code)
+        if !ability::confers(code) {
+            return false;
+        }
+        if self.bound(principal) {
+            let Some(device) = self.active_device(principal) else {
+                return false;
+            };
+            if self.owner_action(principal) {
+                return true;
+            }
+            // §7.3: mask code 11 is preserved but confers nothing.
+            code != ability::INVITE_CLAIM
+                && device.mask.contains(&code)
+                && self.direct(&device.root, code)
+        } else {
+            self.direct(principal, code)
+        }
     }
 
     fn require(&self, principal: &PrincipalId, code: u64) -> Result<(), Error> {
@@ -234,7 +272,7 @@ impl ControlState {
     fn issued_in_line(&self, grant: &Grant, issuer: &PrincipalId) -> bool {
         let mut current = Some(grant);
         while let Some(g) = current {
-            if &g.issuer == issuer {
+            if g.issuer_root == self.acts_for(issuer) {
                 return true;
             }
             current = g.parent.as_ref().and_then(|p| self.grant(p));
@@ -243,10 +281,26 @@ impl ControlState {
     }
 }
 
-/// The state after `record`, given the state after the previous record
-/// (`None` before Genesis). The record's signature and chain placement are
-/// already checked; this checks its authority and applies it.
+/// Validate and apply one record to the previous state (`None` before Genesis).
+/// A `ControlRecord` authenticates only its outer signature; this entry point
+/// also checks placement, dependencies and every embedded signature before
+/// authority. Use `propose_transition` when an expected-head check is needed.
 pub fn apply(
+    previous: Option<&ControlState>,
+    record: &ControlRecord,
+) -> Result<ControlState, Error> {
+    let (_, mut history) =
+        validate_authorized(&[record.signed_object().bytes()], previous.cloned())
+            .map_err(|failure| failure.error)?;
+    // One successfully validated record produces exactly one state: there is
+    // no accepted input prefix in which it could be a replay or competitor.
+    Ok(history
+        .pop()
+        .expect("one validated record produces one state"))
+}
+
+/// Apply after `validate_chain` has checked placement and all signatures.
+fn apply_verified(
     previous: Option<&ControlState>,
     record: &ControlRecord,
 ) -> Result<ControlState, Error> {
@@ -258,11 +312,6 @@ pub fn apply(
     };
     let previous = match (previous, record.body()) {
         (None, ControlBody::Genesis(genesis)) => {
-            // LFCP-04-402 only provides codecs. Until LFCP-04-404 applies
-            // device bindings, never accept and silently drop this chain.
-            if genesis.device_chain.is_some() {
-                return Err(Error::UnsupportedInMvp(0));
-            }
             let mut state = ControlState {
                 resource_id: header.resource_id,
                 head,
@@ -274,8 +323,20 @@ pub fn apply(
                 closed_frontiers: BTreeMap::new(),
                 grants: BTreeMap::new(),
                 principals: BTreeMap::new(),
+                roles: BTreeMap::new(),
+                devices: BTreeMap::new(),
+                revoked: BTreeMap::new(),
+                revoked_read_heads: BTreeMap::new(),
+                last_exposing_revocation: None,
             };
             state.learn(&genesis.owner);
+            state.non_device(genesis.owner.id())?;
+            if let Some(chain) = &genesis.device_chain {
+                let in_scope = chain.check_authority(&state.resource_id)?;
+                chain.check_state(&state)?;
+                state.check_owner_leaf(chain)?;
+                state.bind_chain(chain, in_scope, false);
+            }
             return Ok(state);
         }
         (Some(previous), _) => previous,
@@ -288,7 +349,8 @@ pub fn apply(
     };
     let mut state = previous.clone();
     let issuer = header.issuer;
-    let is_owner = state.is_owner(&issuer);
+    let is_owner = state.owner_action(&issuer);
+    let issuer_root = state.acts_for(&issuer);
 
     match record.body() {
         ControlBody::Genesis(_) => {
@@ -297,6 +359,7 @@ pub fn apply(
             ))
         }
         ControlBody::CapabilityGrant(grant) => {
+            state.non_device(grant.subject.id())?;
             check_grant(&state, &issuer, is_owner, grant)?;
             state.learn(&grant.subject);
             state.grants.insert(
@@ -304,6 +367,7 @@ pub fn apply(
                 Grant {
                     id: record.id(),
                     issuer,
+                    issuer_root,
                     subject: *grant.subject.id(),
                     abilities: grant.abilities.clone(),
                     delegable: grant.delegable.clone(),
@@ -367,6 +431,7 @@ pub fn apply(
             if invitation.subject != issuer {
                 return Err(deny(AuthorityRule::ClaimIssuerNotInvitation));
             }
+            state.non_device(claim.claimant.id())?;
             state
                 .grants
                 .get_mut(claim.invitation_grant.as_bytes())
@@ -381,6 +446,7 @@ pub fn apply(
                 Grant {
                     id: record.id(),
                     issuer,
+                    issuer_root,
                     subject: *claim.claimant.id(),
                     abilities: claim.abilities.clone(),
                     delegable: Vec::new(),
@@ -419,17 +485,22 @@ pub fn apply(
             state.route_version = route.version;
         }
         ControlBody::OwnerTransferCommit(commit) => {
-            if commit.device_chain.is_some() {
-                return Err(Error::UnsupportedInMvp(6));
+            if let Some(chain) = &commit.device_chain {
+                chain.check_authority(&state.resource_id)?;
+                chain.check_state(&state)?;
+                state.check_owner_leaf(chain)?;
             }
             let new_owner = check_transfer(&state, record, commit)?;
+            state.non_device(new_owner.id())?;
             state.learn(&new_owner);
             state.owner = new_owner;
+            if let Some(chain) = &commit.device_chain {
+                state.bind_chain(chain, true, true);
+            }
         }
-        ControlBody::CoordinatorRecovery(_)
-        | ControlBody::ResourceTombstone(_)
-        | ControlBody::DeviceGrant(_)
-        | ControlBody::DeviceRevoke(_) => {
+        ControlBody::DeviceGrant(grant) => state.grant_device(&issuer, grant)?,
+        ControlBody::DeviceRevoke(revoke) => state.revoke_device(&issuer, revoke, head)?,
+        ControlBody::CoordinatorRecovery(_) | ControlBody::ResourceTombstone(_) => {
             return Err(Error::UnsupportedInMvp(record.body().control_type()));
         }
         ControlBody::Extension { .. } => {
@@ -470,7 +541,7 @@ fn check_grant(
     if !state.is_active(parent_id) {
         return Err(deny(AuthorityRule::ParentInactive));
     }
-    if &parent.subject != issuer {
+    if parent.subject != state.acts_for(issuer) {
         return Err(deny(AuthorityRule::NotParentSubject));
     }
     if !grant.abilities.iter().all(|a| parent.delegable.contains(a)) {
@@ -480,6 +551,18 @@ fn check_grant(
     // parent.
     if !grant.delegable.iter().all(|a| parent.delegable.contains(a)) {
         return Err(deny(AuthorityRule::DelegableEscalation));
+    }
+    if !is_owner {
+        if let Some(device) = state.device(issuer) {
+            if grant
+                .abilities
+                .iter()
+                .chain(&grant.delegable)
+                .any(|code| (1..=10).contains(code) && !device.mask.contains(code))
+            {
+                return Err(deny(AuthorityRule::DeviceDelegationMask));
+            }
+        }
     }
     Ok(())
 }
@@ -492,15 +575,17 @@ fn check_transfer(
     commit: &OwnerTransferCommitBody,
 ) -> Result<PrincipalDescriptor, Error> {
     let (offer_object, offer) = commit.offer()?;
-    let (accept_object, accept) = commit.accept()?;
+    let (_, accept) = commit.accept()?;
+    if state.bound(offer.new_owner.id()) {
+        return Err(deny(AuthorityRule::SubjectIsDevice));
+    }
     if offer.resource_id != state.resource_id || accept.resource_id != state.resource_id {
         return Err(deny(AuthorityRule::TransferResourceMismatch));
     }
     // Rule 1: the offer is signed by the current owner.
-    if offer_object.kid() != state.owner.id() {
+    if !state.owner_action(offer_object.kid()) {
         return Err(deny(AuthorityRule::TransferOfferNotByOwner));
     }
-    cose::verify(&offer_object, &state.owner)?;
     // Rule 2: the offer references the current Control Head.
     if offer.control_head.as_bytes() != state.head.id.as_bytes() {
         return Err(deny(AuthorityRule::TransferOfferStaleHead));
@@ -514,14 +599,14 @@ fn check_transfer(
     if &accept.offer != offer_object.id() {
         return Err(deny(AuthorityRule::TransferAcceptNotForOffer));
     }
-    // Rule 4: the acceptance is signed by that Principal.
-    if accept_object.kid() != new_owner.id() {
-        return Err(deny(AuthorityRule::TransferAcceptorMismatch));
-    }
-    cose::verify(&accept_object, &new_owner)?;
+    // Rule 4 and all embedded signatures were checked before any authority.
     // Rule 5: the commit is signed by that Principal (its signature by the
     // issuer is already verified).
-    if &record.header().issuer != new_owner.id() {
+    let committer = commit
+        .device_chain
+        .as_ref()
+        .map_or(new_owner.id(), |c| c.leaf().payload().device.id());
+    if &record.header().issuer != committer {
         return Err(deny(AuthorityRule::TransferCommitIssuer));
     }
     // Rule 6: the expected next sequence is the commit's.
@@ -581,6 +666,27 @@ impl ChainPolicy for CapabilityEngine {
             .cloned()
     }
 
+    fn resolve_at(
+        &mut self,
+        accepted: &[ControlRecord],
+        issuer: &PrincipalId,
+    ) -> Option<PrincipalDescriptor> {
+        self.resolve_root(accepted, issuer)
+            .or_else(|| self.known.iter().find(|d| d.id() == issuer).cloned())
+    }
+
+    fn resolve_root(
+        &mut self,
+        accepted: &[ControlRecord],
+        root: &PrincipalId,
+    ) -> Option<PrincipalDescriptor> {
+        let previous = match accepted.len() {
+            0 => self.base.as_ref(),
+            n => self.history.get(n - 1),
+        };
+        previous.and_then(|state| state.principal(root)).cloned()
+    }
+
     fn authorize(
         &mut self,
         accepted: &[ControlRecord],
@@ -590,7 +696,7 @@ impl ChainPolicy for CapabilityEngine {
             0 => self.base.as_ref(),
             n => self.history.get(n - 1),
         };
-        let next = apply(previous, record)?;
+        let next = apply_verified(previous, record)?;
         // A competing record of a fork is authorized at its slot but not
         // recorded: it never becomes a head.
         if accepted.len() == self.history.len() {
@@ -647,7 +753,8 @@ pub fn abilities_at(
 }
 
 /// §25.2: whether `sender` may deliver a DEK to `recipient` in `state`.
-/// The sender holds `key/distribute`; the recipient holds `data/read` or is
+/// The sender holds `key/distribute` or satisfies the same-root exception;
+/// the recipient holds `data/read` or is
 /// the subject of an active grant that includes and still confers
 /// `invite/claim`.
 pub fn can_distribute_key(
@@ -655,7 +762,9 @@ pub fn can_distribute_key(
     sender: &PrincipalId,
     recipient: &PrincipalId,
 ) -> Result<(), Error> {
-    state.require(sender, ability::KEY_DISTRIBUTE)?;
+    if !state.same_root(sender, recipient) {
+        state.require(sender, ability::KEY_DISTRIBUTE)?;
+    }
     let invited = state
         .grants()
         .any(|g| &g.subject == recipient && state.confers_invite(g));

@@ -3,7 +3,7 @@
 //! | Rule | § |
 //! | --- | --- |
 //! | The chain starts with Genesis: type 0, sequence 0, previous `null` | §13.1, §15 |
-//! | Genesis is issued and signed by the owner in its body, else `INVALID_SIGNATURE` | §15 |
+//! | Genesis is signed by its owner, or by the leaf when field 5 is present | §15 |
 //! | Genesis occurs only at the start | §13.1, §15 |
 //! | `control_seq = previous.control_seq + 1` | §13.1 |
 //! | `prev_control_id = previous.record_id` | §13.1 |
@@ -20,6 +20,7 @@
 use std::collections::HashMap;
 
 use crate::base::{ChainRule, ControlRecordId, Error, PrincipalId, ResourceId};
+use crate::cose;
 use crate::principal::PrincipalDescriptor;
 use crate::wire::control::body::ControlBody;
 use crate::wire::control::{ControlRecord, ReceivedControlRecord};
@@ -53,9 +54,30 @@ pub trait ChainPolicy {
         None
     }
 
+    /// Resolve at the prefix being validated, including a fork's predecessor.
+    /// The default delegates to the stateless external resolver.
+    fn resolve_at(
+        &mut self,
+        _accepted: &[ControlRecord],
+        issuer: &PrincipalId,
+    ) -> Option<PrincipalDescriptor> {
+        self.resolve_issuer(issuer)
+    }
+
+    /// Resolve a Device Grant root from the previous Control state (§17.4).
+    /// Unlike an ordinary signer, it must be known to that Resource's chain.
+    /// Policies resuming a chain supply descriptors from the resume state.
+    fn resolve_root(
+        &mut self,
+        accepted: &[ControlRecord],
+        root: &PrincipalId,
+    ) -> Option<PrincipalDescriptor> {
+        self.resolve_at(accepted, root)
+    }
+
     /// Whether `record`'s issuer had the authority for it, given the
-    /// records accepted before it. Signature and chain placement are
-    /// already checked. The default accepts every record: authority is
+    /// records accepted before it. All outer/embedded signatures and chain
+    /// placement are already checked. The default accepts every record: authority is
     /// evaluated by the capability engine.
     fn authorize(
         &mut self,
@@ -168,10 +190,9 @@ pub fn check_expected_head(
 /// [`ChainOutcome::Conflict`]. Any invalid record ends it with a
 /// [`ChainFailure`].
 ///
-/// Until LFCP-04-404 implements identity transitions, every policy rejects
-/// types 9/10 with `INVALID_CONTROL_CHAIN` and Genesis/commit device-chain
-/// fields with `MALFORMED_MESSAGE` (identity draft §§2.7, 3.10). Codecs remain
-/// available independently of Control Chain admission.
+/// All embedded signatures are checked before the authority policy (§62).
+/// Use the capability engine for complete validation: `SignaturesOnly` and
+/// `ResolveWith` intentionally do not check authority or apply transitions.
 pub fn validate_chain(
     records: &[&[u8]],
     start: ChainStart,
@@ -188,28 +209,6 @@ pub fn validate_chain(
     for (index, bytes) in records.iter().enumerate() {
         let fail = |error| ChainFailure { index, error };
         let record = ReceivedControlRecord::parse(bytes).map_err(fail)?;
-
-        // Temporary admission gate, removed by LFCP-04-404. Codec support
-        // alone does not implement identity. Match an unaware receiver's
-        // rejection: unknown core types are class 2; unsupported closed-map
-        // fields are class 1. Full parsing above still reports malformed
-        // embedded objects before this gate. Run before placement, repeats,
-        // forks, issuer resolution or policy hooks so no policy can bypass
-        // it and no signer can change its result.
-        match record.body() {
-            ControlBody::DeviceGrant(_) | ControlBody::DeviceRevoke(_) => {
-                return Err(fail(Error::ControlUnknownCoreType(
-                    record.body().control_type(),
-                )));
-            }
-            ControlBody::Genesis(body) if body.device_chain.is_some() => {
-                return Err(fail(Error::ControlRecordMalformed));
-            }
-            ControlBody::OwnerTransferCommit(body) if body.device_chain.is_some() => {
-                return Err(fail(Error::ControlRecordMalformed));
-            }
-            _ => {}
-        }
 
         // The slot this record claims: the position after its predecessor.
         let slot = match record.header().previous {
@@ -231,7 +230,14 @@ pub fn validate_chain(
                 .map(|k| head_of(&accepted[k]))
                 .or(start_head);
             check_placement(&record, predecessor).map_err(fail)?;
-            let second = verify(record, &directory, policy).map_err(fail)?;
+            // A later descriptor is not a dependency at the fork's previous
+            // head. Rebuild only the common prefix, never the losing suffix.
+            let mut prefix_directory = HashMap::new();
+            for previous in &accepted[..slot] {
+                learn_descriptors(previous, &mut prefix_directory);
+            }
+            let second =
+                verify(record, &accepted[..slot], &prefix_directory, policy).map_err(fail)?;
             policy.authorize(&accepted[..slot], &second).map_err(fail)?;
             let first = accepted[slot].clone();
             accepted.truncate(slot);
@@ -244,7 +250,7 @@ pub fn validate_chain(
 
         let predecessor = accepted.last().map(head_of).or(start_head);
         check_placement(&record, predecessor).map_err(fail)?;
-        let record = verify(record, &directory, policy).map_err(fail)?;
+        let record = verify(record, &accepted, &directory, policy).map_err(fail)?;
         policy.authorize(&accepted, &record).map_err(fail)?;
         learn_descriptors(&record, &mut directory);
         accepted.push(record);
@@ -306,45 +312,93 @@ fn check_placement(
     Ok(())
 }
 
-/// Verify the record against its issuer. Genesis is verified against the
-/// owner in its own body; an issuer other than that owner is not the
-/// signer Genesis requires, [`Error::CoseKidMismatch`] (§15:
-/// `INVALID_SIGNATURE`).
+/// Resolve all dependencies, then verify the record and every embedded
+/// signed object (§62). Genesis/transfer device chains supply a required
+/// leaf signer; a different issuer fails with `INVALID_SIGNATURE`.
 fn verify(
     record: ReceivedControlRecord,
+    accepted: &[ControlRecord],
     directory: &HashMap<PrincipalId, PrincipalDescriptor>,
     policy: &mut impl ChainPolicy,
 ) -> Result<ControlRecord, Error> {
-    let issuer = record.header().issuer;
-    let descriptor = match record.body() {
-        ControlBody::Genesis(genesis) => {
-            if genesis.owner.id() != &issuer {
-                return Err(Error::CoseKidMismatch);
-            }
-            genesis.owner.clone()
-        }
-        _ => directory
-            .get(&issuer)
-            .cloned()
-            .or_else(|| policy.resolve_issuer(&issuer))
-            .or_else(|| transfer_new_owner(record.body(), &issuer))
-            .ok_or(Error::IssuerUnknown(issuer))?,
-    };
-    record.verify(&descriptor)
-}
-
-/// The new owner a Transfer Commit's embedded offer describes, when it is
-/// the issuer: the commit is signed by that Principal (§23.3), and a
-/// descriptor is self-certifying, so it may come from the offer itself.
-fn transfer_new_owner(body: &ControlBody, issuer: &PrincipalId) -> Option<PrincipalDescriptor> {
-    match body {
-        ControlBody::OwnerTransferCommit(commit) => commit
-            .offer()
-            .ok()
-            .map(|(_, offer)| offer.new_owner)
-            .filter(|owner| owner.id() == issuer),
+    let body = record.body();
+    let offer = match body {
+        ControlBody::OwnerTransferCommit(commit) => Some(commit.offer()?),
         _ => None,
+    };
+    let accept = match body {
+        ControlBody::OwnerTransferCommit(commit) => Some(commit.accept()?),
+        _ => None,
+    };
+    let chain = body.device_chain();
+    // Class 3: resolve *every* dependency before the outer signature.
+    let root = match body {
+        ControlBody::Genesis(b) => Some(b.owner.clone()),
+        ControlBody::OwnerTransferCommit(_) => Some(offer.as_ref().unwrap().1.new_owner.clone()),
+        ControlBody::DeviceGrant(b) => Some(
+            directory
+                .get(&b.root)
+                .cloned()
+                .or_else(|| policy.resolve_root(accepted, &b.root))
+                .ok_or(Error::IssuerUnknown(b.root))?,
+        ),
+        _ => None,
+    };
+    if let Some(chain) = chain {
+        chain.require_root(root.as_ref())?;
     }
+    let issuer = record.header().issuer;
+    let required = match body {
+        ControlBody::Genesis(b) => Some(chain.map_or(&b.owner, |c| &c.leaf().payload().device)),
+        ControlBody::OwnerTransferCommit(_) if chain.is_some() => {
+            Some(&chain.unwrap().leaf().payload().device)
+        }
+        _ => None,
+    };
+    let descriptor = required
+        .cloned()
+        .or_else(|| directory.get(&issuer).cloned())
+        .or_else(|| {
+            chain.and_then(|c| {
+                c.certificates()
+                    .iter()
+                    .find(|cert| cert.payload().device.id() == &issuer)
+                    .map(|cert| cert.payload().device.clone())
+            })
+        })
+        .or_else(|| {
+            offer
+                .as_ref()
+                .map(|(_, offer)| &offer.new_owner)
+                .filter(|d| d.id() == &issuer)
+                .cloned()
+        })
+        .or_else(|| policy.resolve_at(accepted, &issuer))
+        .ok_or(Error::IssuerUnknown(issuer))?;
+    let offer_signer = if let Some((object, _)) = &offer {
+        Some(
+            directory
+                .get(object.kid())
+                .cloned()
+                .or_else(|| policy.resolve_at(accepted, object.kid()))
+                .ok_or(Error::IssuerUnknown(*object.kid()))?,
+        )
+    } else {
+        None
+    };
+
+    // Class 4: outer record, certificates, then embedded offer and accept.
+    let record = record.verify(&descriptor)?;
+    let chain = record.body().device_chain();
+    if let Some(chain) = chain {
+        chain.verify_signatures(root.as_ref().unwrap())?;
+    }
+    if let (Some((offer_object, offer)), Some((accept_object, _))) = (&offer, &accept) {
+        cose::verify(offer_object, offer_signer.as_ref().unwrap())?;
+        let acceptor = chain.map_or(&offer.new_owner, |c| &c.leaf().payload().device);
+        cose::verify(accept_object, acceptor)?;
+    }
+    Ok(record)
 }
 
 /// Record the descriptors a verified record carries: the Genesis owner,
@@ -366,6 +420,11 @@ fn learn_descriptors(
             }
         }
         _ => {}
+    }
+    if let Some(chain) = record.body().device_chain() {
+        for certificate in chain.certificates() {
+            learn(&certificate.payload().device);
+        }
     }
 }
 
