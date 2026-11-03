@@ -1,5 +1,5 @@
-//! Device Certificates and leaf-first chains (identity draft rev. 3,
-//! §§2.1–2.2, 3.2, 3.10; LFCP-04-402 / R1).
+//! Device Certificates and leaf-first chains (LFCP-WIRE-01 §7.3, §62;
+//! LFCP-04-402 codecs, integrated by LFCP-04-404).
 //!
 //! Parsing checks the complete structure before dependency resolution or
 //! signatures. [`verify_chain`] checks every signature before intrinsic
@@ -10,7 +10,7 @@
 //! establishes standing or authorizes a Control transition.
 //!
 //! [`preflight_issuance`] checks a prospective unsigned leaf before a pairing
-//! approval is consumed (review N07, normative clarification pending in 401).
+//! approval is consumed (IDENTITY-PROFILE-01 §5.3 step 4).
 //! Callers must also preflight state authority and recheck it at the new head.
 
 pub(crate) mod scan;
@@ -300,17 +300,25 @@ impl CertificateChain {
         self.certificates[1..].iter().map(|c| c.payload.device.id())
     }
 
-    /// Class 3 of verifyChain: the root descriptor must be available.
-    /// Class 4: verify all certificate kids/signatures, leaf first.
-    /// No authority checks run here, allowing outer-object class ordering.
-    /// Control validators must resolve both the outer issuer and chain root
-    /// before verifying any signature; calling this after `record.verify`
-    /// with an unresolved root would violate §3.10's global class order.
-    pub fn verify_signatures(&self, root: Option<&PrincipalDescriptor>) -> Result<(), Error> {
+    /// Class 3: require the chain's root descriptor before checking *any*
+    /// signature, including that of the outer record (§62).
+    pub fn require_root<'a>(
+        &self,
+        root: Option<&'a PrincipalDescriptor>,
+    ) -> Result<&'a PrincipalDescriptor, Error> {
         let root = root.ok_or(Error::IssuerUnknown(*self.root()))?;
         if root.id() != self.root() {
-            return Err(Error::CoseKidMismatch);
+            return Err(Error::DeviceRootDescriptorMismatch);
         }
+        Ok(root)
+    }
+
+    /// Class 4 only: verify certificate kids/signatures, leaf first.
+    /// Call [`require_root`](Self::require_root) with the other dependencies
+    /// before verifying the outer signature. A mismatched descriptor is a
+    /// caller error, never an `INVALID_SIGNATURE` diagnosis of the input.
+    pub fn verify_signatures(&self, root: &PrincipalDescriptor) -> Result<(), Error> {
+        self.require_root(Some(root))?;
         verify_signatures(&self.certificates, root)
     }
 
@@ -460,6 +468,7 @@ pub fn verify_chain<'a>(
     if chain.root() != root {
         return Err(MALFORMED);
     }
+    let root_descriptor = chain.require_root(root_descriptor)?;
     chain.verify_signatures(root_descriptor)?;
     let in_scope = chain.check_authority(resource)?;
     chain.check_state(state)?;
@@ -484,7 +493,7 @@ pub fn preflight_issuance(
     check_structure(fields.clone(), issuers.len() + 1, &leaf.root)?;
     let root = root_descriptor.ok_or(Error::IssuerUnknown(leaf.root))?;
     if root.id() != &leaf.root {
-        return Err(Error::CoseKidMismatch);
+        return Err(Error::DeviceRootDescriptorMismatch);
     }
     verify_signatures(issuers, root)?;
     check_authority(fields, resource)

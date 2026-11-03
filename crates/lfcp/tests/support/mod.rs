@@ -3,6 +3,7 @@
 // Each test binary compiles this module and uses only part of it.
 #![allow(dead_code)]
 
+pub mod identity;
 pub mod sections;
 pub mod spec;
 pub mod vectors;

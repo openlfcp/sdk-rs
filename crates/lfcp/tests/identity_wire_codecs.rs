@@ -9,9 +9,7 @@ use lfcp::cose;
 use lfcp::crypto;
 use lfcp::principal::{principal_id, PrincipalKeys};
 use lfcp::wire::control::body::*;
-use lfcp::wire::control::chain::{
-    validate_chain, ChainPolicy, ChainStart, ResolveWith, SignaturesOnly,
-};
+use lfcp::wire::control::chain::{validate_chain, ChainStart, SignaturesOnly};
 use lfcp::wire::control::device::*;
 use lfcp::wire::control::{ControlRecord, ControlRecordHeader, ReceivedControlRecord};
 
@@ -433,14 +431,11 @@ fn signatures_kids_dependencies_and_all_intrinsic_authority_errors() {
         .map(|v| v.in_scope)
     };
     let valid = chain(deep_chain(false));
+    assert_eq!(valid.require_root(None), Err(Error::IssuerUnknown(root())));
+    wire(valid.require_root(None), WireCode::MissingDependency);
     assert_eq!(
-        valid.verify_signatures(None),
-        Err(Error::IssuerUnknown(root()))
-    );
-    wire(valid.verify_signatures(None), WireCode::MissingDependency);
-    assert_eq!(
-        valid.verify_signatures(Some(keys(9).descriptor())),
-        Err(Error::CoseKidMismatch)
+        valid.verify_signatures(keys(9).descriptor()),
+        Err(Error::DeviceRootDescriptorMismatch)
     );
     for index in 0..valid.certificates().len() {
         let mut certs = valid.certificates().to_vec();
@@ -898,129 +893,6 @@ fn embedded_transfer_structure_precedes_outer_signature_with_or_without_chain() 
             );
         }
     }
-}
-
-#[test]
-fn identity_records_are_refused_independently_of_signer_and_policy() {
-    use lfcp::wire::control::authority::validate_authorized;
-    let g = record_body(genesis(None), 1);
-    let certificates = chain(vec![cert(personal(2, &[13]), 1)]);
-    let bodies = [
-        (
-            grant(certificates.clone()),
-            Error::ControlUnknownCoreType(9),
-        ),
-        (
-            ControlBody::DeviceRevoke(DeviceRevokeBody {
-                root: root(),
-                device: *keys(2).descriptor().id(),
-                reason: 0,
-                approval: None,
-            }),
-            Error::ControlUnknownCoreType(10),
-        ),
-        (
-            genesis(Some(certificates.clone())),
-            Error::ControlRecordMalformed,
-        ),
-        (commit(Some(certificates)), Error::ControlRecordMalformed),
-    ];
-    for (body, expected) in bodies {
-        let is_genesis = matches!(body, ControlBody::Genesis(_));
-        for signer in [1, 2, 9] {
-            // known root, embedded leaf, unknown Principal
-            for bad_placement in [false, true] {
-                let mut h = header(signer, is_genesis);
-                if !is_genesis {
-                    h.previous = Some(g.id());
-                }
-                if bad_placement {
-                    h.sequence = 42;
-                    h.previous = Some(ControlRecordId::from_bytes([99; 32]));
-                }
-                let record = ControlRecord::sign(h, body.clone(), &keys(signer)).unwrap();
-                for bad_signature in [false, true] {
-                    let bytes = if bad_signature {
-                        let object = cbor::decode_strict(record.signed_object().bytes()).unwrap();
-                        cbor::encode(&replace(&object, 3, Value::bytes(vec![0; 64]))).unwrap()
-                    } else {
-                        record.signed_object().bytes().to_vec()
-                    };
-                    // The codec stays usable even while admission is disabled.
-                    ReceivedControlRecord::parse(&bytes).unwrap();
-                    let records = if is_genesis {
-                        vec![bytes.as_slice()]
-                    } else {
-                        vec![g.signed_object().bytes(), bytes.as_slice()]
-                    };
-                    let mut resolver = ResolveWith(
-                        |_: &PrincipalId| -> Option<lfcp::principal::PrincipalDescriptor> {
-                            panic!("the identity admission gate must precede issuer resolution")
-                        },
-                    );
-                    let failures = [
-                        validate_chain(&records, ChainStart::Genesis, &mut SignaturesOnly)
-                            .unwrap_err(),
-                        validate_chain(&records, ChainStart::Genesis, &mut resolver).unwrap_err(),
-                        validate_authorized(&records, None).unwrap_err(),
-                    ];
-                    for failure in failures {
-                        assert_eq!(failure.index, usize::from(!is_genesis));
-                        assert_eq!(failure.error, expected, "type {}, signer {signer}, placement bad {bad_placement}, signature bad {bad_signature}", body.control_type());
-                        assert_eq!(
-                            failure.error.wire_code(),
-                            Some(if is_genesis || body.control_type() == 6 {
-                                WireCode::MalformedMessage
-                            } else {
-                                WireCode::InvalidControlChain
-                            })
-                        );
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[test]
-fn identity_admission_gate_precedes_authorize_and_fork_detection() {
-    struct UnreachablePolicy;
-    impl ChainPolicy for UnreachablePolicy {
-        fn resolve_issuer(
-            &mut self,
-            _: &PrincipalId,
-        ) -> Option<lfcp::principal::PrincipalDescriptor> {
-            panic!("identity admission must not resolve the issuer");
-        }
-        fn authorize(&mut self, _: &[ControlRecord], _: &ControlRecord) -> Result<(), Error> {
-            panic!("identity admission must not consult authority");
-        }
-    }
-    let g = record_body(genesis(None), 1);
-    let certificates = chain(vec![cert(personal(2, &[13]), 1)]);
-    let identity_genesis = record_body(genesis(Some(certificates)), 1);
-    assert_eq!(
-        validate_chain(
-            &[identity_genesis.signed_object().bytes()],
-            ChainStart::Genesis,
-            &mut UnreachablePolicy
-        )
-        .unwrap_err()
-        .error,
-        Error::ControlRecordMalformed
-    );
-    // A competing Genesis must be refused, never reported as a valid fork.
-    let failure = validate_chain(
-        &[
-            g.signed_object().bytes(),
-            identity_genesis.signed_object().bytes(),
-        ],
-        ChainStart::Genesis,
-        &mut SignaturesOnly,
-    )
-    .unwrap_err();
-    assert_eq!(failure.index, 1);
-    assert_eq!(failure.error, Error::ControlRecordMalformed);
 }
 
 #[test]
