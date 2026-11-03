@@ -11,7 +11,7 @@ CI never compile it. It needs a nightly toolchain and `cargo-fuzz`.
 
 | Target | Input | Checks beyond "no panic" |
 | --- | --- | --- |
-| `device_certificate` | arbitrary certificate, certificate-chain or Control Record bytes | deterministic parse/verification, exact COSE bytes and chain round trips, unsigned/signed payload digest agreement, typed Control bodies round trip |
+| `device_certificate` | arbitrary certificate, certificate-chain or Control Record bytes | scanner/full-parser agreement on parsed values and wire errors, deterministic parse/verification, exact COSE bytes and chain round trips, unsigned/signed payload digest agreement, typed Control bodies round trip |
 | `plaintext` | arbitrary bytes as a Data Unit and a Snapshot plaintext | each verdict twice the same; `SectionsReplica::receive` refuses what `decode_change` refuses; a repeat has no second effect |
 | `objects_admission` | records (see `src/lib.rs`) into one `SharedObjects` | deterministic run; a refused or duplicate change leaves the replica unchanged; a held one changes only `held()`; a repeat is a Duplicate after an Applied, else the same verdict; a document of admitted changes within the §13.1 floor saves to a valid Snapshot |
 | `sections_receive` | records into one `SectionsReplica` | deterministic run; only an Applied change moves the heads; a repeat as above; no refused change is in the document |
@@ -38,7 +38,8 @@ CARGO_BUILD_JOBS=4 CARGO_TARGET_DIR="$PWD/target/identity-wire-codecs-fuzz" \
 
 When nightly/cargo-fuzz/libfuzzer-sys are unavailable, the same assertions
 can run against every single-bit mutation and truncation of valid certificate,
-chain and Control Record seeds. This is a deterministic smoke test, not
+chain and Control Record seeds for all three device kinds, including CBOR
+integer-head boundaries in masks. This is a deterministic smoke test, not
 coverage-guided fuzzing. First build `lfcp`, then compile and run the driver
 against that build's rlib (set `LFCP_RLIB` to the matching filename):
 
