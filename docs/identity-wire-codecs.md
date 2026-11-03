@@ -1,6 +1,6 @@
 # Identity wire codecs (LFCP-04-402)
 
-Implementation reference: the normative `spec-pr2` export of openlfcp/spec#2,
+Implementation reference: openlfcp/spec main at `d9f2873`,
 WIRE §§7.3, 15, 17.4–17.5, 23.3 and 62. The original 402 codec implementation
 used `identity-spec-draft.md` revision 3; LFCP-04-404 integrates it with the
 Resource-local authority engine ([authority API](identity-authority.md)).
@@ -89,6 +89,14 @@ and records the byte changes in `value-changes.json`; the old local pin still
 contains its type-9 bytes. Task 403 connects the new corpus and baseline. The
 §62 signature-first checks also classify a wrong transfer accept signer as
 `INVALID_SIGNATURE` before payload acceptor mismatch; see the authority notes.
+The offer signer is never a dependency: an unknown signer gives
+`AUTHORIZATION_FAILED` after the checkable signatures, as does a known signer
+unrelated to the owner even if its signature is broken (§23.3/§62). Offer
+signatures are checked only for the current owner and its bound devices;
+activity and owner/act remain authority checks. Device limits and
+the first-registration-only self-submission rule are authority predicates,
+not additional codec bounds. Pairing key bootstrap belongs to the profile
+client flow; see [authority integration](identity-authority.md).
 
 The `device_certificate` fuzz target exercises certificate, chain and Control
 Record parsing, exact-byte round trips, digest consistency and deterministic
