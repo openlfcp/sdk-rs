@@ -232,6 +232,7 @@ pub enum QuarantineReason {
 
 /// The authority rule a Control Record, Key Package or Data Unit breaks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AuthorityRule {
     /// An intermediate certificate is not a personal managing device.
     DeviceIssuerNotManaging,
@@ -253,6 +254,10 @@ pub enum AuthorityRule {
     DeviceGrantIssuer,
     /// The pairing session has no matching consumed approval (§17.4 rule 7).
     DeviceApprovalMismatch,
+    /// A Device Grant would exceed 32 live bindings for one root (§17.4 rule 8).
+    DeviceBindingLimit,
+    /// A ninth Device Grant for the same root/leaf pair (§17.4 rule 8).
+    DeviceGrantLimit,
     /// A device-only role is required for the revocation target (§17.5 rule 3).
     DeviceRevokeRole,
     /// A revocation names a root different from the device's binding.
@@ -263,6 +268,8 @@ pub enum AuthorityRule {
     DeviceRevokeIssuer,
     /// A revocation for this exact root/device pair already exists.
     DeviceAlreadyRevoked,
+    /// A revocation would exceed 64 currently unbound targets for one root (§17.5 rule 5).
+    DeviceRevocationLimit,
     /// Genesis/transfer requires a personal leaf with owner/act.
     DeviceCannotActAsOwner,
     /// A grant subject, claimant or transferee is already bound as a device.

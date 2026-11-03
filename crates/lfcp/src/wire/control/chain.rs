@@ -19,7 +19,7 @@
 
 use std::collections::HashMap;
 
-use crate::base::{ChainRule, ControlRecordId, Error, PrincipalId, ResourceId};
+use crate::base::{AuthorityRule, ChainRule, ControlRecordId, Error, PrincipalId, ResourceId};
 use crate::cose;
 use crate::principal::PrincipalDescriptor;
 use crate::wire::control::body::ControlBody;
@@ -73,6 +73,37 @@ pub trait ChainPolicy {
         root: &PrincipalId,
     ) -> Option<PrincipalDescriptor> {
         self.resolve_at(accepted, root)
+    }
+
+    /// §62 class 4: return the offer signer's descriptor only if it is the
+    /// current owner or a device bound to that owner at this prefix. Activity
+    /// and owner/act are checked later, in the authority class.
+    ///
+    /// The default derives ownership/bindings from the accepted records.
+    /// Policies resuming a chain must also consult their previous state.
+    fn resolve_offer_signer(
+        &mut self,
+        accepted: &[ControlRecord],
+        signer: &PrincipalId,
+    ) -> Option<PrincipalDescriptor> {
+        let owner = accepted
+            .iter()
+            .rev()
+            .find_map(|record| match record.body() {
+                ControlBody::Genesis(b) => Some(b.owner.clone()),
+                ControlBody::OwnerTransferCommit(b) => b.offer().ok().map(|(_, o)| o.new_owner),
+                _ => None,
+            })?;
+        if owner.id() == signer {
+            return Some(owner);
+        }
+        accepted
+            .iter()
+            .filter_map(|r| r.body().device_chain())
+            .filter(|chain| chain.root() == owner.id())
+            .flat_map(|chain| chain.certificates())
+            .find(|cert| cert.payload().device.id() == signer)
+            .map(|cert| cert.payload().device.clone())
     }
 
     /// Whether `record`'s issuer had the authority for it, given the
@@ -199,6 +230,7 @@ pub fn validate_chain(
     policy: &mut impl ChainPolicy,
 ) -> Result<ChainOutcome, ChainFailure> {
     let mut accepted: Vec<ControlRecord> = Vec::new();
+    let mut positions: HashMap<ControlRecordId, usize> = HashMap::new();
     // Descriptors found in accepted records, by Principal ID.
     let mut directory: HashMap<PrincipalId, PrincipalDescriptor> = HashMap::new();
     let start_head = match start {
@@ -214,10 +246,7 @@ pub fn validate_chain(
         let slot = match record.header().previous {
             None => Some(0),
             Some(previous) if start_head.is_some_and(|h| h.id == previous) => Some(0),
-            Some(previous) => accepted
-                .iter()
-                .position(|r| r.id() == previous)
-                .map(|k| k + 1),
+            Some(previous) => positions.get(&previous).map(|k| k + 1),
         };
         let slot = slot.filter(|&s| s < accepted.len());
         if let Some(slot) = slot {
@@ -253,6 +282,7 @@ pub fn validate_chain(
         let record = verify(record, &accepted, &directory, policy).map_err(fail)?;
         policy.authorize(&accepted, &record).map_err(fail)?;
         learn_descriptors(&record, &mut directory);
+        positions.insert(record.id(), accepted.len());
         accepted.push(record);
     }
 
@@ -373,19 +403,26 @@ fn verify(
                 .filter(|d| d.id() == &issuer)
                 .cloned()
         })
-        .or_else(|| policy.resolve_at(accepted, &issuer))
+        .or_else(|| {
+            if matches!(
+                body,
+                ControlBody::DeviceGrant(_) | ControlBody::DeviceRevoke(_)
+            ) {
+                // §17.4/17.5: known to S or the grant's chain, not external
+                // descriptors. N3 includes the rejection class, not just admission.
+                policy.resolve_root(accepted, &issuer)
+            } else {
+                policy.resolve_at(accepted, &issuer)
+            }
+        })
         .ok_or(Error::IssuerUnknown(issuer))?;
-    let offer_signer = if let Some((object, _)) = &offer {
-        Some(
-            directory
-                .get(object.kid())
-                .cloned()
-                .or_else(|| policy.resolve_at(accepted, object.kid()))
-                .ok_or(Error::IssuerUnknown(*object.kid()))?,
-        )
-    } else {
-        None
-    };
+    // §23.3/§62: an offer signer is never a dependency. Verify its signature
+    // only for the current owner or a device bound to it (even if inactive).
+    // Any other kid fails authority after the remaining signatures, whether
+    // or not an external resolver knows its descriptor.
+    let offer_signer = offer
+        .as_ref()
+        .and_then(|(object, _)| policy.resolve_offer_signer(accepted, object.kid()));
 
     // Class 4: outer record, certificates, then embedded offer and accept.
     let record = record.verify(&descriptor)?;
@@ -394,9 +431,18 @@ fn verify(
         chain.verify_signatures(root.as_ref().unwrap())?;
     }
     if let (Some((offer_object, offer)), Some((accept_object, _))) = (&offer, &accept) {
-        cose::verify(offer_object, offer_signer.as_ref().unwrap())?;
+        if let Some(signer) = &offer_signer {
+            cose::verify(offer_object, signer)?;
+        }
         let acceptor = chain.map_or(&offer.new_owner, |c| &c.leaf().payload().device);
         cose::verify(accept_object, acceptor)?;
+        if offer_signer.is_none() {
+            // Also fail closed for SignaturesOnly/ResolveWith: an unchecked
+            // outsider's offer must never be returned as a verified record.
+            return Err(Error::AuthorizationFailed(
+                AuthorityRule::TransferOfferNotByOwner,
+            ));
+        }
     }
     Ok(record)
 }

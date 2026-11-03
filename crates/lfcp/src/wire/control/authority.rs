@@ -40,7 +40,7 @@
 //! device acts for its root. The engine also derives exposure and the
 //! restricted Control-prefix read of a revoked reader (§17.5, §41).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use crate::base::{AuthorityRule, ControlRecordId, Error, Hash32, PrincipalId, ResourceId};
 use crate::principal::PrincipalDescriptor;
@@ -55,7 +55,9 @@ use crate::wire::frontier::Frontier;
 use crate::wire::key_package::KeyPackageHeader;
 
 mod identity;
+mod persistent;
 pub use identity::{DeviceBinding, DeviceRevocation, ReadAccess, Role};
+pub use persistent::{PersistentMap, StateKey};
 
 /// Standard ability codes (§17.1).
 pub mod ability {
@@ -82,7 +84,7 @@ pub mod ability {
     pub const RESOURCE_TOMBSTONE: u64 = 10;
     /// `invite/claim`
     pub const INVITE_CLAIM: u64 = 11;
-    /// Every standard ability, as the owner holds them.
+    /// Codes used by direct root grants; devices never hold 11, even with 13.
     pub const STANDARD: std::ops::RangeInclusive<u64> = 1..=11;
 
     /// Whether `code` confers anything: a standard ability other than the
@@ -135,21 +137,25 @@ pub struct ControlState {
     /// The current route version; Genesis is version 0 (§15).
     pub route_version: u64,
     /// DEK commitments by Data Epoch: Genesis for epoch 0, then Key Epochs.
-    pub dek_commitments: BTreeMap<u64, Hash32>,
+    pub dek_commitments: PersistentMap<u64, Hash32>,
     /// The current Data Epoch: 0 at Genesis, then each Key Epoch's.
     pub current_epoch: u64,
     /// The final frontier of each closed epoch, from the Key Epoch that
     /// closed it (§19, §19.1).
-    pub closed_frontiers: BTreeMap<u64, Frontier>,
+    pub closed_frontiers: PersistentMap<u64, Frontier>,
     /// Latest Device Revoke that removed a registered reader, directly or
     /// through a cascade (§17.5). Compare its sequence with a rotation's.
     pub last_exposing_revocation: Option<ChainHead>,
-    grants: BTreeMap<[u8; 32], Grant>,
-    principals: BTreeMap<[u8; 32], PrincipalDescriptor>,
-    roles: BTreeMap<[u8; 32], Role>,
-    devices: BTreeMap<[u8; 32], DeviceBinding>,
-    revoked: BTreeMap<([u8; 32], [u8; 32]), DeviceRevocation>,
-    revoked_read_heads: BTreeMap<[u8; 32], ChainHead>,
+    grants: PersistentMap<[u8; 32], Grant>,
+    principals: PersistentMap<[u8; 32], PrincipalDescriptor>,
+    roles: PersistentMap<[u8; 32], Role>,
+    devices: PersistentMap<[u8; 32], DeviceBinding>,
+    device_counts: PersistentMap<[u8; 32], identity::DeviceCounts>,
+    // Roots with pre-emptive tombstones for each device. Both levels share
+    // historical nodes; binding a target visits only its affected roots.
+    preemptive_revokers: PersistentMap<[u8; 32], PersistentMap<[u8; 32], ()>>,
+    revoked: PersistentMap<([u8; 32], [u8; 32]), DeviceRevocation>,
+    revoked_read_heads: PersistentMap<[u8; 32], ChainHead>,
 }
 
 impl ControlState {
@@ -176,15 +182,18 @@ impl ControlState {
     /// Whether the grant exists, is not revoked, and its parents are
     /// active.
     pub fn is_active(&self, id: &ControlRecordId) -> bool {
-        match self.grant(id) {
-            None => false,
-            Some(grant) if grant.revoked => false,
-            // §17.2: a child grant is active only while its parent is.
-            Some(Grant {
-                parent: Some(parent),
-                ..
-            }) => self.is_active(parent),
-            Some(_) => true,
+        let mut current = id;
+        loop {
+            match self.grant(current) {
+                None => return false,
+                Some(grant) if grant.revoked => return false,
+                // Only earlier grants can be parents; no cycle is possible.
+                Some(Grant {
+                    parent: Some(parent),
+                    ..
+                }) => current = parent,
+                Some(_) => return true,
+            }
         }
     }
 
@@ -239,16 +248,18 @@ impl ControlState {
             return false;
         }
         if self.bound(principal) {
+            // §80.1: every bound Principal excludes invite/claim, including
+            // owner-acting devices and roots that also hold invitation grants.
+            if code == ability::INVITE_CLAIM {
+                return false;
+            }
             let Some(device) = self.active_device(principal) else {
                 return false;
             };
-            if self.owner_action(principal) {
+            if self.is_owner(&device.root) && device.mask.contains(&super::device::OWNER_ACT) {
                 return true;
             }
-            // §7.3: mask code 11 is preserved but confers nothing.
-            code != ability::INVITE_CLAIM
-                && device.mask.contains(&code)
-                && self.direct(&device.root, code)
+            device.mask.contains(&code) && self.direct(&device.root, code)
         } else {
             self.direct(principal, code)
         }
@@ -263,6 +274,9 @@ impl ControlState {
     }
 
     fn learn(&mut self, descriptor: &PrincipalDescriptor) {
+        if self.principals.contains_key(descriptor.id().as_bytes()) {
+            return;
+        }
         self.principals
             .insert(*descriptor.id().as_bytes(), descriptor.clone());
     }
@@ -270,9 +284,10 @@ impl ControlState {
     /// Whether some ancestor of `grant` (or the grant itself) was issued
     /// by `issuer`.
     fn issued_in_line(&self, grant: &Grant, issuer: &PrincipalId) -> bool {
+        let issuer_root = self.acts_for(issuer);
         let mut current = Some(grant);
         while let Some(g) = current {
-            if g.issuer_root == self.acts_for(issuer) {
+            if g.issuer_root == issuer_root {
                 return true;
             }
             current = g.parent.as_ref().and_then(|p| self.grant(p));
@@ -318,15 +333,17 @@ fn apply_verified(
                 owner: genesis.owner.clone(),
                 // §15: Genesis implies route version 0.
                 route_version: 0,
-                dek_commitments: BTreeMap::from([(0, genesis.dek_commitment)]),
+                dek_commitments: PersistentMap::from([(0, genesis.dek_commitment)]),
                 current_epoch: 0,
-                closed_frontiers: BTreeMap::new(),
-                grants: BTreeMap::new(),
-                principals: BTreeMap::new(),
-                roles: BTreeMap::new(),
-                devices: BTreeMap::new(),
-                revoked: BTreeMap::new(),
-                revoked_read_heads: BTreeMap::new(),
+                closed_frontiers: PersistentMap::new(),
+                grants: PersistentMap::new(),
+                principals: PersistentMap::new(),
+                roles: PersistentMap::new(),
+                devices: PersistentMap::new(),
+                device_counts: PersistentMap::new(),
+                preemptive_revokers: PersistentMap::new(),
+                revoked: PersistentMap::new(),
+                revoked_read_heads: PersistentMap::new(),
                 last_exposing_revocation: None,
             };
             state.learn(&genesis.owner);
@@ -359,8 +376,8 @@ fn apply_verified(
             ))
         }
         ControlBody::CapabilityGrant(grant) => {
-            state.non_device(grant.subject.id())?;
             check_grant(&state, &issuer, is_owner, grant)?;
+            state.non_device(grant.subject.id())?;
             state.learn(&grant.subject);
             state.grants.insert(
                 *record.id().as_bytes(),
@@ -544,14 +561,8 @@ fn check_grant(
     if parent.subject != state.acts_for(issuer) {
         return Err(deny(AuthorityRule::NotParentSubject));
     }
-    if !grant.abilities.iter().all(|a| parent.delegable.contains(a)) {
-        return Err(deny(AuthorityRule::Escalation));
-    }
-    // §17.2: every delegable ability of the new grant is delegable by the
-    // parent.
-    if !grant.delegable.iter().all(|a| parent.delegable.contains(a)) {
-        return Err(deny(AuthorityRule::DelegableEscalation));
-    }
+    // §17.2/§80.1: the device's delegation ceiling precedes the parent's
+    // ability-list bounds; role exclusivity follows the grant checks.
     if !is_owner {
         if let Some(device) = state.device(issuer) {
             if grant
@@ -563,6 +574,12 @@ fn check_grant(
                 return Err(deny(AuthorityRule::DeviceDelegationMask));
             }
         }
+    }
+    if !grant.abilities.iter().all(|a| parent.delegable.contains(a)) {
+        return Err(deny(AuthorityRule::Escalation));
+    }
+    if !grant.delegable.iter().all(|a| parent.delegable.contains(a)) {
+        return Err(deny(AuthorityRule::DelegableEscalation));
     }
     Ok(())
 }
@@ -576,9 +593,6 @@ fn check_transfer(
 ) -> Result<PrincipalDescriptor, Error> {
     let (offer_object, offer) = commit.offer()?;
     let (_, accept) = commit.accept()?;
-    if state.bound(offer.new_owner.id()) {
-        return Err(deny(AuthorityRule::SubjectIsDevice));
-    }
     if offer.resource_id != state.resource_id || accept.resource_id != state.resource_id {
         return Err(deny(AuthorityRule::TransferResourceMismatch));
     }
@@ -612,6 +626,11 @@ fn check_transfer(
     // Rule 6: the expected next sequence is the commit's.
     if offer.next_sequence != record.header().sequence {
         return Err(deny(AuthorityRule::TransferSequenceMismatch));
+    }
+    // Without field 2, §23.3's original state checks precede role exclusivity.
+    // With field 2 the root role was already checked by verifyChain step 4.
+    if state.bound(new_owner.id()) {
+        return Err(deny(AuthorityRule::SubjectIsDevice));
     }
     Ok(new_owner)
 }
@@ -685,6 +704,26 @@ impl ChainPolicy for CapabilityEngine {
             n => self.history.get(n - 1),
         };
         previous.and_then(|state| state.principal(root)).cloned()
+    }
+
+    fn resolve_offer_signer(
+        &mut self,
+        accepted: &[ControlRecord],
+        signer: &PrincipalId,
+    ) -> Option<PrincipalDescriptor> {
+        let previous = match accepted.len() {
+            0 => self.base.as_ref(),
+            n => self.history.get(n - 1),
+        }?;
+        if previous.is_owner(signer)
+            || previous
+                .device(signer)
+                .is_some_and(|d| &d.root == previous.owner.id())
+        {
+            previous.principal(signer).cloned()
+        } else {
+            None
+        }
     }
 
     fn authorize(
