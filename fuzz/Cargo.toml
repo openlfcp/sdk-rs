@@ -29,6 +29,13 @@ debug = 1
 path = "src/lib.rs"
 
 [[bin]]
+name = "device_certificate"
+path = "fuzz_targets/device_certificate.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "plaintext"
 path = "fuzz_targets/plaintext.rs"
 test = false
