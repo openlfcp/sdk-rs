@@ -1,7 +1,9 @@
 # Identity wire codecs (LFCP-04-402)
 
-Implementation reference: `identity-spec-draft.md`, revision 3 (2026-11-03),
-MVP 0.4 inputs, §§2.1–2.6, 2.10, 3.2 and 3.10; implementation map R1.
+Implementation reference: the normative `spec-pr2` export of openlfcp/spec#2,
+WIRE §§7.3, 15, 17.4–17.5, 23.3 and 62. The original 402 codec implementation
+used `identity-spec-draft.md` revision 3; LFCP-04-404 integrates it with the
+Resource-local authority engine ([authority API](identity-authority.md)).
 The repository's published spec pin remains unchanged until task 401 publishes
 the normative baseline and vectors.
 
@@ -35,44 +37,34 @@ metadata, issuer IDs and `in_scope`; it does not apply a transition. Separate
 signature, intrinsic-authority and state methods let 404 interleave outer
 record and transfer-object checks in the §3.10 classes.
 
-Until 404 implements identity transitions, `validate_chain` has one admission
-gate immediately after full structural parsing, before placement, replay/fork
-handling, issuer resolution or any policy hook. Correctly shaped types 9/10
-return `ControlUnknownCoreType` (`INVALID_CONTROL_CHAIN`, §2.7 and §3.10
-class 2); Genesis field 5 and commit field 2 return `ControlRecordMalformed`
-(`MALFORMED_MESSAGE`, unsupported closed-map fields in §3.10 class 1). These
-results do not depend on the signer, signature validity or policy, including
-`SignaturesOnly` and `ResolveWith`. Malformed embedded objects still fail
-first during parsing. 404 must remove the gate when it implements the effects.
-The existing `UnsupportedInMvp` guards remain defense for callers invoking
-the authority engine's `apply` directly, outside Control Chain validation.
-No `holds`, role storage, standing, registration or revocation transitions
-are added here. Genesis/commit leaf kind, `owner/act`, required signers and
-record-issuer resolution also remain part of that integration. Legacy Rust
-struct literals need `device_chain: None`; their wire bytes stay unchanged.
+LFCP-04-404 removes the temporary admission gate: types 9/10 and the optional
+Genesis/commit chains now have real transitions in `CapabilityEngine`.
+`validate_chain` resolves all dependencies and checks outer and embedded
+signatures before calling the authority policy. `SignaturesOnly` and `ResolveWith`
+check all these signatures but deliberately do not establish authority; callers
+accepting a Control Chain use `validate_authorized` or `CapabilityEngine`.
 
 Both embedded transfer objects are now structurally parsed with the body,
 including commits without field 2, so malformed nested objects cannot be
 hidden by an outer signature failure.
 
-Integration notes for 404/R3 (review P3-1/P3-2): `verify_signatures` currently
-combines requiring the root descriptor with signature verification. Resolve
-**all** dependencies, including both the outer issuer and chain root, before
-calling `record.verify` or `chain.verify_signatures(Some(root))`; otherwise a
-bad outer signature could hide a missing root. A follow-up should split the
-dependency and signature methods and give a mismatched supplied descriptor
-an explicit caller-error diagnostic. Structural failures currently share
-`DeviceCertificateMalformed`, and the borrowed scanner can report a generic
-`ControlRecordMalformed`; both map to `MALFORMED_MESSAGE`. A coordinated
-`DeviceRule` diagnostic API for 404/R3 is deferred rather than changing error
-variants in this admission fix. Scanner/full-parser fuzz assertions compare
-acceptance, parsed values and wire codes, not these local diagnostic variants.
+Integration notes for 404/R3 (review P3-1/P3-2): root dependency resolution is
+now `CertificateChain::require_root(Option<&PrincipalDescriptor>)`; signature
+verification is `verify_signatures(&PrincipalDescriptor)`. Resolve **all**
+dependencies before any signature. A mismatched supplied root descriptor reports
+the local `DeviceRootDescriptorMismatch` caller error, with no wire code.
+Structural failures still share `DeviceCertificateMalformed`, and the borrowed
+scanner can report a generic `ControlRecordMalformed`; both map to
+`MALFORMED_MESSAGE`. Fine-grained structural `DeviceRule` diagnostics remain for
+R3 to coordinate with its corpus; scanner/full-parser assertions compare
+acceptance, parsed values and wire codes. State transitions have separate
+`AuthorityRule` diagnostics.
 
 Task 401 follow-up: review R20's negative vectors need fresh outer records and
 transfer offers at the stated head to reach their intended authority failure.
 Review N07 requires preflight of an unsigned prospective leaf and its issuer
 chain before consuming a pairing session: reject managing depth 4 and an empty
-service scope. The codec must not relax these rules while wording is pending.
+service scope. The normative profile §5.3 step 4 now explicitly requires this preflight.
 R13, R16, R17, N01, N06 and N08 concern profile, flow, state or server behavior
 outside this codec task.
 
@@ -92,10 +84,11 @@ Two legacy error classifications need a normative update:
    yield `MALFORMED_MESSAGE`. No baseline.12 vector covered that combination;
    local tests now cover both nested objects and both competing error classes.
 
-Task 401 must add/update those vectors and reconcile both changes with the
-draft's promise of an empty `value-changes.json`. A baseline.12 sdk-ts still
-returns the old codes; do not label this interim implementation conformant
-to baseline.12 until the updated normative baseline is published.
+The normative migration now moves `unknown_core_type_C1` to reserved type 31
+and records the byte changes in `value-changes.json`; the old local pin still
+contains its type-9 bytes. Task 403 connects the new corpus and baseline. The
+§62 signature-first checks also classify a wrong transfer accept signer as
+`INVALID_SIGNATURE` before payload acceptor mismatch; see the authority notes.
 
 The `device_certificate` fuzz target exercises certificate, chain and Control
 Record parsing, exact-byte round trips, digest consistency and deterministic
