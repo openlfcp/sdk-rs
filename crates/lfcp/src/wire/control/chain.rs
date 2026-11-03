@@ -167,6 +167,11 @@ pub fn check_expected_head(
 /// competes with an accepted one ends validation with
 /// [`ChainOutcome::Conflict`]. Any invalid record ends it with a
 /// [`ChainFailure`].
+///
+/// Until LFCP-04-404 implements identity transitions, every policy rejects
+/// types 9/10 with `INVALID_CONTROL_CHAIN` and Genesis/commit device-chain
+/// fields with `MALFORMED_MESSAGE` (identity draft §§2.7, 3.10). Codecs remain
+/// available independently of Control Chain admission.
 pub fn validate_chain(
     records: &[&[u8]],
     start: ChainStart,
@@ -183,6 +188,28 @@ pub fn validate_chain(
     for (index, bytes) in records.iter().enumerate() {
         let fail = |error| ChainFailure { index, error };
         let record = ReceivedControlRecord::parse(bytes).map_err(fail)?;
+
+        // Temporary admission gate, removed by LFCP-04-404. Codec support
+        // alone does not implement identity. Match an unaware receiver's
+        // rejection: unknown core types are class 2; unsupported closed-map
+        // fields are class 1. Full parsing above still reports malformed
+        // embedded objects before this gate. Run before placement, repeats,
+        // forks, issuer resolution or policy hooks so no policy can bypass
+        // it and no signer can change its result.
+        match record.body() {
+            ControlBody::DeviceGrant(_) | ControlBody::DeviceRevoke(_) => {
+                return Err(fail(Error::ControlUnknownCoreType(
+                    record.body().control_type(),
+                )));
+            }
+            ControlBody::Genesis(body) if body.device_chain.is_some() => {
+                return Err(fail(Error::ControlRecordMalformed));
+            }
+            ControlBody::OwnerTransferCommit(body) if body.device_chain.is_some() => {
+                return Err(fail(Error::ControlRecordMalformed));
+            }
+            _ => {}
+        }
 
         // The slot this record claims: the position after its predecessor.
         let slot = match record.header().previous {

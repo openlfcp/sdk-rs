@@ -303,6 +303,9 @@ impl CertificateChain {
     /// Class 3 of verifyChain: the root descriptor must be available.
     /// Class 4: verify all certificate kids/signatures, leaf first.
     /// No authority checks run here, allowing outer-object class ordering.
+    /// Control validators must resolve both the outer issuer and chain root
+    /// before verifying any signature; calling this after `record.verify`
+    /// with an unresolved root would violate §3.10's global class order.
     pub fn verify_signatures(&self, root: Option<&PrincipalDescriptor>) -> Result<(), Error> {
         let root = root.ok_or(Error::IssuerUnknown(*self.root()))?;
         if root.id() != self.root() {

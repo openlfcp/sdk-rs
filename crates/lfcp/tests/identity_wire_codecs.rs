@@ -9,6 +9,9 @@ use lfcp::cose;
 use lfcp::crypto;
 use lfcp::principal::{principal_id, PrincipalKeys};
 use lfcp::wire::control::body::*;
+use lfcp::wire::control::chain::{
+    validate_chain, ChainPolicy, ChainStart, ResolveWith, SignaturesOnly,
+};
 use lfcp::wire::control::device::*;
 use lfcp::wire::control::{ControlRecord, ControlRecordHeader, ReceivedControlRecord};
 
@@ -639,6 +642,33 @@ fn unsigned_preflight_rejects_n07_before_consume_or_leaf_signature() {
 }
 
 #[test]
+fn unsigned_preflight_checks_issuer_kind_manage_and_root() {
+    let leaf = personal(5, &[1]);
+    for issuer in [
+        personal(2, &[1, 2]),
+        payload(2, DeviceKind::Service, &[1, 2], &[resource()]),
+        payload(2, DeviceKind::Pairing, &[1, 2], &[resource()]),
+    ] {
+        // Signatures, mask subset and scope are valid; c3 alone decides.
+        let issuers = [cert(issuer, 1)];
+        let error = preflight_issuance(&leaf, &issuers, Some(keys(1).descriptor()), &resource())
+            .unwrap_err();
+        assert_eq!(
+            error,
+            Error::AuthorizationFailed(AuthorityRule::DeviceIssuerNotManaging)
+        );
+        assert_eq!(error.wire_code(), Some(WireCode::AuthorizationFailed));
+    }
+    let mut foreign = personal(2, &[1, 2, 12]);
+    foreign.root = *keys(8).descriptor().id();
+    let issuers = [cert(foreign, 8)];
+    // c1 wins even before the missing root descriptor is considered.
+    let error = preflight_issuance(&leaf, &issuers, None, &resource()).unwrap_err();
+    assert_eq!(error, Error::DeviceCertificateMalformed);
+    assert_eq!(error.wire_code(), Some(WireCode::MalformedMessage));
+}
+
+#[test]
 fn device_grant_round_trip_approval_rules_and_closed_map() {
     for pairing_device in [None, Some(*keys(9).descriptor().id())] {
         let body = ControlBody::DeviceGrant(DeviceGrantBody {
@@ -821,6 +851,31 @@ fn genesis_and_commit_optional_chains_preserve_bytes_and_legacy_shape() {
 }
 
 #[test]
+fn embedded_chain_root_must_match_genesis_owner_or_transfer_new_owner() {
+    let mut foreign = personal(2, &[13]);
+    foreign.root = *keys(8).descriptor().id();
+    let foreign_chain =
+        CertificateChain::new(vec![cert(foreign, 8)], keys(8).descriptor().id()).unwrap();
+    for body in [
+        genesis(Some(foreign_chain.clone())),
+        commit(Some(foreign_chain)),
+    ] {
+        // Both the chain and the enclosing root descriptor are individually
+        // valid; only c1's equality to owner/offer.new_owner is violated.
+        assert_eq!(body.check_writable(), Err(Error::ControlRecordMalformed));
+        let value = body.to_value();
+        assert_eq!(
+            ControlBody::from_value(body.control_type(), &value),
+            Err(Error::DeviceCertificateMalformed)
+        );
+        let error =
+            ReceivedControlRecord::parse(&raw_record(body.control_type(), value)).unwrap_err();
+        assert_eq!(error, Error::DeviceCertificateMalformed);
+        assert_eq!(error.wire_code(), Some(WireCode::MalformedMessage));
+    }
+}
+
+#[test]
 fn embedded_transfer_structure_precedes_outer_signature_with_or_without_chain() {
     for chain in [None, Some(chain(vec![cert(personal(2, &[13]), 1)]))] {
         let good = commit(chain);
@@ -846,27 +901,169 @@ fn embedded_transfer_structure_precedes_outer_signature_with_or_without_chain() 
 }
 
 #[test]
-fn codec_support_does_not_silently_enable_identity_transitions() {
+fn identity_records_are_refused_independently_of_signer_and_policy() {
     use lfcp::wire::control::authority::validate_authorized;
     let g = record_body(genesis(None), 1);
-    let grant = record_body(grant(chain(vec![cert(personal(2, &[1]), 1)])), 1);
-    let mut h = grant.header().clone();
-    h.previous = Some(g.id());
-    let grant = ControlRecord::sign(h, grant.body().clone(), &keys(1)).unwrap();
-    let failure = validate_authorized(
-        &[g.signed_object().bytes(), grant.signed_object().bytes()],
-        None,
+    let certificates = chain(vec![cert(personal(2, &[13]), 1)]);
+    let bodies = [
+        (
+            grant(certificates.clone()),
+            Error::ControlUnknownCoreType(9),
+        ),
+        (
+            ControlBody::DeviceRevoke(DeviceRevokeBody {
+                root: root(),
+                device: *keys(2).descriptor().id(),
+                reason: 0,
+                approval: None,
+            }),
+            Error::ControlUnknownCoreType(10),
+        ),
+        (
+            genesis(Some(certificates.clone())),
+            Error::ControlRecordMalformed,
+        ),
+        (commit(Some(certificates)), Error::ControlRecordMalformed),
+    ];
+    for (body, expected) in bodies {
+        let is_genesis = matches!(body, ControlBody::Genesis(_));
+        for signer in [1, 2, 9] {
+            // known root, embedded leaf, unknown Principal
+            for bad_placement in [false, true] {
+                let mut h = header(signer, is_genesis);
+                if !is_genesis {
+                    h.previous = Some(g.id());
+                }
+                if bad_placement {
+                    h.sequence = 42;
+                    h.previous = Some(ControlRecordId::from_bytes([99; 32]));
+                }
+                let record = ControlRecord::sign(h, body.clone(), &keys(signer)).unwrap();
+                for bad_signature in [false, true] {
+                    let bytes = if bad_signature {
+                        let object = cbor::decode_strict(record.signed_object().bytes()).unwrap();
+                        cbor::encode(&replace(&object, 3, Value::bytes(vec![0; 64]))).unwrap()
+                    } else {
+                        record.signed_object().bytes().to_vec()
+                    };
+                    // The codec stays usable even while admission is disabled.
+                    ReceivedControlRecord::parse(&bytes).unwrap();
+                    let records = if is_genesis {
+                        vec![bytes.as_slice()]
+                    } else {
+                        vec![g.signed_object().bytes(), bytes.as_slice()]
+                    };
+                    let mut resolver = ResolveWith(
+                        |_: &PrincipalId| -> Option<lfcp::principal::PrincipalDescriptor> {
+                            panic!("the identity admission gate must precede issuer resolution")
+                        },
+                    );
+                    let failures = [
+                        validate_chain(&records, ChainStart::Genesis, &mut SignaturesOnly)
+                            .unwrap_err(),
+                        validate_chain(&records, ChainStart::Genesis, &mut resolver).unwrap_err(),
+                        validate_authorized(&records, None).unwrap_err(),
+                    ];
+                    for failure in failures {
+                        assert_eq!(failure.index, usize::from(!is_genesis));
+                        assert_eq!(failure.error, expected, "type {}, signer {signer}, placement bad {bad_placement}, signature bad {bad_signature}", body.control_type());
+                        assert_eq!(
+                            failure.error.wire_code(),
+                            Some(if is_genesis || body.control_type() == 6 {
+                                WireCode::MalformedMessage
+                            } else {
+                                WireCode::InvalidControlChain
+                            })
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn identity_admission_gate_precedes_authorize_and_fork_detection() {
+    struct UnreachablePolicy;
+    impl ChainPolicy for UnreachablePolicy {
+        fn resolve_issuer(
+            &mut self,
+            _: &PrincipalId,
+        ) -> Option<lfcp::principal::PrincipalDescriptor> {
+            panic!("identity admission must not resolve the issuer");
+        }
+        fn authorize(&mut self, _: &[ControlRecord], _: &ControlRecord) -> Result<(), Error> {
+            panic!("identity admission must not consult authority");
+        }
+    }
+    let g = record_body(genesis(None), 1);
+    let certificates = chain(vec![cert(personal(2, &[13]), 1)]);
+    let identity_genesis = record_body(genesis(Some(certificates)), 1);
+    assert_eq!(
+        validate_chain(
+            &[identity_genesis.signed_object().bytes()],
+            ChainStart::Genesis,
+            &mut UnreachablePolicy
+        )
+        .unwrap_err()
+        .error,
+        Error::ControlRecordMalformed
+    );
+    // A competing Genesis must be refused, never reported as a valid fork.
+    let failure = validate_chain(
+        &[
+            g.signed_object().bytes(),
+            identity_genesis.signed_object().bytes(),
+        ],
+        ChainStart::Genesis,
+        &mut SignaturesOnly,
     )
     .unwrap_err();
-    assert_eq!(failure.error, Error::UnsupportedInMvp(9));
-    // An owner-signed Genesis must not silently ignore a supplied device chain.
-    let g = record_body(genesis(Some(chain(vec![cert(personal(2, &[13]), 1)]))), 1);
-    assert_eq!(
-        validate_authorized(&[g.signed_object().bytes()], None)
-            .unwrap_err()
-            .error,
-        Error::UnsupportedInMvp(0)
-    );
+    assert_eq!(failure.index, 1);
+    assert_eq!(failure.error, Error::ControlRecordMalformed);
+}
+
+#[test]
+fn malformed_legacy_transfer_precedes_placement_and_dependency_errors() {
+    let g = record_body(genesis(None), 1);
+    for embedded in [0, 1] {
+        // offer and accept, including transfers without field 2
+        let malformed = field(
+            &commit(None).to_value(),
+            embedded,
+            Some(Value::bytes(signed(&Value::Null, 1))),
+        );
+        for (signer, bad_placement) in [(1, true), (9, false), (9, true)] {
+            let mut payload = cbor::decode_strict(
+                cose::parse(&raw_record(6, malformed.clone()))
+                    .unwrap()
+                    .payload_bytes(),
+            )
+            .unwrap();
+            payload = field(
+                &payload,
+                4,
+                Some(Value::bytes(
+                    keys(signer).descriptor().id().as_bytes().to_vec(),
+                )),
+            );
+            if !bad_placement {
+                payload = field(&payload, 2, Some(Value::bytes(g.id().as_bytes().to_vec())));
+            } else {
+                payload = field(&payload, 1, Some(Value::Unsigned(42)));
+            }
+            let bytes = signed(&payload, signer);
+            let failure = validate_chain(
+                &[g.signed_object().bytes(), &bytes],
+                ChainStart::Genesis,
+                &mut SignaturesOnly,
+            )
+            .unwrap_err();
+            assert_eq!(failure.index, 1);
+            assert_eq!(failure.error, Error::ControlRecordMalformed);
+            assert_eq!(failure.error.wire_code(), Some(WireCode::MalformedMessage));
+        }
+    }
 }
 
 #[test]
