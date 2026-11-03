@@ -11,6 +11,7 @@ CI never compile it. It needs a nightly toolchain and `cargo-fuzz`.
 
 | Target | Input | Checks beyond "no panic" |
 | --- | --- | --- |
+| `device_certificate` | arbitrary certificate, certificate-chain or Control Record bytes | deterministic parse/verification, exact COSE bytes and chain round trips, unsigned/signed payload digest agreement, typed Control bodies round trip |
 | `plaintext` | arbitrary bytes as a Data Unit and a Snapshot plaintext | each verdict twice the same; `SectionsReplica::receive` refuses what `decode_change` refuses; a repeat has no second effect |
 | `objects_admission` | records (see `src/lib.rs`) into one `SharedObjects` | deterministic run; a refused or duplicate change leaves the replica unchanged; a held one changes only `held()`; a repeat is a Duplicate after an Applied, else the same verdict; a document of admitted changes within the §13.1 floor saves to a valid Snapshot |
 | `sections_receive` | records into one `SectionsReplica` | deterministic run; only an Applied change moves the heads; a repeat as above; no refused change is in the document |
@@ -26,6 +27,28 @@ harness write the chunk header (so a mutated body keeps a valid checksum);
 bit 3 makes it frame the chunk as `[1, bstr]`.
 
 ## Running
+
+Device codecs (identity draft §§2.1–2.6, 3.2, 3.10):
+
+```sh
+CARGO_BUILD_JOBS=4 CARGO_TARGET_DIR="$PWD/target/identity-wire-codecs-fuzz" \
+  cargo +nightly fuzz run device_certificate -- \
+  -max_total_time=10 -rss_limit_mb=1024 -max_len=16384
+```
+
+When nightly/cargo-fuzz/libfuzzer-sys are unavailable, the same assertions
+can run against every single-bit mutation and truncation of valid certificate,
+chain and Control Record seeds. This is a deterministic smoke test, not
+coverage-guided fuzzing. First build `lfcp`, then compile and run the driver
+against that build's rlib (set `LFCP_RLIB` to the matching filename):
+
+```sh
+CARGO_BUILD_JOBS=4 CARGO_TARGET_DIR="$PWD/target/identity-wire-codecs" cargo build -p lfcp
+rustc --edition=2021 -C opt-level=1 \
+  --extern "lfcp=$LFCP_RLIB" -L dependency=target/identity-wire-codecs/debug/deps \
+  fuzz/device_certificate_smoke.rs -o target/identity-wire-codecs/device-certificate-smoke
+target/identity-wire-codecs/device-certificate-smoke
+```
 
 ```sh
 # Seeds from the spec corpora at the spec.lock pin ($LFCP_SPEC_DIR or ../spec).
