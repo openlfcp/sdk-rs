@@ -11,6 +11,7 @@ CI never compile it. It needs a nightly toolchain and `cargo-fuzz`.
 
 | Target | Input | Checks beyond "no panic" |
 | --- | --- | --- |
+| `identity_authority` | bounded signed identity programs or raw candidate bytes | full replay equals resume, deterministic errors, immutable historical heads, permanent bindings/revocations, ability 11 exclusion, grant counts, exposure and exact-byte replays |
 | `device_certificate` | arbitrary certificate, certificate-chain or Control Record bytes | scanner/full-parser agreement on parsed values and wire errors, deterministic parse/verification, exact COSE bytes and chain round trips, unsigned/signed payload digest agreement, typed Control bodies round trip |
 | `plaintext` | arbitrary bytes as a Data Unit and a Snapshot plaintext | each verdict twice the same; `SectionsReplica::receive` refuses what `decode_change` refuses; a repeat has no second effect |
 | `objects_admission` | records (see `src/lib.rs`) into one `SharedObjects` | deterministic run; a refused or duplicate change leaves the replica unchanged; a held one changes only `held()`; a repeat is a Duplicate after an Applied, else the same verdict; a document of admitted changes within the §13.1 floor saves to a valid Snapshot |
@@ -27,6 +28,27 @@ harness write the chunk header (so a mutated body keeps a valid checksum);
 bit 3 makes it frame the chunk as `[1, bstr]`.
 
 ## Running
+
+Identity authority (WIRE §17.4–17.5, §23.3, §80.1):
+
+```sh
+CARGO_BUILD_JOBS=3 CARGO_TARGET_DIR="$PWD/target/lfcp-04-404" \
+  cargo +nightly fuzz run identity_authority -- \
+  -max_total_time=10 -rss_limit_mb=1024 -max_len=193
+```
+
+The dependency-free driver runs the same assertions on signed program mutations,
+raw record mutations and deterministic random programs. It is an offline smoke
+test, not coverage-guided fuzzing. Build the default library first and set
+`LFCP_RLIB` to that build's `liblfcp-*.rlib`:
+
+```sh
+CARGO_BUILD_JOBS=3 CARGO_TARGET_DIR="$PWD/target/lfcp-04-404" cargo build --offline -p lfcp
+rustc --edition=2021 -C opt-level=1 --extern "lfcp=$LFCP_RLIB" \
+  -L dependency=target/lfcp-04-404/debug/deps \
+  fuzz/identity_authority_smoke.rs -o target/lfcp-04-404/identity-authority-smoke
+target/lfcp-04-404/identity-authority-smoke
+```
 
 Device codecs (identity draft §§2.1–2.6, 3.2, 3.10):
 
