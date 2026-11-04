@@ -47,6 +47,12 @@ pub enum ChainStart {
 
 /// What [`validate_chain`] needs from the caller beyond the records.
 pub trait ChainPolicy {
+    /// Current epoch at this prefix, for the class-2 KEY_EPOCH check.
+    /// A policy resuming without Genesis must supply the starting epoch.
+    fn previous_epoch(&mut self, accepted: &[ControlRecord]) -> Option<u64> {
+        prefix_epoch(accepted)
+    }
+
     /// The descriptor of an issuer that no earlier record in the chain
     /// describes. Descriptors are self-certifying (their ID is the hash of
     /// their keys), so any source will do.
@@ -127,6 +133,91 @@ impl ChainPolicy for SignaturesOnly {}
 /// A policy that resolves external issuers with a closure and checks no
 /// authority.
 pub struct ResolveWith<F>(pub F);
+
+impl<F> ResolveWith<F> {
+    /// Resume signature validation with ownership, bindings and epoch from
+    /// an already validated state. Authority checks remain disabled.
+    pub fn after(self, state: super::authority::ControlState) -> ResumePolicy<Self> {
+        ResumePolicy {
+            policy: self,
+            state,
+        }
+    }
+}
+
+/// A signature policy with the state preceding a resumed suffix.
+pub struct ResumePolicy<P> {
+    policy: P,
+    state: super::authority::ControlState,
+}
+
+impl<P: ChainPolicy> ChainPolicy for ResumePolicy<P> {
+    fn previous_epoch(&mut self, accepted: &[ControlRecord]) -> Option<u64> {
+        prefix_epoch(accepted).or(Some(self.state.current_epoch))
+    }
+
+    fn resolve_issuer(&mut self, issuer: &PrincipalId) -> Option<PrincipalDescriptor> {
+        self.state
+            .principal(issuer)
+            .cloned()
+            .or_else(|| self.policy.resolve_issuer(issuer))
+    }
+
+    fn resolve_offer_signer(
+        &mut self,
+        accepted: &[ControlRecord],
+        signer: &PrincipalId,
+    ) -> Option<PrincipalDescriptor> {
+        let owner = accepted
+            .iter()
+            .rev()
+            .find_map(|r| match r.body() {
+                ControlBody::OwnerTransferCommit(b) => b.offer().ok().map(|(_, o)| o.new_owner),
+                ControlBody::Genesis(b) => Some(b.owner.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| self.state.owner.clone());
+        if owner.id() == signer {
+            return Some(owner);
+        }
+        accepted
+            .iter()
+            .filter_map(|r| r.body().device_chain())
+            .filter(|c| c.root() == owner.id())
+            .flat_map(|c| c.certificates())
+            .find(|c| c.payload().device.id() == signer)
+            .map(|c| c.payload().device.clone())
+            .or_else(|| {
+                self.state
+                    .device(signer)
+                    .filter(|d| &d.root == owner.id())
+                    .and_then(|_| self.state.principal(signer).cloned())
+            })
+    }
+}
+
+fn prefix_epoch(accepted: &[ControlRecord]) -> Option<u64> {
+    accepted.iter().rev().find_map(|r| match r.body() {
+        ControlBody::Genesis(_) => Some(0),
+        ControlBody::KeyEpoch(b) => Some(b.epoch),
+        _ => None,
+    })
+}
+
+fn check_epoch(
+    record: &ReceivedControlRecord,
+    accepted: &[ControlRecord],
+    policy: &mut impl ChainPolicy,
+) -> Result<(), Error> {
+    if let ControlBody::KeyEpoch(b) = record.body() {
+        if let Some(epoch) = policy.previous_epoch(accepted) {
+            if epoch.checked_add(1) != Some(b.epoch) {
+                return Err(Error::InvalidControlChain(ChainRule::EpochNotNext));
+            }
+        }
+    }
+    Ok(())
+}
 
 impl<F: FnMut(&PrincipalId) -> Option<PrincipalDescriptor>> ChainPolicy for ResolveWith<F> {
     fn resolve_issuer(&mut self, issuer: &PrincipalId) -> Option<PrincipalDescriptor> {
@@ -259,6 +350,7 @@ pub fn validate_chain(
                 .map(|k| head_of(&accepted[k]))
                 .or(start_head);
             check_placement(&record, predecessor).map_err(fail)?;
+            check_epoch(&record, &accepted[..slot], policy).map_err(fail)?;
             // A later descriptor is not a dependency at the fork's previous
             // head. Rebuild only the common prefix, never the losing suffix.
             let mut prefix_directory = HashMap::new();
@@ -279,6 +371,7 @@ pub fn validate_chain(
 
         let predecessor = accepted.last().map(head_of).or(start_head);
         check_placement(&record, predecessor).map_err(fail)?;
+        check_epoch(&record, &accepted, policy).map_err(fail)?;
         let record = verify(record, &accepted, &directory, policy).map_err(fail)?;
         policy.authorize(&accepted, &record).map_err(fail)?;
         learn_descriptors(&record, &mut directory);

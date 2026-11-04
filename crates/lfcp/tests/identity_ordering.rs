@@ -617,3 +617,112 @@ fn suspended_offer_signer_is_authorization_failure() {
         Rule::TransferOfferNotByOwner,
     );
 }
+
+#[test]
+fn epoch_number_precedes_unknown_issuer_bad_signature_and_authority() {
+    let f = Fixture::new();
+    for signer in [1, 9] {
+        let candidate = record(
+            f.state(),
+            signer,
+            ControlBody::KeyEpoch(KeyEpochBody {
+                epoch: 2,
+                reason: 0,
+                dek_commitment: Hash32::from_bytes([2; 32]),
+                final_frontier: lfcp::wire::frontier::Frontier::new(vec![]).unwrap(),
+            }),
+        );
+        for bytes in [
+            candidate.signed_object().bytes().to_vec(),
+            bad_signature(candidate.signed_object().bytes()),
+        ] {
+            assert_eq!(
+                transition(f.state(), &bytes),
+                Err(Error::InvalidControlChain(ChainRule::EpochNotNext))
+            );
+            assert_eq!(
+                validate_chain(
+                    &[f.records[0].as_slice(), &bytes],
+                    ChainStart::Genesis,
+                    &mut SignaturesOnly
+                )
+                .unwrap_err()
+                .error,
+                Error::InvalidControlChain(ChainRule::EpochNotNext)
+            );
+        }
+    }
+}
+
+#[test]
+fn resumed_resolver_checks_offer_signer_at_extended_and_fork_prefixes() {
+    use lfcp::wire::control::chain::ResolveWith;
+    let mut f = Fixture::new();
+    f.register(1, 2, FULL);
+    let base = f.state().clone();
+    let first = record(&base, 10, transfer(&base, 10, 2, 10, None));
+    let after = transition(&base, first.signed_object().bytes()).unwrap();
+    let second = record(&after, 11, transfer(&after, 11, 10, 11, None));
+    let competing = record(&base, 11, transfer(&base, 11, 2, 11, None));
+    let resolver = || ResolveWith(|_: &lfcp::base::PrincipalId| None).after(base.clone());
+    let bytes = [
+        first.signed_object().bytes(),
+        second.signed_object().bytes(),
+    ];
+    assert!(matches!(
+        validate_chain(&bytes, ChainStart::After(base.head), &mut resolver()).unwrap(),
+        ChainOutcome::Linear(_)
+    ));
+    let bytes = [
+        first.signed_object().bytes(),
+        second.signed_object().bytes(),
+        competing.signed_object().bytes(),
+    ];
+    assert!(matches!(
+        validate_chain(&bytes, ChainStart::After(base.head), &mut resolver()).unwrap(),
+        ChainOutcome::Conflict(_)
+    ));
+    let unknown = record(&base, 10, transfer(&base, 10, 9, 10, None));
+    assert_eq!(
+        validate_chain(
+            &[unknown.signed_object().bytes()],
+            ChainStart::After(base.head),
+            &mut resolver()
+        )
+        .unwrap_err()
+        .error,
+        Error::AuthorizationFailed(Rule::TransferOfferNotByOwner)
+    );
+}
+
+#[test]
+fn revocation_index_ignores_superseded_paths_and_preserves_old_heads() {
+    let mut f = Fixture::new();
+    f.push(
+        1,
+        device_grant(
+            chain(vec![personal(1, 3, &[1], 2, 3), personal(1, 2, FULL, 1, 2)]),
+            None,
+        ),
+    );
+    let old = f.state().clone();
+    f.push(
+        1,
+        device_grant(chain(vec![personal(1, 3, &[1], 1, 4)]), None),
+    );
+    f.push(1, revoke(1, 2, 2, None));
+    assert!(f.state().active_device(&id(3)).is_some());
+    assert_eq!(f.state().last_exposing_revocation, None);
+    let revoked = transition(
+        &old,
+        record(&old, 1, revoke(1, 2, 2, None))
+            .signed_object()
+            .bytes(),
+    )
+    .unwrap();
+    assert!(revoked.last_exposing_revocation.is_some());
+    assert!(revoked.active_device(&id(3)).is_none());
+    f.push(1, revoke(1, 9, 2, None));
+    assert_eq!(f.state().last_exposing_revocation, None);
+    f.replay();
+}

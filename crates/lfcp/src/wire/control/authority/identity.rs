@@ -276,6 +276,16 @@ impl ControlState {
         leaf.leaf_id = Some(chain.leaf().id());
         leaf.issuers = chain.issuers().copied().collect();
         leaf.registered |= in_scope;
+        for issuer in chain.issuers() {
+            if !self.dependents.contains_key(issuer.as_bytes()) {
+                self.dependents
+                    .insert(*issuer.as_bytes(), PersistentMap::new());
+            }
+            self.dependents
+                .get_mut(issuer.as_bytes())
+                .unwrap()
+                .insert(*chain.leaf().payload().device.id().as_bytes(), ());
+        }
     }
 
     pub(super) fn check_owner_leaf(&self, chain: &CertificateChain) -> Result<(), Error> {
@@ -425,10 +435,19 @@ impl ControlState {
         let proof_read = binding.is_some_and(|d| was_reader(&revoke.device, d));
         // Only readers whose current path includes this pair can be removed.
         let exposing = proof_read
-            || (standing
+            || (bound
+                && standing
                 && self
-                    .devices()
-                    .any(|(id, d)| d.issuers.contains(&revoke.device) && was_reader(&id, d)));
+                    .dependents
+                    .get(revoke.device.as_bytes())
+                    .is_some_and(|leaves| {
+                        leaves.iter().any(|(id, ())| {
+                            let id = PrincipalId::from_bytes(*id);
+                            self.device(&id).is_some_and(|d| {
+                                d.issuers.contains(&revoke.device) && was_reader(&id, d)
+                            })
+                        })
+                    }));
         // Only a direct revocation of a registered reader grants proof read.
         // A cascade or loss of root standing does not (§41).
         if proof_read {
