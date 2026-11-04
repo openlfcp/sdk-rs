@@ -182,6 +182,12 @@ impl Executor {
     }
     fn run(&mut self, c: &J) -> J {
         let id = s(&c["id"]);
+        expected_fields(c, &["steps", "final"]);
+        assert_eq!(
+            c["inputs"]["steps"].as_array().unwrap().len(),
+            c["expected"]["steps"].as_array().unwrap().len(),
+            "{id}: step count"
+        );
         let mut steps = Vec::new();
         let mut na = Vec::new();
         for (step, expected) in c["inputs"]["steps"]
@@ -328,6 +334,7 @@ impl Executor {
             actual["n"] = json!(n);
             if let Some(input) = step.get("phase_input") {
                 let phase = self.phase(input);
+                actual["simulation"] = json!(true);
                 actual["phase"] = json!(phase);
                 actual["proposes"] = json!(phase == "pending");
                 actual["not_superseded"] = json!(phase != "superseded");
@@ -391,6 +398,7 @@ impl Executor {
             // This is explanatory prose; the exact numeric frontier and all
             // hole/cutoff outcomes are checked above and below.
             if key == "frontier_rule" {
+                na.push(json!({"field":"final.frontier_rule","reason":boundary(key)}));
                 continue;
             }
             if let Some(actual) = final_state.get(key) {
@@ -399,7 +407,7 @@ impl Executor {
                 na.push(json!({"field":format!("final.{key}"),"reason":boundary(key)}));
             }
         }
-        json!({"outcome":if na.is_empty(){"accept"}else{"N/A"},"steps":steps,"post_state":final_state,"not_applicable":na})
+        json!({"outcome":if na.is_empty(){"accept"}else{"N/A"},"simulation":true,"steps":steps,"post_state":final_state,"not_applicable":na})
     }
     fn operation(&mut self, id: &str, n: u64) -> J {
         match (id,n){
@@ -422,9 +430,10 @@ impl Executor {
    ("F16_device_grant_fork",4)=>{let base=self.wire.at("I1_device_grant_dev_a");let first=self.wire.record_bytes("Rd1");let second=self.wire.record_bytes("W1");let (outcome,_)=authority::validate_authorized(&[&first,&second],Some(base)).unwrap();assert!(matches!(outcome,ChainOutcome::Conflict(_)));self.results.insert("fork".into(),json!(true));json!({"outcome":"CONTROL_CONFLICT","competing":["Rd1","W1"]})}
    ("F16_device_grant_fork",5)=>{assert_eq!(self.results.get("fork"),Some(&json!(true)));json!({"outcome":"suspended","simulation":true})}
    ("F18_barrier",5)=>{let old=self.reference("wire:D_dev_a_old_head_after_revoke");let closed=self.reference("wire:D_dev_a_beyond_epoch_cutoff");assert_eq!(old["outcome"],"accept");assert_eq!(closed["outcome"],"STALE_DATA_EPOCH");json!({"outcome":"accepted until the epoch closes"})}
-   ("F19_key_bootstrap",4)=>{assert_eq!(self.ledger.len(),3);json!({"outcome":"served anyway"})}
+   ("F19_key_bootstrap",4)=>{assert_eq!(self.ledger.len(),3);json!({"outcome":"served anyway","simulation":true})}
    ("F09_pairing_service",4|16)=>na("IDENTITY-PROFILE-01 §5.3 steps 3 and 8 require persisted candidates and live reachability; sdk-rs has no client store or transport."),
-   ("F10_request_feasibility",3|7|8)=>na("IDENTITY-PROFILE-01 §5.3 step 4 requires confirmation UI and fresh client planning; sdk-rs validates proposed records but has no approval UI or scheduler."),
+   ("F10_request_feasibility",3)=>na("IDENTITY-PROFILE-01 §5.3 step 4 requires renewed human confirmation when the request changes; sdk-rs has no approval UI or journal."),
+   ("F10_request_feasibility",7|8)=>na("IDENTITY-PROFILE-01 §5.3 step 4 requires scope trimming and future-chain feasibility checks at the current head. sdk-rs validates proposed records but lacks this planning API; this is an SDK coverage gap."),
    ("F17_revoked_device",5)=>na("LFCP-WIRE-01 §69 requires server subscription/push ordering; sdk-rs has no server connections or push queues."),
    _=>panic!("unimplemented flow operation {id}/{n}"),
   }
@@ -432,11 +441,20 @@ impl Executor {
     fn additional(&mut self, id: &str, n: u64, step: &J, actual: &mut J) {
         match (id, n) {
             ("F03_stale_head_reevaluation", 7) => {
-                actual["ack"] = json!("same ACK");
-                actual["transition"] = json!(false);
+                let replay = self.retry(s(&step["case"]));
+                actual["ack"] = replay["outcome"].clone();
+                actual["transition"] = replay["transition"].clone();
             }
             ("F05_reconciliation", 4) | ("F08_pairing_personal", 17) => {
-                actual["phase"] = json!("committed-own")
+                let reference = s(&step["case"]);
+                let name = reference.strip_prefix("wire:").unwrap();
+                let record = ReceivedControlRecord::parse(&self.wire.record_bytes(name)).unwrap();
+                let chain = record.body().device_chain().unwrap();
+                let device = self.wire.name(chain.leaf().payload().device.id());
+                let root = self.wire.name(&chain.leaf().payload().root);
+                let certificate = s(&actual["post_state"]["devices"][&device]["leaf"]);
+                actual["phase"] = json!(self.phase(&json!({"phase":"register","state":reference,"root":root,"device":device,"certificate":certificate,"own":true})));
+                actual["simulation"] = json!(true);
             }
             ("F08.link_reuse_and_equivocation", 3) => {
                 assert_eq!(actual["outcome"], "ACTOR_EQUIVOCATION");
@@ -448,7 +466,8 @@ impl Executor {
                     self.units.remove(name);
                 }
                 actual["excluded"] = json!(names);
-                actual["request_seen_by_A"] = json!(false);
+                actual["request_seen_by_A"] =
+                    json!(names.iter().any(|name| self.units.contains_key(*name)));
             }
             ("F09_pairing_service", 1) => {
                 let state = self.wire.at("P3s_consume_for_bridge_o");
@@ -501,7 +520,22 @@ impl Executor {
                     actual["Y"] = json!("never shown as granted");
                 }
             }
-            ("F09_pairing_service", 14) => actual["status"] = json!("ready"),
+            ("F09_pairing_service", 14) => {
+                let name = s(&step["case"]).strip_prefix("wire:").unwrap();
+                let case = self.wire.corpus.case(name).clone();
+                let history = self.wire.history(&case["context"]);
+                let state = history.last().unwrap();
+                let recipient = self.wire.id(s(&case["inputs"]["recipient"]));
+                let ready = actual["outcome"] == "accept"
+                    && state.holds(&recipient, 1)
+                    && self.ledger.contains_key(&(
+                        s(&case["inputs"]["resource"]).into(),
+                        case["inputs"]["epoch"].as_u64().unwrap(),
+                        s(&case["inputs"]["recipient"]).into(),
+                    ));
+                actual["status"] = json!(if ready { "ready" } else { "awaiting keys" });
+                actual["simulation"] = json!(true);
+            }
             ("F11_revoker_chain_through_target", 2) => {
                 let previous = self.wire.at("I8_bridge_grant");
                 assert!(previous
@@ -520,7 +554,9 @@ impl Executor {
                 let carol = self.ledger.get(&("X".into(), 1, "CAROL".into())).unwrap();
                 actual["ledger_after"] = json!([{"resource":"X","epoch":1,"recipient":"BOB","package_id":bob},{"resource":"X","epoch":1,"recipient":"CAROL","package_id":carol}]);
             }
-            ("F14_frontier_from_verified_set", 4) => actual["counted"] = json!(false),
+            ("F14_frontier_from_verified_set", 4) => {
+                actual["counted"] = json!(actual["outcome"] == "accept")
+            }
             ("F15_rotation_policy_by_exposure", 6) => {
                 let state = self.wire.at("V2_revoke_dev_c");
                 actual["descendant_receives_new_epoch"] = json!(authority::can_distribute_key(
@@ -531,10 +567,22 @@ impl Executor {
                 .is_ok());
             }
             ("F17_revoked_device", 1) => {
-                actual["status"] = json!("revocation proven");
+                actual["status"] = json!(if actual["post_state"]["read"] == "prefix" {
+                    "revocation proven"
+                } else {
+                    "unproven"
+                });
+                actual["simulation"] = json!(true);
                 actual["head"] = actual["post_state"]["control_head"].clone();
             }
-            ("F17_revoked_device", 4) => actual["status"] = json!("access refused"),
+            ("F17_revoked_device", 4) => {
+                actual["status"] = json!(if actual["outcome"] == "AUTHORIZATION_FAILED" {
+                    "access refused"
+                } else {
+                    "unknown"
+                });
+                actual["simulation"] = json!(true);
+            }
             ("F18_barrier", 1..=4) => actual["identity_aware"] = actual["outcome"].clone(),
             _ => {}
         }
@@ -691,7 +739,7 @@ fn na(reason: &str) -> J {
 fn boundary(field: &str) -> &'static str {
     match field{
   "pre_identity"|"herald"|"server_without_identity_01"=>"WIRE §100.1 defines behavior of pre-identity/herald implementations and persistent blocked-client UI; this binary is identity-aware and contains neither legacy validator nor client storage.",
-  "offered"|"consume_proposed_for_infeasible_preset"=>"IDENTITY-PROFILE §5.3 step 4 requires client preset selection/confirmation; the SDK rejects infeasible certificates, but has no approval UI.",
+  "offered"|"consume_proposed_for_infeasible_preset"=>"IDENTITY-PROFILE-01 §5.3 step 4 requires a future-chain feasibility API to enumerate presets at the current head. sdk-rs checks proposed records but lacks this planning API; this is an SDK coverage gap.",
   "frontier_rule"=>"Explanatory prose only; the exact frontier and hole verdicts are checked from verified units (WIRE §28.1).",
   other=>panic!("unaccounted flow assertion {other}"),
  }

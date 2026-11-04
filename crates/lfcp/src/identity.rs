@@ -2,13 +2,14 @@
 //!
 //! Authority always comes from validated Control state. Document entries are
 //! display data and hints. Admission reuses Shared Objects' byte, history,
-//! sequence, expansion and depth checks, then applies AI0–AI4 causally.
+//! sequence, expansion and depth checks, then applies AI0–AI5 causally.
 use crate::base::{PrincipalId, ResourceId};
 use crate::wire::control::{authority::ControlState, device::DeviceKind};
 use std::fmt;
 
 mod admission;
 mod document;
+mod history;
 pub mod links;
 pub use admission::{IdentityReplica, Received, UnitContext};
 pub use document::IdentityDoc;
@@ -47,10 +48,9 @@ pub enum Diagnostic {
     ContainerReplaced,
     /// AI1: an immutable field was written.
     ImmutableFieldMutated,
-    /// AI4: a restricted writer wrote outside its own request.
+    /// AI4/AI5: a restricted writer wrote outside its own request, or a writer
+    /// changed another device's `missing_keys` hint.
     UnauthorizedWriter,
-    /// Owner decision I8; provisional until assigned by the specification.
-    MissingKeysWriterMismatch,
 }
 impl Diagnostic {
     /// Application diagnostic name; these are not Wire error codes.
@@ -70,7 +70,6 @@ impl Diagnostic {
             Self::ContainerReplaced => "CONTAINER_REPLACED",
             Self::ImmutableFieldMutated => "IMMUTABLE_FIELD_MUTATED",
             Self::UnauthorizedWriter => "UNAUTHORIZED_WRITER",
-            Self::MissingKeysWriterMismatch => "MISSING_KEYS_WRITER_MISMATCH",
         }
     }
 }

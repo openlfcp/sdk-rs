@@ -208,6 +208,15 @@ impl Wire {
         let e = &c["expected"];
         let result: Result<J, Error> = (|| match s(&c["kind"]) {
             "principal" => {
+                expected_fields(
+                    c,
+                    &[
+                        "ed25519_public",
+                        "x25519_public",
+                        "principal_id",
+                        "descriptor_cbor",
+                    ],
+                );
                 let ed = bytes(&i["ed25519_seed"]);
                 let x = bytes(&i["x25519_private"]);
                 let keys = PrincipalKeys::from_secrets(
@@ -215,6 +224,8 @@ impl Wire {
                     x.try_into().unwrap(),
                 );
                 let d = keys.descriptor();
+                assert_eq!(d.ed25519_public().as_slice(), bytes(&e["ed25519_public"]));
+                assert_eq!(d.x25519_public().as_slice(), bytes(&e["x25519_public"]));
                 assert_eq!(d.encode(), bytes(&e["descriptor_cbor"]), "{id}");
                 assert_eq!(d.id().to_hex(), s(&e["principal_id"]["hex"]));
                 Ok(accepted(
@@ -403,7 +414,31 @@ impl Wire {
                             dek.expose_secret(),
                             self.dek(s(&i["resource"]), h.data_epoch).expose_secret()
                         );
-                        Ok(accepted(vec![package.id().to_hex()], J::Null))
+                        let mut post = json!({});
+                        if let Some(fields) = e.get("post_state") {
+                            for key in fields.as_object().unwrap().keys() {
+                                let value = if let Some(rest) = key
+                                    .strip_prefix("holds_")
+                                    .or_else(|| key.strip_prefix("direct_"))
+                                {
+                                    let (name, ability) = rest.rsplit_once('_').unwrap();
+                                    // These direct queries name unbound roots, whose holds
+                                    // path is the direct-authority calculation.
+                                    if key.starts_with("direct_") {
+                                        assert!(!state.bound(&self.id(name)));
+                                    }
+                                    state.holds(&self.id(name), ability.parse().unwrap())
+                                } else if let Some(name) = key.strip_prefix("invitation_exception_")
+                                {
+                                    let principal = self.id(name);
+                                    !state.bound(&principal) && state.holds(&principal, 11)
+                                } else {
+                                    panic!("unchecked key-package query {key}");
+                                };
+                                post[key] = json!(value);
+                            }
+                        }
+                        Ok(accepted(vec![package.id().to_hex()], post))
                     }
                     _ => {
                         let received = ReceivedSnapshot::parse(&raw)?;
@@ -444,18 +479,23 @@ impl Wire {
                         .map(|s| self.record_name(&s.head.id))
                         .collect::<Vec<_>>());
                     post["refused_reads"] = json!([
-                        "later Control Records",
-                        "DATA_HAVE",
-                        "DATA_GET",
-                        "KEY_PACKAGE_GET",
-                        "SNAPSHOT_GET",
-                        "presence"
-                    ]);
+                        ("later Control Records", Some(head.sequence + 1)),
+                        ("DATA_HAVE", None),
+                        ("DATA_GET", None),
+                        ("KEY_PACKAGE_GET", None),
+                        ("SNAPSHOT_GET", None),
+                        ("presence", None),
+                    ]
+                    .into_iter()
+                    .filter(|(_, sequence)| !read_allowed(access, *sequence))
+                    .map(|(name, _)| name)
+                    .collect::<Vec<_>>());
                 }
                 subset(&post, &e["post_state"], id);
                 Ok(accepted(vec![head.id.to_hex()], post))
             }
             "key_package_matrix" => {
+                expected_fields(c, &["outcome_by_head_sender_recipient"]);
                 let mut tables = BTreeMap::new();
                 for (name, head) in i["heads"].as_object().unwrap() {
                     let state = self.at(s(head));
@@ -480,10 +520,11 @@ impl Wire {
                     }
                     tables.insert(name, senders);
                 }
-                subset(&json!(tables), &e["outcome_by_head_sender_recipient"], id);
+                assert_eq!(json!(tables), e["outcome_by_head_sender_recipient"], "{id}");
                 Ok(accepted(vec![], json!(tables)))
             }
             "rotator_test" => {
+                expected_fields(c, &["tables"]);
                 let mut tables = BTreeMap::new();
                 for (label, expected) in e["tables"].as_object().unwrap() {
                     let resource = label.split_once(' ').unwrap().0;
@@ -509,8 +550,26 @@ impl Wire {
                 Ok(accepted(vec![], json!(tables)))
             }
             "wire_message" => {
+                expected_fields(c, &["message_cbor"]);
                 let raw = bytes(&e["message_cbor"]);
                 let message = lfcp::wire::message::Message::decode(&raw, &Default::default())?;
+                let lfcp::wire::message::Body::Ready(body) = &message.body else {
+                    panic!("{id}: not a READY message");
+                };
+                assert_eq!(message.message_id.as_slice(), bytes(&i["message_id"]));
+                assert_eq!(
+                    message.correlation_id.unwrap().as_slice(),
+                    bytes(&i["correlation"])
+                );
+                assert_eq!(body.wire_profile, i["wire_profile"]);
+                assert_eq!(body.server_id.as_slice(), bytes(&i["server_id"]));
+                assert_eq!(json!(body.max_message_bytes), i["max_message_bytes"]);
+                assert_eq!(json!(body.durability), i["durability"]);
+                assert_eq!(json!(body.heartbeat_ms), i["heartbeat_ms"]);
+                assert_eq!(
+                    body.extensions.as_deref(),
+                    Some([s(&i["extension"]).to_owned()].as_slice())
+                );
                 assert_eq!(message.encode(), raw);
                 Ok(accepted(
                     vec![],
@@ -521,15 +580,44 @@ impl Wire {
         })();
         match result {
             Ok(v) => v,
-            Err(e) => refused(code(Some(&e)), None),
+            Err(e) => {
+                let mut result = refused(code(Some(&e)), None);
+                if matches!(e, Error::StaleDataEpoch(_)) {
+                    result["disposition"] = json!("quarantine");
+                }
+                result
+            }
         }
     }
     fn check_object(&self, o: &cose::SignedObject, e: &J) {
+        for key in e.as_object().unwrap().keys() {
+            assert!(
+                [
+                    "payload_cbor",
+                    "protected_header_cbor",
+                    "sig_structure_cbor",
+                    "signature",
+                    "cose_sign1",
+                    "object_id",
+                    "certificate_id",
+                    "payload_digest"
+                ]
+                .contains(&key.as_str()),
+                "unchecked signed object field {key}"
+            );
+        }
         for (field, actual) in [
             ("payload_cbor", o.payload_bytes().to_vec()),
             ("protected_header_cbor", o.protected_bytes().to_vec()),
             ("sig_structure_cbor", o.sig_structure()),
             ("signature", o.signature().to_vec()),
+            ("cose_sign1", o.bytes().to_vec()),
+            ("object_id", o.id().as_bytes().to_vec()),
+            ("certificate_id", o.id().as_bytes().to_vec()),
+            (
+                "payload_digest",
+                lfcp::crypto::sha256(o.payload_bytes()).as_bytes().to_vec(),
+            ),
         ] {
             if let Some(expected) = e.get(field) {
                 assert_eq!(actual, bytes(expected), "{field}");
@@ -541,6 +629,13 @@ impl Wire {
             format!("LFCP-TV-IDENTITY-DEK-{resource}-EPOCH-{epoch}").as_bytes(),
         );
         Dek::from_bytes(*data.as_bytes())
+    }
+}
+fn read_allowed(access: ReadAccess, control_sequence: Option<u64>) -> bool {
+    match access {
+        ReadAccess::Full => true,
+        ReadAccess::ControlPrefix(head) => control_sequence.is_some_and(|seq| seq <= head.sequence),
+        ReadAccess::Denied => false,
     }
 }
 pub fn keys(label: &str) -> PrincipalKeys {
@@ -568,7 +663,10 @@ pub fn subset(actual: &J, expected: &J, context: &str) {
             );
         }
         for (key, e) in fields {
-            subset(&actual[key], e, &format!("{context}.{key}"));
+            let value = actual
+                .get(key)
+                .unwrap_or_else(|| panic!("{context}: missing {key}"));
+            subset(value, e, &format!("{context}.{key}"));
         }
     } else {
         assert_eq!(actual, expected, "{context}");

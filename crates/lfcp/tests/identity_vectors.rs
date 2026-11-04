@@ -18,12 +18,12 @@ fn id05_profile_vectors() {
         check(c, &result);
         results.insert(id.clone(), result);
     }
-    assert_eq!(results.len(), 127);
+    assert_eq!(results.len(), 191);
     export("identity-profile", &results);
 }
 
 #[test]
-fn i8_is_switchable_and_foreign_forwarding_cannot_poison_initialisation() {
+fn ai5_is_mandatory_and_foreign_forwarding_cannot_poison_initialisation() {
     use lfcp::identity::{Diagnostic, IdentityReplica, Received};
     let p = Profile::load();
     let mut strict = IdentityReplica::new(p.resource, p.owner);
@@ -35,9 +35,9 @@ fn i8_is_switchable_and_foreign_forwarding_cannot_poison_initialisation() {
     assert!(strict
         .refused()
         .values()
-        .any(|d| *d == Diagnostic::MissingKeysWriterMismatch));
+        .any(|d| *d == Diagnostic::UnauthorizedWriter));
     let mut baseline = p.replica();
-    assert!(baseline
+    assert!(!baseline
         .receive_snapshot(
             &lfcp::shared_objects::framing::encode_snapshot(&snapshot),
             &witnesses
@@ -88,7 +88,7 @@ fn id01_through_id04_wire_vectors() {
         check(c, &result);
         results.insert(id.clone(), result);
     }
-    assert_eq!(results.len(), 381);
+    assert_eq!(results.len(), 387);
     export("identity-wire", &results);
 }
 
@@ -108,6 +108,7 @@ fn wire_profile(
             assert_eq!(table, e[label]);
             tables.insert(label, table);
         }
+        assert_eq!(json!(tables), *e);
         accepted(vec![], json!(tables))
     } else {
         let state = wire.at(s(&i["head"]));
@@ -197,4 +198,110 @@ fn replacing_a_container_created_in_the_same_change_is_refused() {
         r.receive(unit, &framing::encode_change(&raw)),
         Received::Refused(Diagnostic::ContainerReplaced)
     );
+}
+
+#[test]
+fn profile_runner_checks_all_document_assertions() {
+    let p = Profile::load();
+    for (id, pointer, wrong) in [
+        (
+            "identity_doc_initial_then_fill",
+            "/expected/admitted",
+            serde_json::json!([]),
+        ),
+        (
+            "identity_doc_initial_then_fill",
+            "/expected/entries/roster",
+            serde_json::json!({}),
+        ),
+        (
+            "identity_snapshot_equivalence",
+            "/expected/entries/requests",
+            serde_json::json!({}),
+        ),
+        (
+            "identity_doc_second_initial_other_unit",
+            "/expected/snapshot/initial_change",
+            serde_json::json!("C0s_second_initial"),
+        ),
+        (
+            "device_entry_missing_keys_union",
+            "/expected/missing_keys_conflict_set",
+            serde_json::json!([]),
+        ),
+        (
+            "missing_keys_concurrent_device_and_root",
+            "/expected/pending",
+            serde_json::json!([]),
+        ),
+        (
+            "missing_keys_hidden_entry_resolution",
+            "/expected/foreign/state/devices",
+            serde_json::json!({}),
+        ),
+    ] {
+        let mut case = p.corpus.case(id).clone();
+        *case.pointer_mut(pointer).unwrap() = wrong;
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| p.run(&case))).is_err(),
+            "unchecked {id}{pointer}"
+        );
+    }
+}
+
+#[test]
+fn ai5_precedes_type_errors_but_follows_container_replacement() {
+    use automerge::{transaction::Transactable, AutoCommit, ReadDoc, ROOT};
+    use lfcp::{
+        identity::{Diagnostic, Received, UnitContext, WriterClass},
+        shared_objects::{
+            framing,
+            identity::{actor_id, parse_principal_ref},
+        },
+    };
+    let p = Profile::load();
+    let key = s(&p.corpus.data["fixtures"]["refs"]["DEV_B"]);
+    for (existing_hint, own, diagnostic) in [
+        (false, false, Diagnostic::UnauthorizedWriter),
+        (false, true, Diagnostic::InvalidFieldType),
+        (true, false, Diagnostic::ContainerReplaced),
+    ] {
+        let mut r = p.replica();
+        for name in ["C0_initial", "C1_fill", "M0_entry_dev_b"] {
+            assert_eq!(p.deliver(&mut r, name), Received::Applied);
+        }
+        if existing_hint {
+            assert_eq!(p.deliver(&mut r, "M1_dev_b_writes_hint"), Received::Applied);
+        }
+        let before = r.save();
+        let signer = if own {
+            parse_principal_ref(key).unwrap()
+        } else {
+            p.owner
+        };
+        let mut doc = AutoCommit::load(&before)
+            .unwrap()
+            .with_actor(actor_id(&p.resource, &signer));
+        let devices = doc.get(ROOT, "devices").unwrap().unwrap().1;
+        let entry = doc.get(devices, key).unwrap().unwrap().1;
+        doc.put(entry, "missing_keys", -1i64).unwrap();
+        doc.commit();
+        let change = doc.get_last_local_change().unwrap();
+        assert_eq!(
+            r.receive(
+                UnitContext {
+                    signer,
+                    class: if own {
+                        WriterClass::Personal
+                    } else {
+                        WriterClass::Root
+                    },
+                    actor_sequence: change.seq(),
+                },
+                &framing::encode_change(change.raw_bytes())
+            ),
+            Received::Refused(diagnostic)
+        );
+        assert_eq!(r.save(), before);
+    }
 }
