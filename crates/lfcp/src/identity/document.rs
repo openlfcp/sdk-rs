@@ -51,20 +51,22 @@ impl IdentityDoc {
         Ok(())
     }
     /// Validate one extension key without disabling unrelated document readers.
+    /// Absent keys in a valid root return `None`: extension keys are optional.
     /// Unknown extension values are preserved and not interpreted (§4; SOP §18).
     pub fn extension_diagnostic(&self, key: &str) -> Option<D> {
         if let Err(d) = self.validate_root() {
             return Some(d);
         }
-        if !values::is_reverse_domain(key) {
-            return Some(D::InvalidExtensionNamespace);
-        }
         let extensions = map(&self.doc, &ROOT, "extensions").unwrap();
-        self.doc
+        if self
+            .doc
             .get_all(extensions, key)
             .unwrap_or_default()
             .is_empty()
-            .then_some(D::MissingRequiredField)
+        {
+            return None;
+        }
+        (!values::is_reverse_domain(key)).then_some(D::InvalidExtensionNamespace)
     }
     /// Full plain state, preserving unknown fields (Automerge-selected values).
     pub fn plain(&self) -> Result<Plain, D> {
