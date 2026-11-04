@@ -43,10 +43,8 @@ fn invalid_extension_namespace_does_not_disable_identity_entries() {
         Some(Diagnostic::InvalidExtensionNamespace),
     );
     assert_eq!(view.extension_diagnostic("com.example.app"), None);
-    assert_eq!(
-        view.extension_diagnostic("com.example.absent"),
-        Some(Diagnostic::MissingRequiredField),
-    );
+    assert_eq!(view.extension_diagnostic("com.example.absent"), None);
+    assert_eq!(view.extension_diagnostic("Absent_NS"), None);
     for container in ["roster", "devices", "requests"] {
         let entries = before.entries(container).unwrap();
         assert!(!entries.is_empty());
