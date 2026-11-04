@@ -150,6 +150,9 @@ pub struct ControlState {
     principals: PersistentMap<[u8; 32], PrincipalDescriptor>,
     roles: PersistentMap<[u8; 32], Role>,
     devices: PersistentMap<[u8; 32], DeviceBinding>,
+    // Issuer -> leaves whose accepted chains have used it. Re-certification
+    // retains old edges; exposure filters by each leaf's current chain.
+    dependents: PersistentMap<[u8; 32], PersistentMap<[u8; 32], ()>>,
     device_counts: PersistentMap<[u8; 32], identity::DeviceCounts>,
     // Roots with pre-emptive tombstones for each device. Both levels share
     // historical nodes; binding a target visits only its affected roots.
@@ -340,6 +343,7 @@ fn apply_verified(
                 principals: PersistentMap::new(),
                 roles: PersistentMap::new(),
                 devices: PersistentMap::new(),
+                dependents: PersistentMap::new(),
                 device_counts: PersistentMap::new(),
                 preemptive_revokers: PersistentMap::new(),
                 revoked: PersistentMap::new(),
@@ -678,6 +682,14 @@ impl CapabilityEngine {
 }
 
 impl ChainPolicy for CapabilityEngine {
+    fn previous_epoch(&mut self, accepted: &[ControlRecord]) -> Option<u64> {
+        match accepted.len() {
+            0 => self.base.as_ref(),
+            n => self.history.get(n - 1),
+        }
+        .map(|state| state.current_epoch)
+    }
+
     fn resolve_issuer(&mut self, issuer: &PrincipalId) -> Option<PrincipalDescriptor> {
         self.latest()
             .and_then(|state| state.principal(issuer))
