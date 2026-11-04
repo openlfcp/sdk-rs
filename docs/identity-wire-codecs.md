@@ -68,13 +68,12 @@ service scope. The normative profile §5.3 step 4 now explicitly requires this p
 R13, R16, R17, N01, N06 and N08 concern profile, flow, state or server behavior
 outside this codec task.
 
-Two legacy error classifications need a normative update:
+The identity baseline resolves two legacy error classifications:
 
-1. Baseline.12's `unknown_core_type_C1` uses type **9** with a Capability Grant
-   body. These exact bytes still fail, now with `MALFORMED_MESSAGE`, because
-   the codec knows 9 and the body is not a Device Grant. The local test records
-   the changed expectation; official bytes and `spec.lock` are unchanged. A
-   fresh local type-11 vector checks `INVALID_CONTROL_CHAIN`.
+1. `unknown_core_type_C1` now uses reserved type **31**, preserving its
+   `INVALID_CONTROL_CHAIN` verdict. Baseline.12 used type 9, which identity
+   assigns to DEVICE_GRANT. The temporary local malformed-body expectation
+   is removed; the test uses the pinned corpus's error code directly.
 2. A legacy transfer commit **without field 2** containing a malformed offer
    or accept now fails with `MALFORMED_MESSAGE` before placement or dependency
    checks (§3.10 explicitly includes transfers without field 2). For example,
@@ -84,9 +83,8 @@ Two legacy error classifications need a normative update:
    yield `MALFORMED_MESSAGE`. No baseline.12 vector covered that combination;
    local tests now cover both nested objects and both competing error classes.
 
-The normative migration now moves `unknown_core_type_C1` to reserved type 31
-and records the byte changes in `value-changes.json`; the old local pin still
-contains its type-9 bytes. Task 403 connects the new corpus and baseline. The
+The normative migration records these byte changes in `value-changes.json`;
+`spec.lock` pins `mvp-0.4-baseline.1`. The
 §62 signature-first checks also classify a wrong transfer accept signer as
 `INVALID_SIGNATURE` before payload acceptor mismatch; see the authority notes.
 The offer signer is never a dependency: an unknown signer gives

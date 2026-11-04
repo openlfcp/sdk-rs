@@ -63,6 +63,8 @@ default = []
 shared-objects = ["dep:automerge", "dep:flate2"]
 # lfcp::shared_sections: the Shared Sections profile (MVP 0.2 Working Draft).
 shared-sections = ["shared-objects"]
+# Identity Resource profile and pairing links (MVP 0.4).
+identity = ["shared-objects"]
 
 [[test]]
 name = "shared_objects_vectors"
