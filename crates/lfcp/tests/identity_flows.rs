@@ -457,6 +457,9 @@ impl Executor {
                 actual["simulation"] = json!(true);
             }
             ("F08.link_reuse_and_equivocation", 3) => {
+                // Exclusion and request visibility are modeled by this runner,
+                // not reconstructed through IdentityReplica.
+                actual["simulation"] = json!(true);
                 assert_eq!(actual["outcome"], "ACTOR_EQUIVOCATION");
                 let names = [
                     "flow.pl_pair_l_request",
