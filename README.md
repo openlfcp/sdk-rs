@@ -13,7 +13,7 @@ test vectors in `openlfcp/spec`, not ported from `sdk-ts`.
 ## Scope
 
 sdk-rs implements the OpenLFCP MVP 0.1 subset of LFCP-WIRE-01
-plus the MVP 0.4 identity extensions at `mvp-0.4-baseline.1`, not every
+plus the MVP 0.4 identity extensions at `mvp-0.4-baseline.2`, not every
 deferred WIRE-01 feature; it has a pairing URI codec but no invitation URI codec yet. See
 `.github: docs/release/deferred-wire-01-features.md` (in [openlfcp/.github](https://github.com/openlfcp/.github)). It does not claim
 full LFCP-WIRE-01 conformance.
@@ -85,9 +85,10 @@ for MVP 0.1: every LFCP-TEST-VECTORS-01 case is decided in scope.
 
 MVP 0.4 identity support includes Device Certificates, device authority and
 revocation, and the optional `identity` document profile. The identity suites
-cover all 381 Wire and 127 profile cases; the 22 flow fixtures execute protocol
-steps and local phase/ledger simulations, with explicit N/A entries for missing
-client UI, durable storage, legacy validators and server push behavior. See
+cover all 387 Wire and 191 profile cases (one profile case is N/A). The 22 flow
+fixtures execute protocol steps and local phase/ledger simulations, with explicit
+N/A entries for missing client UI, feasibility planning, durable storage, legacy
+validators and server push behavior. See
 [identity authority](docs/identity-authority.md), [identity profile](docs/identity-profile.md)
 and [identity conformance](docs/identity-conformance.md).
 
@@ -140,11 +141,13 @@ builds on the stable Rust toolchain; no older minimum version is promised.
 `spec.lock` pins the specification this SDK implements:
 
 ```json
-{ "repository": "openlfcp/spec", "tag": "mvp-0.4-baseline.1", "commit": "12a8fb2b364ec063c22c169de913054222de7a2b" }
+{ "repository": "openlfcp/spec", "tag": "mvp-0.4-baseline.2", "commit": "2af5d977f2a07407d1568af2fe406353b72aa00a" }
 ```
 
-`mvp-0.4-baseline.1` adds the normative identity Wire extensions,
-IDENTITY-PROFILE-01 and the three identity corpora. Existing Shared Objects and
+`mvp-0.4-baseline.2` adds mandatory AI5 admission for device hints and causal
+object-history checks for AI2, retaining the identity Wire extensions and
+IDENTITY-PROFILE-01 of baseline.1. Its corpora include epoch-number precedence
+and a corrected READY message. Existing Shared Objects and
 Shared Sections contracts are inherited from `mvp-0.2-baseline.12`.
 
 That earlier baseline is the MVP 0.1 baseline `mvp-0.1-baseline.10`,

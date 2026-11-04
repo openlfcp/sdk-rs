@@ -53,7 +53,13 @@ impl Corpus {
 pub fn check(c: &J, result: &J) {
     let id = s(&c["id"]);
     let e = &c["expected"];
+    if result["outcome"] == "N/A" {
+        assert_eq!(id, "pair_uri_rejected_by_join_parser");
+        assert!(!s(&result["not_applicable"]).is_empty());
+        return;
+    }
     if let Some(valid) = e["valid"].as_bool() {
+        expected_fields(c, &["valid", "error", "post_state", "disposition"]);
         assert_eq!(
             result["outcome"],
             if valid {
@@ -63,9 +69,32 @@ pub fn check(c: &J, result: &J) {
             },
             "{id}: {result}"
         );
-        if let Some(d) = e["error"].get("diagnostic") {
-            assert_eq!(&result["diagnostic"], d, "{id}");
+        if !valid {
+            let mut error = json!({"code":result["outcome"]});
+            if !result["diagnostic"].is_null() {
+                error["diagnostic"] = result["diagnostic"].clone();
+            }
+            if let Some(detail) = result.get("detail") {
+                error["detail"] = detail.clone();
+            }
+            assert_eq!(error, e["error"], "{id}");
         }
+        if let Some(post) = e.get("post_state") {
+            super::identity_wire::subset(&result["post_state"], post, id);
+        }
+        if let Some(disposition) = e.get("disposition") {
+            assert_eq!(&result["disposition"], disposition, "{id}");
+        }
+    }
+}
+/// Fail closed when a corpus adds an assertion the runner does not implement.
+pub fn expected_fields(c: &J, supported: &[&str]) {
+    for key in c["expected"].as_object().unwrap().keys() {
+        assert!(
+            supported.contains(&key.as_str()),
+            "{}: unchecked expected.{key}",
+            c["id"]
+        );
     }
 }
 pub fn accepted(ids: Vec<String>, state: J) -> J {

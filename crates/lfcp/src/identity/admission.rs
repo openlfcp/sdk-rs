@@ -1,5 +1,6 @@
 use super::{
     document::{map, scalar_strings},
+    history::Objects,
     Diagnostic as D, IdentityDoc, WriterClass, CONTAINERS,
 };
 use crate::base::{PrincipalId, ResourceId};
@@ -10,7 +11,7 @@ use crate::shared_objects::{
 };
 use automerge::legacy::{Key, OpType};
 use automerge::{
-    ActorId, AutoCommit, Change, ChangeHash, ObjId, ObjType, ReadDoc, ScalarValue, Value, ROOT,
+    ActorId, AutoCommit, Change, ChangeHash, ObjType, ReadDoc, ScalarValue, Value, ROOT,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -49,11 +50,10 @@ pub struct IdentityReplica {
     waiting: BTreeMap<ChangeHash, (Change, UnitContext)>,
     refused: BTreeMap<ChangeHash, D>,
     forwarded: BTreeSet<ChangeHash>,
-    enforce_missing_keys: bool,
+    objects: Objects,
 }
 impl IdentityReplica {
-    /// Empty Identity Resource. I8 enforcement is on by default; disable it
-    /// explicitly only when replaying the pre-I8 baseline corpus.
+    /// Empty Identity Resource, enforcing baseline.2 admission AI0–AI5.
     pub fn new(resource: ResourceId, owner: PrincipalId) -> Self {
         Self {
             resource,
@@ -62,18 +62,8 @@ impl IdentityReplica {
             waiting: BTreeMap::new(),
             refused: BTreeMap::new(),
             forwarded: BTreeSet::new(),
-            enforce_missing_keys: true,
+            objects: Objects::default(),
         }
-    }
-    /// Select I8 before receiving changes. Rebuild to change policy; this
-    /// consumes an empty replica and refuses to change an established history.
-    pub fn with_missing_keys_check(mut self, enabled: bool) -> Result<Self, D> {
-        if !self.engine.changes().is_empty() || !self.waiting.is_empty() || !self.refused.is_empty()
-        {
-            return Err(D::InvalidRoot);
-        }
-        self.enforce_missing_keys = enabled;
-        Ok(self)
     }
     /// Receive framed plaintext, bound to an already verified unit.
     pub fn receive(&mut self, unit: UnitContext, plaintext: &[u8]) -> Received {
@@ -153,11 +143,12 @@ impl IdentityReplica {
         let mut deps = change.deps().to_vec();
         deps.sort();
         let owner = self.owner;
-        let check_hints = self.enforce_missing_keys;
+        let added = Objects::of(&change);
+        let objects = &self.objects;
         let checked = change.clone();
         let result = if heads == deps {
             self.engine.apply_change_checked(change, |before, next| {
-                structural(next, before, &checked, unit, owner, check_hints)
+                structural(next, before, &checked, unit, owner, objects, &added)
             })
         } else {
             // Concurrent changes are checked solely against their causal past.
@@ -173,14 +164,17 @@ impl IdentityReplica {
                 Err(_) => return self.refuse(hash, D::InvalidAutomergeBytes),
             };
             match probe.apply_change_checked(change.clone(), |before, next| {
-                structural(next, before, &checked, unit, owner, check_hints)
+                structural(next, before, &checked, unit, owner, objects, &added)
             }) {
                 Ok(Ok(ChangeOutcome::Applied)) => self.engine.apply_change(change).map(Ok),
                 other => other,
             }
         };
         match result {
-            Ok(Ok(ChangeOutcome::Applied)) => Received::Applied,
+            Ok(Ok(ChangeOutcome::Applied)) => {
+                self.objects.extend(added);
+                Received::Applied
+            }
             Ok(Ok(ChangeOutcome::Duplicate)) => Received::Duplicate,
             Ok(Ok(ChangeOutcome::Held)) => Received::Held,
             Ok(Err(d)) => self.refuse(hash, d),
@@ -249,8 +243,7 @@ impl IdentityReplica {
             .map_err(|_| D::InvalidAutomergeBytes)?;
         let mut hashes: Vec<_> = snapshot.changes().iter().map(Change::hash).collect();
         hashes.sort();
-        let mut replay = Self::new(self.resource, self.owner)
-            .with_missing_keys_check(self.enforce_missing_keys)?;
+        let mut replay = Self::new(self.resource, self.owner);
         for (unit, bytes) in units {
             replay.receive(*unit, bytes);
         }
@@ -265,28 +258,14 @@ impl IdentityReplica {
     }
 }
 
-fn path(doc: &AutoCommit, obj: &ObjId) -> Option<Vec<String>> {
-    if obj == &ROOT {
-        return Some(vec![]);
-    }
-    let mut p: Vec<_> = doc
-        .parents(obj)
-        .ok()?
-        .map(|p| match p.prop {
-            automerge::Prop::Map(k) => k,
-            automerge::Prop::Seq(i) => i.to_string(),
-        })
-        .collect();
-    p.reverse();
-    Some(p)
-}
 fn structural(
     next: &AutoCommit,
     before: &[ChangeHash],
     change: &Change,
     unit: UnitContext,
     owner: PrincipalId,
-    check_hints: bool,
+    objects: &Objects,
+    added: &Objects,
 ) -> Option<D> {
     if change.deps().is_empty() {
         let view = IdentityDoc {
@@ -319,8 +298,9 @@ fn structural(
         // Check operations as well as the final shape: a transient roster
         // entry or unknown key belongs in a later change (§2.2).
         for op in change.decode().operations {
-            let obj = next.import_obj(&op.obj.to_string()).ok()?;
-            let parent = path(next, &obj)?;
+            let Some(parent) = objects.path(&op.obj, added) else {
+                return Some(D::InvalidAutomergeBytes);
+            };
             let Key::Map(key) = op.key else {
                 return Some(D::InvalidRoot);
             };
@@ -349,28 +329,11 @@ fn structural(
     let mut immutable = false;
     let mut unauthorized = false;
     let mut bad_type = false;
-    let mut hints = false;
     let restricted = matches!(unit.class, WriterClass::Pairing | WriterClass::Other);
     let mut request_key: Option<String> = None;
     let operations = change.decode().operations;
-    let created: BTreeSet<_> = operations
-        .iter()
-        .enumerate()
-        .filter(|(_, op)| matches!(op.action, OpType::Make(ObjType::Map | ObjType::List)))
-        .map(|(i, _)| {
-            format!(
-                "{}@{}",
-                change.start_op().get() + i as u64,
-                change.actor_id().to_hex_string()
-            )
-        })
-        .collect();
     for op in operations {
-        let obj = match next.import_obj(&op.obj.to_string()) {
-            Ok(id) => id,
-            Err(_) => return Some(D::InvalidAutomergeBytes),
-        };
-        let mut p = match path(next, &obj) {
+        let mut p = match objects.path(&op.obj, added) {
             Some(p) => p,
             None => return Some(D::InvalidAutomergeBytes),
         };
@@ -388,18 +351,13 @@ fn structural(
         if p.len() == 1 && CONTAINERS.contains(&root) {
             container = true;
         }
-        if let Some(key) = &key {
-            let old = next.get_all_at(&obj, key, before).unwrap_or_default();
-            if p.len() >= 2
-                && ["roster", "devices", "requests"].contains(&root)
-                && matches!(op.action, OpType::Put(_))
-                && (old
-                    .iter()
-                    .any(|(v, _)| matches!(v, Value::Object(ObjType::Map | ObjType::List)))
-                    || op.pred.iter().any(|id| created.contains(&id.to_string())))
-            {
-                container = true;
-            }
+        if key.is_some()
+            && p.len() >= 2
+            && ["roster", "devices", "requests"].contains(&root)
+            && matches!(op.action, OpType::Put(_))
+            && op.pred.iter().any(|id| objects.is_container(id, added))
+        {
+            container = true;
         }
         if matches!(op.action, OpType::Make(ObjType::Text)) {
             bad_type = true;
@@ -434,12 +392,11 @@ fn structural(
         {
             bad_type = true;
         }
-        if check_hints
-            && root == "devices"
+        if root == "devices"
             && p.get(2).is_some_and(|k| k == "missing_keys")
             && p.get(1) != Some(&principal_ref(&unit.signer))
         {
-            hints = true;
+            unauthorized = true;
         }
         if restricted {
             if root != "requests" || p.len() < 2 || matches!(op.action, OpType::Delete) {
@@ -499,8 +456,6 @@ fn structural(
         Some(D::UnauthorizedWriter)
     } else if bad_type {
         Some(D::InvalidFieldType)
-    } else if hints {
-        Some(D::MissingKeysWriterMismatch)
     } else {
         None
     }

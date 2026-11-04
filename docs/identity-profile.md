@@ -12,10 +12,19 @@ confers authority. Dependency waits retain this original context.
 
 Admission reuses the Shared Objects engine's canonical bytes, operation
 references, sequence, expansion and depth checks. AI0 eligibility runs before a
-taken-sequence hold. AI1–AI4 inspect the operations against their causal history,
+taken-sequence hold. AI1–AI5 inspect the operations against their causal history,
 including the creator and previous pairing value of a request map. Refused
 changes are not applied; their dependants wait. Concurrent request maps remain
 conflicted and are omitted by readers.
+
+AI2 checks the objects named as predecessors: a scalar beside a list with no
+object predecessor replaces nothing. AI5 restricts every operation on
+`devices[k].missing_keys` and its descendants to the Principal named by `k`.
+Both rules use object-creation history, including objects created earlier in the
+same change and hidden, replaced or deleted objects. AI5 reports
+`UNAUTHORIZED_WRITER` at the same priority as AI4, before `INVALID_FIELD_TYPE`.
+Deleting a device entry, or replacing its map without writing `missing_keys`,
+does not violate AI5.
 
 `IdentityDoc` validates the root and each entry. `entries` omits invalid entries,
 preserves unknown fields, and unions concurrent `missing_keys` hints. `plain`
@@ -25,12 +34,15 @@ requires verified unit witnesses for every Snapshot change, including the root's
 unit 1, then replays them through admission. Missing witnesses return `false`
 without modifying the replica; fetch the units before using the Snapshot.
 
-Owner decision I8 is enabled by default. The provisional receive diagnostic is
-`MISSING_KEYS_WRITER_MISMATCH`. Until a normative diagnostic and vectors land,
-`with_missing_keys_check(false)` on a new replica selects baseline.1 behavior.
-The baseline's `device_entry_missing_keys_union` deliberately includes OWNER
-writing DEV_B's hints; it passes only with this check disabled. Baseline verdicts
-are not changed. Changing policy requires rebuilding from the verified units.
+Invalid extension namespaces are reported by `extension_diagnostic(key)`.
+They leave the root and other entries usable; raw state preserves those keys.
+
+Baseline.2 makes I8 normative as AI5. The provisional
+`MissingKeysWriterMismatch` diagnostic and `with_missing_keys_check` switch have
+been removed; every replica uses the same admission rules. The corpus's
+`device_entry_missing_keys_union` is a state-validation fixture: `inspect`
+checks its conflict union, while `receive_snapshot` refuses its historical
+foreign hints. State inspection does not establish admission.
 
 `PairingLink` parses only `lfcp://pair/`, recomputes the Principal from its secret,
 and rejects a mismatched `device`. Secret storage and returned URI strings are
