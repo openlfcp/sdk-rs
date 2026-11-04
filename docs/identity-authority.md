@@ -1,9 +1,9 @@
 # Identity authority (LFCP-04-404 / R2)
 
-The normative reference is openlfcp/spec main at `d9f2873`:
+The normative reference is openlfcp/spec `mvp-0.4-baseline.1` at `12a8fb2`:
 LFCP-WIRE-01 §§7.3, 15, 17.2–17.5, 18.1, 23.3, 25.2, 41, 62, 79 and 80.1.
-The published vector pin is unchanged. Task 403 supplies the full identity
-corpora and the updated baseline.
+`spec.lock` pins the normative text and the published identity corpora together.
+The corpus runners also retain the existing Wire/profile vector verdicts.
 
 ## Validation and signatures
 
@@ -210,3 +210,21 @@ server boundary; the SDK has no implicit opt-in gate.
 The existing MVP refusal of Coordinator Recovery and Resource Tombstone remains
 outside R2. Their eventual transitions must use `owner_action` and
 `holds(..., 10)` respectively. No new wire code is introduced here.
+
+## Baseline.1 follow-up
+
+The baseline corpus explicitly rejects self-recertification by an active managing
+leaf (`device_grant_self_recertify_active_managing`), matching the first-registration
+rule above. KEY_EPOCH checks its epoch number in class 2, before dependencies,
+signatures and authority, including when resuming or validating a fork competitor.
+
+For signature-only suffix validation, use `ResolveWith(resolver).after(state)`
+with the previously validated `ControlState`. It supplies the starting epoch,
+owner and bindings, and follows transfers in the suffix at the candidate's actual
+prefix. Bare `ResolveWith` has no preceding state; use `validate_authorized` for
+complete validation and authority enforcement.
+
+Revocation exposure uses a persistent issuer-to-leaf index. Unbound tombstones
+visit no devices; a bound revocation visits only indexed dependents, checking
+their current chains so superseded issuing paths cannot cause exposure. Historical
+Control states retain their own index and remain unchanged.

@@ -7,3 +7,10 @@ pub mod identity;
 pub mod sections;
 pub mod spec;
 pub mod vectors;
+
+#[cfg(feature = "identity")]
+pub mod identity_corpus;
+#[cfg(feature = "identity")]
+pub mod identity_profile;
+#[cfg(feature = "identity")]
+pub mod identity_wire;

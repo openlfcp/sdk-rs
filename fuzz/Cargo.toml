@@ -15,7 +15,7 @@ libfuzzer-sys = "0.4"
 # hashes chunk bodies itself.
 automerge = { version = "=0.12.0", default-features = false }
 sha2 = { version = "0.11", default-features = false }
-lfcp = { path = "../crates/lfcp", features = ["shared-sections"] }
+lfcp = { path = "../crates/lfcp", features = ["shared-sections", "identity"] }
 
 # Not a member of the repository's workspace: normal builds and CI never
 # compile it. Run with `cargo +nightly fuzz` from the repository root.

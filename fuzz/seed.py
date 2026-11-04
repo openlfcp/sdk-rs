@@ -61,12 +61,15 @@ def body_of(chunk):
 
 def change_actor(chunk):
     """The hex actor of an uncompressed change chunk."""
-    _, body = body_of(chunk)
-    deps, at = uleb(body, 0)
-    at += 32 * deps
-    n, at = uleb(body, at)
-    return body[at : at + n].hex()
-
+    try:
+        _, body = body_of(chunk)
+        deps, at = uleb(body, 0)
+        at += 32 * deps
+        n, at = uleb(body, at)
+        return body[at : at + n].hex()
+    except (IndexError, TypeError):
+        # Malformed-header vectors intentionally have no readable actor.
+        return None
 
 def frame(payload):
     """[1, bstr] in deterministic CBOR."""
@@ -229,6 +232,24 @@ def main():
     for c in chunks:
         if c[8] != 0:
             receive.add("so-expansion", records([c], lambda _: 0))
+
+    # Identity shares objects_admission's framing. The variant derives the
+    # ID-05 identities from the corpus's published principal/resource labels.
+    identity = spec_json("test-vectors/identity-01/IDENTITY-PROFILE-TEST-VECTORS-01.json")
+    changes = {c["id"]: c for c in identity["cases"] if c["kind"] == "profile_change_framing"}
+    for case in identity["cases"]:
+        if case["kind"] != "profile_change":
+            continue
+        history = [changes[r["case"]]["inputs"] for r in case["context"]["history"]]
+        history.append(case["inputs"])
+        program = b""
+        for change in history:
+            ctl = {"OWNER": 0, "DEV_B": 1 | 16, "PAIR_J": 2}.get(change["writer"], 3)
+            if change["unit_actor_seq"] != change["automerge_seq"]:
+                ctl |= 32
+            raw = bytes.fromhex(change.get("automerge_change", change.get("automerge_change_hex"))["hex"])
+            program += record(ctl | CTL_FRAME, raw)
+        admission.add("identity-" + case["id"], program, 64 * 1024)
 
     for corpus in (plaintext, admission, receive, snapshot, canonical):
         print(f"{corpus.dir}: {corpus.count} seeds", file=sys.stderr)

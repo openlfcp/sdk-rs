@@ -120,6 +120,7 @@ fn run(data: &[u8]) -> (Vec<Verdict>, State) {
 
 fuzz_target!(|data: &[u8]| {
     panic_policy();
+    lfcp_fuzz::identity_profile::check(data);
     let first = run(data);
     let second = run(data);
     assert_eq!(first, second, "admission is not deterministic");

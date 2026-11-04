@@ -103,3 +103,17 @@ targets restore a printing hook so only an uncaught panic is a crash, and
 F1-F4 of the first campaign are fixed (sdk-rs 4d187ac, 60dc68a, 25e45ae,
 2fc9fa5); the targets no longer skip their inputs, and their reproducers
 replay clean.
+
+The `objects_admission` target also runs `lfcp_fuzz::identity_profile::check`.
+Its identity variant derives the ID-05 Resource and Principals from the corpus's
+published labels; control bits 0–1 select OWNER, DEV_B, PAIR_J or an unknown
+Principal, bit 4 selects a personal writer, and bit 5 gives the change a different
+Data Unit sequence. Otherwise the unit sequence is its Automerge sequence.
+`seed.py` adds ID-05 admission histories without copying corpus files into Git.
+
+On hosts with only stable Rust, `cargo build --manifest-path fuzz/Cargo.toml
+--bin objects_admission` and `target/debug/objects_admission
+fuzz/corpus/objects_admission -max_total_time=30` provide a bounded libFuzzer smoke
+run. This has no sanitizer or coverage instrumentation and does not replace a
+nightly cargo-fuzz campaign. Set `CARGO_TARGET_DIR` to the repository's absolute
+`target/` path when using the separate fuzz workspace.

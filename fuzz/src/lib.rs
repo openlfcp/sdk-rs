@@ -167,3 +167,5 @@ pub fn panic_policy() {
         }
     });
 }
+
+pub mod identity_profile;

@@ -27,6 +27,8 @@ pub mod base;
 pub mod cbor;
 pub mod cose;
 pub mod crypto;
+#[cfg(feature = "identity")]
+pub mod identity;
 pub mod principal;
 #[cfg(feature = "shared-objects")]
 pub mod shared_objects;
