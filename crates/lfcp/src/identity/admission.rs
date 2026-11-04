@@ -352,7 +352,7 @@ fn structural(
             container = true;
         }
         if key.is_some()
-            && p.len() >= 2
+            && matches!(p.len(), 2 | 3)
             && ["roster", "devices", "requests"].contains(&root)
             && matches!(op.action, OpType::Put(_))
             && op.pred.iter().any(|id| objects.is_container(id, added))
