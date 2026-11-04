@@ -17,8 +17,11 @@ including the creator and previous pairing value of a request map. Refused
 changes are not applied; their dependants wait. Concurrent request maps remain
 conflicted and are omitted by readers.
 
-AI2 checks the objects named as predecessors: a scalar beside a list with no
-object predecessor replaces nothing. AI5 restricts every operation on
+AI2 protects entry maps and maps/lists in their immediate fields (depths 2–3),
+checking the objects named as predecessors. A scalar beside a list with no
+object predecessor replaces nothing. Deeper replacements are outside AI2 and
+remain subject to the other admission rules and state validation. AI5 restricts
+every operation on
 `devices[k].missing_keys` and its descendants to the Principal named by `k`.
 Both rules use object-creation history, including objects created earlier in the
 same change and hidden, replaced or deleted objects. AI5 reports
