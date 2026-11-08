@@ -18,7 +18,7 @@ fn id05_profile_vectors() {
         check(c, &result);
         results.insert(id.clone(), result);
     }
-    assert_eq!(results.len(), 191);
+    assert_eq!(results.len(), 216);
     export("identity-profile", &results);
 }
 

@@ -22,7 +22,7 @@ accepted IDs/state, and `not_applicable` with specific spec citations. Hashes us
 lowercase hex. Control state uses the corpus's human-readable Principal and
 certificate names; stored history is independent of those labels.
 
-`identity_vectors` covers 387 ID-01–ID-04 cases and 191 ID-05 cases, including
+`identity_vectors` covers 387 ID-01–ID-04 cases and 216 ID-05 cases, including
 all post-state assertions, the Key Package matrix, HPKE opening, immutable unit
 metadata for initialisation, concurrent requests and Snapshot equivalence.
 AI5 is mandatory. The union fixture is inspected as state and refused as a

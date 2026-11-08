@@ -84,7 +84,7 @@ The identity baseline resolves two legacy error classifications:
    local tests now cover both nested objects and both competing error classes.
 
 The normative migration records these byte changes in `value-changes.json`;
-`spec.lock` pins `mvp-0.4-baseline.2`. The
+`spec.lock` pins `mvp-0.4-baseline.3`. The
 §62 signature-first checks also classify a wrong transfer accept signer as
 `INVALID_SIGNATURE` before payload acceptor mismatch; see the authority notes.
 The offer signer is never a dependency: an unknown signer gives
