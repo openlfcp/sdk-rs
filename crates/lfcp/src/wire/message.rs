@@ -628,10 +628,15 @@ impl Body {
             }
             21 => {
                 closed(b, &[0, 1, 2], &[])?;
+                let (start, end) = (uint(b, 1)?, uint(b, 2)?);
+                // §45: a range whose end is below its start is malformed.
+                if end < start {
+                    return Err(MALFORMED);
+                }
                 Body::ControlGet {
                     resource_id: resource(0)?,
-                    start: uint(b, 1)?,
-                    end: uint(b, 2)?,
+                    start,
+                    end,
                 }
             }
             22 => {
@@ -1265,6 +1270,35 @@ mod tests {
             Body::ControlPut { expected_head, .. } if expected_head == ControlRecordId::from_bytes([3; 32])
         ));
         let err = decode(&control_put(Value::Null)).unwrap_err();
+        assert_eq!(err, Error::MessageMalformed);
+        assert_eq!(err.wire_code().unwrap().name(), "MALFORMED_MESSAGE");
+    }
+
+    #[test]
+    fn control_get_with_an_inverted_range_is_malformed() {
+        // §45: a range whose end is below its start is MALFORMED_MESSAGE; a
+        // one-sequence range (start = end) is valid.
+        let get = |start: u64, end: u64| {
+            envelope(vec![
+                (0, Value::Unsigned(21)),
+                (1, Value::bytes(vec![1; 16])),
+                (
+                    4,
+                    Value::Map(vec![
+                        (Value::Unsigned(0), Value::bytes(vec![7; 32])),
+                        (Value::Unsigned(1), Value::Unsigned(start)),
+                        (Value::Unsigned(2), Value::Unsigned(end)),
+                    ]),
+                ),
+            ])
+        };
+        for (start, end) in [(0, 0), (5, 5), (2, 9)] {
+            assert!(matches!(
+                decode(&get(start, end)).unwrap().body,
+                Body::ControlGet { start: s, end: e, .. } if (s, e) == (start, end)
+            ));
+        }
+        let err = decode(&get(5, 2)).unwrap_err();
         assert_eq!(err, Error::MessageMalformed);
         assert_eq!(err.wire_code().unwrap().name(), "MALFORMED_MESSAGE");
     }
