@@ -54,6 +54,11 @@ impl Objects {
             .is_some_and(|o| matches!(o.kind, ObjType::Map | ObjType::List))
     }
 
+    pub(super) fn is_map(&self, id: &OpId, added: &Self) -> bool {
+        self.get(id, added)
+            .is_some_and(|o| matches!(o.kind, ObjType::Map))
+    }
+
     pub(super) fn path<'a>(
         &'a self,
         mut obj: &'a ObjectId,

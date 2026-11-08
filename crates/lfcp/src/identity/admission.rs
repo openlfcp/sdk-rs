@@ -351,11 +351,20 @@ fn structural(
         if p.len() == 1 && CONTAINERS.contains(&root) {
             container = true;
         }
+        // AI2 (§3): a scalar over an entry map (depth 2), or over a list or
+        // map held in a field of one (depth 3). A list held directly at an
+        // entry key is not an entry map, and nothing deeper is protected.
         if key.is_some()
             && matches!(p.len(), 2 | 3)
             && ["roster", "devices", "requests"].contains(&root)
             && matches!(op.action, OpType::Put(_))
-            && op.pred.iter().any(|id| objects.is_container(id, added))
+            && op.pred.iter().any(|id| {
+                if p.len() == 2 {
+                    objects.is_map(id, added)
+                } else {
+                    objects.is_container(id, added)
+                }
+            })
         {
             container = true;
         }

@@ -18,7 +18,9 @@ changes are not applied; their dependants wait. Concurrent request maps remain
 conflicted and are omitted by readers.
 
 AI2 protects entry maps and maps/lists in their immediate fields (depths 2–3),
-checking the objects named as predecessors. A scalar beside a list with no
+checking the objects named as predecessors. A list held directly at an entry
+key (`devices[k] = [...]`) is not an entry map: a scalar over it is admitted
+and the entry is left to state validation. A scalar beside a list with no
 object predecessor replaces nothing. Deeper replacements are outside AI2 and
 remain subject to the other admission rules and state validation. AI5 restricts
 every operation on
