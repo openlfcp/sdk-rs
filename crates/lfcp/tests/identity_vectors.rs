@@ -18,7 +18,7 @@ fn id05_profile_vectors() {
         check(c, &result);
         results.insert(id.clone(), result);
     }
-    assert_eq!(results.len(), 216);
+    assert_eq!(results.len(), 271);
     export("identity-profile", &results);
 }
 
@@ -88,7 +88,7 @@ fn id01_through_id04_wire_vectors() {
         check(c, &result);
         results.insert(id.clone(), result);
     }
-    assert_eq!(results.len(), 387);
+    assert_eq!(results.len(), 424);
     export("identity-wire", &results);
 }
 

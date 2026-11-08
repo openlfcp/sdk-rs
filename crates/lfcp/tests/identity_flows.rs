@@ -7,9 +7,10 @@ use lfcp::{
     base::{ControlRecordId, Hash32},
     wire::{
         control::{
-            authority::{self},
+            authority::{self, ControlState},
             body::ControlBody,
             chain::{check_expected_head, ChainOutcome},
+            device::DeviceKind,
             ControlRecord, ReceivedControlRecord,
         },
         data_unit::ReceivedDataUnit,
@@ -96,15 +97,26 @@ impl Executor {
             "register" => {
                 let root = self.wire.id(s(&input["root"]));
                 let device = self.wire.id(s(&input["device"]));
-                let cert = lfcp::wire::control::device::DeviceCertificate::parse(&bytes(
-                    &self.wire.corpus.data["fixtures"]["certificates"][s(&input["certificate"])]
-                        ["cose_sign1"],
-                ))
+                let cert = self.certificate(s(&input["certificate"]));
+                // The issuers are those of the planned chain, whatever the current binding
+                // holds (none before a first registration, another leaf before a
+                // re-certification); the chain must be one chain of the root (c1, c5, c7).
+                let chain = lfcp::wire::control::device::CertificateChain::new(
+                    input["chain"]
+                        .as_array()
+                        .unwrap_or_else(|| panic!("register phase without a chain: {input}"))
+                        .iter()
+                        .map(|c| self.certificate(s(c)))
+                        .collect(),
+                    &root,
+                )
                 .unwrap();
+                assert_eq!(chain.leaf().id(), cert.id());
+                assert_eq!(chain.leaf().payload().device.id(), &device);
                 if state.revocation(&root, &device).is_some()
-                    || state
-                        .revocation(&root, cert.signed_object().kid())
-                        .is_some()
+                    || chain
+                        .issuers()
+                        .any(|issuer| state.revocation(&root, issuer).is_some())
                 {
                     return "superseded";
                 }
@@ -160,6 +172,39 @@ impl Executor {
             _ => panic!("phase {input}"),
         }
     }
+    fn certificate(&self, name: &str) -> lfcp::wire::control::device::DeviceCertificate {
+        lfcp::wire::control::device::DeviceCertificate::parse(&bytes(
+            &self.wire.corpus.data["fixtures"]["certificates"][name]["cose_sign1"],
+        ))
+        .unwrap_or_else(|e| panic!("certificate {name}: {e:?}"))
+    }
+    fn certificate_name(&self, id: &lfcp::base::Hash32) -> String {
+        self.wire.corpus.data["fixtures"]["certificates"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .find(|name| self.certificate(name).id() == *id)
+            .unwrap()
+            .clone()
+    }
+    fn chain_names(&self, chain: &lfcp::wire::control::device::CertificateChain) -> Vec<String> {
+        chain
+            .certificates()
+            .iter()
+            .map(|c| self.certificate_name(&c.id()))
+            .collect()
+    }
+    /// The target's state after a referenced case: its own state when accepted,
+    /// else the head it was refused on.
+    fn state_after(&mut self, reference: &str, result: &J) -> ControlState {
+        let name = reference.strip_prefix("wire:").unwrap();
+        if result["outcome"] == "accept" {
+            self.wire.at(name)
+        } else {
+            let c = self.wire.corpus.case(name).clone();
+            self.wire.history(&c["context"]).pop().unwrap()
+        }
+    }
     fn retry(&mut self, reference: &str) -> J {
         let name = reference.strip_prefix("wire:").unwrap();
         let c = self.wire.corpus.case(name).clone();
@@ -202,6 +247,9 @@ impl Executor {
             let mut actual = if let Some(reference) = step.get("case") {
                 let result = self.reference(s(reference));
                 let mut actual = json!({"outcome":result["outcome"],"accepted_ids":result["accepted_ids"],"post_state":result["post_state"]});
+                if result["outcome"] == "N/A" {
+                    actual["reason"] = result["not_applicable"].clone();
+                }
                 if s(reference).starts_with("profile:") && result["outcome"] == "PROFILE_INVALID" {
                     actual["outcome"] = result["diagnostic"].clone();
                 }
@@ -249,6 +297,15 @@ impl Executor {
                 if s(reference).starts_with("wire:") {
                     let name = s(reference).strip_prefix("wire:").unwrap();
                     let case = self.wire.corpus.case(name).clone();
+                    if case["kind"] == "session_read" {
+                        if let Some(post) = result["post_state"].as_object() {
+                            for (key, value) in post {
+                                if actual.get(key).is_none() {
+                                    actual[key] = value.clone();
+                                }
+                            }
+                        }
+                    }
                     if case["kind"] == "control_record" && result["outcome"] == "accept" {
                         let record =
                             ReceivedControlRecord::parse(&self.wire.record_bytes(name)).unwrap();
@@ -351,6 +408,17 @@ impl Executor {
                 assert_eq!(signed.bytes(), bytes(&fixture["cose_sign1"]));
                 assert_eq!(cert.payload_digest(), digest);
                 actual["signed_certificate"] = json!("CERT_B");
+                if journal["phase"] == "register" {
+                    // The chain of the signed certificate: CERT_B, then its signer's chain at
+                    // the head the phase runs on.
+                    let state = self.wire.at(s(&step["phase_input"]["state"])
+                        .strip_prefix("wire:")
+                        .unwrap());
+                    let signer = state.device(cert.signed_object().kid()).unwrap();
+                    let mut chain = vec![self.certificate_name(&cert.id())];
+                    chain.extend(self.chain_names(signer.chain.as_ref().unwrap()));
+                    actual["chain"] = json!(chain);
+                }
                 actual["certificate_payload_matches_journal"] =
                     json!(signed.payload_bytes() == payload);
                 if let Some(d) = journal.get("certificate_payload_digest") {
@@ -386,7 +454,7 @@ impl Executor {
                     if actual.get(key).is_some() {
                         subset(&actual[key], value, &format!("{id}/{n}.{key}"));
                     } else {
-                        let reason = boundary(key);
+                        let reason = boundary(id, key);
                         na.push(json!({"step":n,"field":key,"reason":reason}));
                     }
                 }
@@ -398,13 +466,13 @@ impl Executor {
             // This is explanatory prose; the exact numeric frontier and all
             // hole/cutoff outcomes are checked above and below.
             if key == "frontier_rule" {
-                na.push(json!({"field":"final.frontier_rule","reason":boundary(key)}));
+                na.push(json!({"field":"final.frontier_rule","reason":boundary(id, key)}));
                 continue;
             }
             if let Some(actual) = final_state.get(key) {
                 subset(actual, value, &format!("{id}.final.{key}"));
             } else {
-                na.push(json!({"field":format!("final.{key}"),"reason":boundary(key)}));
+                na.push(json!({"field":format!("final.{key}"),"reason":boundary(id, key)}));
             }
         }
         json!({"outcome":if na.is_empty(){"accept"}else{"N/A"},"simulation":true,"steps":steps,"post_state":final_state,"not_applicable":na})
@@ -417,8 +485,12 @@ impl Executor {
     let order=["D_dev_a_seq1","D_dev_b_seq1","D_bridge_writes_x"];accepted_names.sort_by_key(|n|order.iter().position(|s|s==n).unwrap());
     self.results.insert("rebuild".into(),json!({"accepted":accepted_names,"excluded":excluded}));json!({"outcome":"rebuilt","excluded":excluded,"surfaced_as_stale":!excluded.is_empty()})
    }
-   ("F05_reconciliation",5)=>{let state=self.wire.at("flow.reconcile_register_dev_a");let sender=self.wire.id("OWNER");let mut ledger=BTreeMap::new();for name in ["DEV_A","DEV_B"]{authority::can_distribute_key(&state,&sender,&self.wire.id(name)).unwrap();self.ledger.insert(("X".into(),0,name.into()),"simulated delivery receipt".into());ledger.insert(name,vec![0]);}json!({"outcome":"packages sent","ledger_after":ledger,"simulation":true})}
-   ("F05_reconciliation",7)=>{let source=self.wire.at("P4_register_dev_b_approved");let target=self.wire.at("flow.reconcile_register_dev_a");let root=self.wire.id("OWNER");let missing=source.devices().filter(|(id,d)|d.root==root && source.active_device(id).is_some()).filter(|(id,d)|target.device(id).is_none_or(|t|t.leaf_id!=d.leaf_id||!t.registered)).count();let packages=["DEV_A","DEV_B"].iter().filter(|name|!self.ledger.contains_key(&("X".into(),0,name.to_string()))).count();assert_eq!((missing,packages),(0,0));json!({"outcome":"nothing to propose","records":missing,"packages":packages})}
+   ("F05_reconciliation",5)=>{let state=self.wire.at("flow.reconcile_register_dev_a_in_x");let sender=self.wire.id("OWNER");let mut ledger=BTreeMap::new();for name in ["DEV_A","DEV_B"]{authority::can_distribute_key(&state,&sender,&self.wire.id(name)).unwrap();self.ledger.insert(("X".into(),0,name.into()),"simulated delivery receipt".into());ledger.insert(name,vec![0]);}json!({"outcome":"packages sent","ledger_after":ledger,"simulation":true})}
+   ("F05_reconciliation",7)=>{let source=self.wire.at("P4_register_dev_b_approved");let target=self.wire.at("flow.reconcile_register_dev_a_in_x");let root=self.wire.id("OWNER");let missing=source.devices().filter(|(id,d)|d.root==root && source.active_device(id).is_some()).filter(|(id,d)|target.device(id).is_none_or(|t|t.leaf_id!=d.leaf_id||!t.registered)).count();let packages=["DEV_A","DEV_B"].iter().filter(|name|!self.ledger.contains_key(&("X".into(),0,name.to_string()))).count();assert_eq!((missing,packages),(0,0));json!({"outcome":"nothing to propose","records":missing,"packages":packages})}
+   ("F05_reconciliation",3)|("F05.sixty_five_sessions",5|10)|("F05.display_data",2|5|9)|("F09_pairing_service",7|11)=>na(RECONCILE),
+   ("F07.read_device_cannot_claim",2)=>na(CLAIM),
+   ("F08.missing_material",2|3)=>na(PAIRING_CLIENT),
+   ("F18_barrier",6)=>na(KEY_PACKAGE_CLIENT),
    ("F06_concurrent_revokes",6)=>{let state=self.wire.at("flow.f06_owner_revokes_dev_b");assert!(state.last_exposing_revocation.is_some());assert!(state.holds(&self.wire.id("DEV_A"),7));json!({"outcome":"rotation test"})}
    ("F07_invitation_accepted_by_device",6)=>na("IDENTITY-PROFILE-01 §7.2 step 3 is a client roster update in DAVE's Identity Resource; the fixture supplies no document/unit for that Resource and sdk-rs has no client roster orchestration."),
    ("F13_durable_phases",10)=>{let before=self.wire.at("I8_bridge_grant");let after=self.wire.at("I9_device_revoke_dev_a");let p=self.wire.id("DEV_A");let a=before.holds(&p,1);let b=after.holds(&p,1);assert!(a&&!b);json!({"outcome":"fresh DEK (§9.4)","DEV_A_reads":{"I8":a,"I9":b}})}
@@ -453,7 +525,8 @@ impl Executor {
                 let device = self.wire.name(chain.leaf().payload().device.id());
                 let root = self.wire.name(&chain.leaf().payload().root);
                 let certificate = s(&actual["post_state"]["devices"][&device]["leaf"]);
-                actual["phase"] = json!(self.phase(&json!({"phase":"register","state":reference,"root":root,"device":device,"certificate":certificate,"own":true})));
+                let names = self.chain_names(chain);
+                actual["phase"] = json!(self.phase(&json!({"phase":"register","state":reference,"root":root,"device":device,"certificate":certificate,"chain":names,"own":true})));
                 actual["simulation"] = json!(true);
             }
             ("F08.link_reuse_and_equivocation", 3) => {
@@ -587,6 +660,84 @@ impl Executor {
                 actual["simulation"] = json!(true);
             }
             ("F18_barrier", 1..=4) => actual["identity_aware"] = actual["outcome"].clone(),
+            ("F05.sixty_five_sessions", 4) => {
+                let state = self.state_after(s(&step["case"]), actual);
+                let count = state
+                    .revocations()
+                    .filter(|(_, d, _)| {
+                        state
+                            .device(d)
+                            .is_some_and(|b| b.kind == DeviceKind::Pairing)
+                    })
+                    .count();
+                actual["revoked_pairing_devices_in_I"] = json!(count);
+            }
+            ("F05.sixty_five_sessions", 6 | 9) => {
+                // W §17.5 rule 5 counts the revoked pairs of the root whose device is not
+                // bound in X (as a leaf or an intermediate).
+                let state = self.state_after(s(&step["case"]), actual);
+                let owner = self.wire.id("OWNER");
+                let count = state
+                    .revocations()
+                    .filter(|(r, d, _)| *r == owner && state.device(d).is_none())
+                    .count();
+                actual["unbound_revoked_pairs_of_OWNER"] = json!(count);
+            }
+            ("F05.display_data", 1 | 3) => {
+                let state = self.state_after(s(&step["case"]), actual);
+                let mut bound: Vec<_> = state
+                    .devices()
+                    .filter(|(_, b)| b.kind == DeviceKind::Pairing)
+                    .map(|(id, _)| self.wire.name(&id))
+                    .collect();
+                bound.sort();
+                actual["pairing_devices_bound"] = json!(bound);
+            }
+            ("F07.read_device_cannot_claim", 1 | 3) => {
+                // IDENTITY-PROFILE-01 §7.2: a device may claim only when it can write the
+                // roster entry in I, holds(D, 2).
+                let state = self.state_after(s(&step["case"]), actual);
+                let name = if n == 1 { "DEV_R" } else { "DEV_B" };
+                actual[format!("{name}_holds_2_in_I")] = json!(state.holds(&self.wire.id(name), 2));
+            }
+            ("F08.missing_material", 1) => {
+                let state = self.state_after(s(&step["case"]), actual);
+                actual["epochs"] = json!(state
+                    .dek_commitments
+                    .iter()
+                    .map(|(e, _)| *e)
+                    .collect::<BTreeSet<_>>());
+            }
+            ("F13.issuer_revoked_before_resume", 1) => {
+                let state = self.wire.at("I8_bridge_grant");
+                actual["DEV_M2_bound"] = json!(state.device(&self.wire.id("DEV_M2")).is_some());
+            }
+            ("F13.issuer_revoked_before_resume", 2) => {
+                let state = self.wire.at(s(&step["phase_input"]["state"])
+                    .strip_prefix("wire:")
+                    .unwrap());
+                let leaf = state
+                    .device(&self.wire.id("DEV_B"))
+                    .unwrap()
+                    .leaf_id
+                    .unwrap();
+                actual["DEV_B_leaf"] = json!(self.certificate_name(&leaf));
+            }
+            ("F13.issuer_revoked_before_resume", 4 | 5) => {
+                let label = if n == 4 {
+                    "DEV_M2 first registration"
+                } else {
+                    "DEV_B re-certification through DEV_A"
+                };
+                let mut superseded = self
+                    .results
+                    .remove("superseded")
+                    .unwrap_or_else(|| json!([]));
+                if actual["phase"] == "superseded" {
+                    superseded.as_array_mut().unwrap().push(json!(label));
+                }
+                self.results.insert("superseded".into(), superseded);
+            }
             _ => {}
         }
     }
@@ -633,9 +784,22 @@ impl Executor {
                 json!({"device_records_added":0})
             }
             "F05_reconciliation" => {
-                let state = self.wire.at("flow.reconcile_register_dev_a");
+                let state = self.wire.at("flow.reconcile_register_dev_a_in_x");
                 let d = self.wire.state(&state)["devices"].clone();
                 json!({"X_devices":{"DEV_A":d["DEV_A"],"DEV_B":d["DEV_B"]},"idempotent":true})
+            }
+            "F05.sixty_five_sessions" => {
+                let i = self.wire.at("flow.p65_revoke_dev_p_in_i");
+                let x = self.wire.at("flow.p65_x_revoke_dev_p");
+                let pairing = x
+                    .revocations()
+                    .filter(|(_, d, _)| i.device(d).is_some_and(|b| b.kind == DeviceKind::Pairing))
+                    .count();
+                let dev_p = self.wire.id("DEV_P");
+                json!({"X_tombstones_from_pairing":pairing,"DEV_P_registered_in_X":x.device(&dev_p).is_some_and(|d| d.registered)})
+            }
+            "F13.issuer_revoked_before_resume" => {
+                json!({"superseded":self.results["superseded"]})
             }
             "F06_concurrent_revokes" => {
                 let state = self.wire.at("flow.f06_owner_revokes_dev_b");
@@ -739,8 +903,17 @@ impl Executor {
 fn na(reason: &str) -> J {
     json!({"outcome":"N/A","reason":reason})
 }
-fn boundary(field: &str) -> &'static str {
+const RECONCILE: &str = "IDENTITY-PROFILE-01 §7.1: reconciliation (which revoked pairs are relevant in a target, what is proposed, how a refusal is reported and retried, which display entries are written) is client orchestration; sdk-rs has no reconciliation implementation, by design. The Wire records reconciliation proposes and the target's state after them are checked as cases.";
+const CLAIM: &str = "IDENTITY-PROFILE-01 §7.2: whether a device sends the claim, and what it offers instead, is client orchestration; sdk-rs has no invitation client. The precondition holds(D, 2) in I is checked on the Control state.";
+const PAIRING_CLIENT: &str = "IDENTITY-PROFILE-01 §5.2, §5.3 step 1: what a pairing client writes, sends or offers after a link check, or without the material to open a session, is client orchestration; sdk-rs has no pairing client. The link checks and the epochs of I are decided.";
+const KEY_PACKAGE_CLIENT: &str = "LFCP-WIRE-01 §37: the client's check of READY before uploading a same-root Key Package is client orchestration; sdk-rs has no upload client.";
+fn boundary(id: &str, field: &str) -> &'static str {
     match field{
+  "proposals"|"not_propagated"|"pair_state"|"rotation"|"writes"|"metadata_changes"|"entries_main"|"entries_service"|"entries_for_pairing_devices"=>RECONCILE,
+  "reported" if id.starts_with("F08")=>PAIRING_CLIENT,
+  "reported"=>RECONCILE,
+  "request_written"|"sent_as_pairing_device_after_rejection"|"requests_written_after_rejection"|"sessions_without_material"=>PAIRING_CLIENT,
+  "claims_sent_by_read_device"=>CLAIM,
   "pre_identity"|"herald"|"server_without_identity_01"=>"WIRE §100.1 defines behavior of pre-identity/herald implementations and persistent blocked-client UI; this binary is identity-aware and contains neither legacy validator nor client storage.",
   "offered"|"consume_proposed_for_infeasible_preset"=>"IDENTITY-PROFILE-01 §5.3 step 4 requires a future-chain feasibility API to enumerate presets at the current head. sdk-rs checks proposed records but lacks this planning API; this is an SDK coverage gap.",
   "frontier_rule"=>"Explanatory prose only; the exact frontier and hole verdicts are checked from verified units (WIRE §28.1).",
@@ -756,6 +929,6 @@ fn identity_flow_fixtures() {
         let mut executor = Executor::new();
         results.insert(id.clone(), executor.run(c));
     }
-    assert_eq!(results.len(), 22);
+    assert_eq!(results.len(), 28);
     export("identity-flows", &results);
 }

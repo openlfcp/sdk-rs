@@ -54,7 +54,14 @@ pub fn check(c: &J, result: &J) {
     let id = s(&c["id"]);
     let e = &c["expected"];
     if result["outcome"] == "N/A" {
-        assert_eq!(id, "pair_uri_rejected_by_join_parser");
+        assert!(
+            [
+                "pair_uri_rejected_by_join_parser",
+                "KEY_PACKAGE_PUT_same_root_without_identity_01"
+            ]
+            .contains(&id),
+            "{id}: unexpected N/A"
+        );
         assert!(!s(&result["not_applicable"]).is_empty());
         return;
     }

@@ -21,6 +21,9 @@ use lfcp::{
 use serde_json::{json, Value as J};
 use std::collections::{BTreeMap, HashMap};
 
+/// The reason class of a Key Package case decided by a server without identity-01.
+pub const NO_PRE_IDENTITY_RECEIVER: &str = "LFCP-WIRE-01 §37, §100.1: a server whose READY does not list identity-01 refuses a Key Package authorized only by the same-root rule, as a pre-identity receiver does. sdk-rs's identity authority always applies the same-root rule of §25.2 and has no pre-identity (identity-01 not negotiated) mode, so this refusal cannot be exercised.";
+
 pub struct Wire {
     pub corpus: Corpus,
     pub principals: BTreeMap<String, PrincipalDescriptor>,
@@ -402,6 +405,16 @@ impl Wire {
                         let signer = state
                             .principal(&header.sender)
                             .ok_or(Error::IssuerUnknown(header.sender))?;
+                        let identity = i["server_extensions"]
+                            .as_array()
+                            .is_none_or(|x| x.iter().any(|e| e == "identity-01"));
+                        if !identity && !state.holds(&header.sender, 6) {
+                            // Only the same-root rule could authorize this package, and the
+                            // server does not advertise identity-01.
+                            return Ok(
+                                json!({"outcome":"N/A","accepted_ids":[],"post_state":null,"not_applicable":NO_PRE_IDENTITY_RECEIVER}),
+                            );
+                        }
                         let package =
                             received.verify(signer, authority::key_package_policy(&history))?;
                         assert_eq!(package.id().to_hex(), s(&i["object_id"]["hex"]));
@@ -461,17 +474,171 @@ impl Wire {
             "session_read" => {
                 let history = self.history(&c["context"]);
                 let state = history.last().unwrap();
+                let request = s(&i["request"]);
+                let extensions: Vec<&str> = i["server_extensions"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(s)
+                    .collect();
+                // A request for an extension the server does not advertise is refused
+                // before any authorization (LFCP-WIRE-01 §41, §100).
+                if request == "PRESENCE" && !extensions.contains(&"presence") {
+                    return Ok(refused("PROTOCOL_UNSUPPORTED", None));
+                }
+                // §45: an inverted range is a malformed message, whoever asks.
+                let range = i
+                    .get("range")
+                    .map(|r| (r["start"].as_u64().unwrap(), r["end"].as_u64().unwrap()));
+                if let Some((start, end)) = range {
+                    let get = lfcp::wire::message::Message::new(
+                        [0; 16],
+                        lfcp::wire::message::Body::ControlGet {
+                            resource_id: state.resource_id,
+                            start,
+                            end,
+                        },
+                    );
+                    // The request is decoded as the server receives it (§45).
+                    lfcp::wire::message::Message::decode(&get.encode(), &Default::default())?;
+                }
                 let access = state.may_read(&self.id(s(&i["session"])));
                 let (read, head) = match access {
                     ReadAccess::Full => ("full", state.head),
-                    ReadAccess::ControlPrefix(h) if i["request"] == "CONTROL_GET" => ("prefix", h),
+                    // §41: a revoked reader opens and reads the Control prefix only.
+                    ReadAccess::ControlPrefix(h)
+                        if request == "CONTROL_GET" || request == "RESOURCE_OPEN" =>
+                    {
+                        ("prefix", h)
+                    }
                     _ => {
                         return Err(Error::AuthorizationFailed(
                             lfcp::base::AuthorityRule::MissingAbility(1),
                         ))
                     }
                 };
+                if request == "PRESENCE" {
+                    assert_eq!(read, "full");
+                    let post = json!({"read":read});
+                    subset(&post, &e["post_state"], id);
+                    return Ok(accepted(vec![], post));
+                }
                 let mut post = json!({"read":read,"control_head":self.record_name(&head.id)});
+                if let Some((start, end)) = range {
+                    // The prefix ends at the revoking record; a range past it is refused,
+                    // a range through it is trimmed there (§41).
+                    let limit = if read == "prefix" {
+                        if start > head.sequence {
+                            return Err(Error::AuthorizationFailed(
+                                lfcp::base::AuthorityRule::MissingAbility(1),
+                            ));
+                        }
+                        end.min(head.sequence)
+                    } else {
+                        end
+                    };
+                    let records: Vec<Vec<u8>> = self
+                        .context_bytes(&c["context"])
+                        .into_iter()
+                        .filter(|r| {
+                            let seq = ReceivedControlRecord::parse(r).unwrap().header().sequence;
+                            (start..=limit).contains(&seq)
+                        })
+                        .collect();
+                    // A competing record the server also holds is returned to a reader
+                    // (the fork is not hidden), never to a revoked reader: the accepted
+                    // chain only.
+                    let competing: Vec<Vec<u8>> = if read == "full" {
+                        i["server_also_holds"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .map(|r| self.corpus.ref_bytes(r))
+                            .filter(|r| {
+                                let seq =
+                                    ReceivedControlRecord::parse(r).unwrap().header().sequence;
+                                (start..=limit).contains(&seq)
+                            })
+                            .collect()
+                    } else {
+                        vec![]
+                    };
+                    let names = |rs: &[Vec<u8>]| {
+                        rs.iter()
+                            .map(|r| {
+                                self.record_name(&ReceivedControlRecord::parse(r).unwrap().id())
+                            })
+                            .collect::<Vec<_>>()
+                    };
+                    let mut all = records.clone();
+                    all.extend(competing.iter().cloned());
+                    let batch = lfcp::wire::message::Message::new(
+                        [0; 16],
+                        lfcp::wire::message::Body::ControlBatch {
+                            resource_id: state.resource_id,
+                            records: all.clone(),
+                        },
+                    );
+                    let decoded =
+                        lfcp::wire::message::Message::decode(&batch.encode(), &Default::default())?;
+                    assert_eq!(decoded.body.control_records().unwrap().len(), all.len());
+                    post["answer"] = json!("CONTROL_BATCH");
+                    post["records"] = json!(names(&records));
+                    post["competing_returned"] = json!(names(&competing));
+                    if read == "prefix" && end > head.sequence {
+                        post["trimmed_at"] = json!(self.record_name(&head.id));
+                    }
+                    subset(&post, &e["post_state"], id);
+                    return Ok(accepted(vec![head.id.to_hex()], post));
+                }
+                if request == "RESOURCE_OPEN" && read == "prefix" {
+                    // §41: RESOURCE_OPENED names the revoking record as the only head, an
+                    // empty Have Vector, no Snapshot, route or coordinator, and opens no
+                    // subscription.
+                    let opened = lfcp::wire::message::Message::new(
+                        [0; 16],
+                        lfcp::wire::message::Body::ResourceOpened {
+                            resource_id: state.resource_id,
+                            control_heads: vec![lfcp::wire::message::ControlHead {
+                                sequence: head.sequence,
+                                id: head.id,
+                            }],
+                            have: vec![],
+                            snapshot: None,
+                            route_version: None,
+                            coordinator: None,
+                        },
+                    );
+                    let envelope = lfcp::cbor::decode_strict(&opened.encode())?;
+                    let body = envelope.get_uint(4).unwrap();
+                    let body_cbor = lfcp::cbor::encode(body)?;
+                    let decoded = lfcp::wire::message::Message::decode(
+                        &opened.encode(),
+                        &Default::default(),
+                    )?;
+                    let lfcp::wire::message::Body::ResourceOpened {
+                        control_heads,
+                        have,
+                        ..
+                    } = &decoded.body
+                    else {
+                        unreachable!()
+                    };
+                    let absent: Vec<u64> = [3, 4, 5]
+                        .into_iter()
+                        .filter(|k| body.get_uint(*k).is_none())
+                        .collect();
+                    post["answer"] = json!("RESOURCE_OPENED");
+                    post["body"] = json!({
+                        "control_heads": control_heads.iter().map(|h| self.record_name(&h.id)).collect::<Vec<_>>(),
+                        "have_vector": have.iter().map(|_| J::Null).collect::<Vec<_>>(),
+                    });
+                    post["body_cbor"] = json!({"hex": lfcp::base::to_hex(&body_cbor)});
+                    post["absent_fields"] = json!(absent);
+                    post["live_subscription"] = json!(false);
+                    subset(&post, &e["post_state"], id);
+                    return Ok(accepted(vec![head.id.to_hex()], post));
+                }
                 if read == "prefix" {
                     post["records"] = json!(history
                         .iter()

@@ -194,6 +194,8 @@ impl Profile {
                     assert_eq!(decoded.identity, resource);
                     assert!(!format!("{decoded:?}").contains("secret="));
                     accepted(vec![decoded.device.to_hex()], J::Null)
+                } else if i.get("binding_head").is_some() {
+                    self.check_link(c)
                 } else if i["parser"] == "join" {
                     json!({"outcome":"N/A","accepted_ids":[],"post_state":null,"not_applicable":"IDENTITY-PROFILE-01 §5.2 / LFCP-WIRE-01 §18.2: sdk-rs has no invitation-URI parser; rejecting pair links in that parser cannot be exercised."})
                 } else {
@@ -293,6 +295,60 @@ impl Profile {
             other => panic!("unsupported profile kind {other}"),
         }
     }
+    /// IDENTITY-PROFILE-01 §5.2, the checks a client makes on a pairing link
+    /// before it writes a request: (1) `PairingLink::parse` recomputes J's
+    /// descriptor from the secret; (2) J opens the Resource (W §41,
+    /// `ControlState::may_read` at the binding head: a revoked reader opens
+    /// through the Control prefix); (3) the Genesis profile is
+    /// `org.openlfcp.identity.v1`; (4) J is a registered, active kind-2 device
+    /// of the owner. sdk-rs has no client that composes these over a session;
+    /// this runner composes them from the public parser and authority state.
+    fn check_link(&self, c: &J) -> J {
+        use lfcp::wire::control::{
+            authority::ReadAccess, body::ControlBody, device::DeviceKind, ReceivedControlRecord,
+        };
+        let i = &c["inputs"];
+        let id = s(&c["id"]);
+        let link = PairingLink::parse(s(&i["uri"])).unwrap_or_else(|_| panic!("{id}: check 1"));
+        let mut wire = super::identity_wire::Wire::load();
+        assert_eq!(wire.name(&link.device), s(&i["device"]), "{id}");
+        let state = wire.at(s(&i["binding_head"]));
+        assert_eq!(state.resource_id, link.identity, "{id}");
+        let genesis = ReceivedControlRecord::parse(&wire.record_bytes(s(&i["genesis"]))).unwrap();
+        assert_eq!(genesis.header().resource_id, link.identity, "{id}");
+        let ControlBody::Genesis(genesis) = genesis.body() else {
+            panic!("{id}: not a Genesis");
+        };
+        let j = link.device;
+        let rejected = |detail: String| {
+            let mut result = refused("PAIRING_LINK_REJECTED", None);
+            result["detail"] = json!(detail);
+            result
+        };
+        if state.may_read(&j) == ReadAccess::Denied {
+            return rejected(
+                "check 2: the session as J is refused (W §41): J is not a reader".into(),
+            );
+        }
+        if genesis.data_profile != lfcp::identity::PROFILE {
+            return rejected(format!(
+                "check 3: the Genesis profile is {}",
+                genesis.data_profile
+            ));
+        }
+        let d = state.device(&j).unwrap();
+        let active = state.active_device(&j).is_some();
+        if !(d.kind == DeviceKind::Pairing && d.registered && active && d.root == *state.owner.id())
+        {
+            return rejected(format!(
+                "check 4: J is not a registered, active kind-2 device of the owner (kind {}, active {active}, root {}, owner {})",
+                d.kind as u8,
+                wire.name(&d.root),
+                wire.name(state.owner.id()),
+            ));
+        }
+        accepted(vec![j.to_hex()], J::Null)
+    }
     fn names(&self, hashes: Vec<ChangeHash>) -> Vec<String> {
         hashes
             .into_iter()
@@ -367,6 +423,28 @@ impl Profile {
                     )
                     .unwrap();
                 json!({"by_order":results,"snapshot":{"initial_change":self.initial(&mut r),"used":used}})
+            }
+            _ if id.starts_with("identity_doc_initial_") && id.ends_with("_list.snapshot") => {
+                // §4 after loading the Snapshot: a list where the root needs a map makes the
+                // root invalid and every reader unusable. The Snapshot is not admitted either:
+                // its only witness, the initial change, is refused as INVALID_ROOT.
+                let snapshot = bytes(&i["snapshot"]);
+                let view = IdentityDoc::inspect(&snapshot, self.owner).unwrap();
+                let root = view.validate_root().err();
+                // Every reader is unusable, including the containers that are maps.
+                for container in ["roster", "devices", "requests"] {
+                    assert_eq!(view.entries(container).err(), root, "{id} {container}");
+                }
+                assert_eq!(view.extension_diagnostic("any"), root, "{id} extensions");
+                let witness = self.unit(self.change_case(s(&i["change"]["case"])));
+                assert!(!r
+                    .receive_snapshot(
+                        &framing::encode_snapshot(&snapshot),
+                        std::slice::from_ref(&witness)
+                    )
+                    .unwrap());
+                assert!(r.accepted().is_empty());
+                json!({"root_diagnostic":root.map_or("valid", |d| d.name()),"document_usable":root.is_none()})
             }
             "identity_doc_initial_without_unit_1" => {
                 let witness = self.unit(self.change_case(s(&i["root_unit_1"]["case"])));

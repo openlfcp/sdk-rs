@@ -1,6 +1,6 @@
 # Identity authority (LFCP-04-404 / R2)
 
-The normative reference is openlfcp/spec `mvp-0.4-baseline.3` at `6af372b`:
+The normative reference is openlfcp/spec `mvp-0.4-baseline.4` at `9bea714`:
 LFCP-WIRE-01 §§7.3, 15, 17.2–17.5, 18.1, 23.3, 25.2, 41, 62, 79 and 80.1.
 `spec.lock` pins the normative text and the published identity corpora together.
 The corpus runners also retain the existing Wire/profile vector verdicts.
