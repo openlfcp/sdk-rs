@@ -57,7 +57,10 @@ checks its conflict union, while `receive_snapshot` refuses its historical
 foreign hints. State inspection does not establish admission.
 
 `PairingLink` parses only `lfcp://pair/`, recomputes the Principal from its secret,
-and rejects a mismatched `device`. Secret storage and returned URI strings are
+and rejects a mismatched `device`. An endpoint is checked as a receiver checks
+it (W §16): `ws` or `wss` in any case, followed by `://` and an authority, so a
+link to a loopback server (`ws://127.0.0.1:8787`) parses. `PairingLink::new`
+applies the writer's rule instead: `wss`, or `ws` to a loopback address. Secret storage and returned URI strings are
 zeroized on drop; Debug and errors redact them. Before using a parsed link, the
 client must verify the Genesis profile and active kind-2 registration (§5.2).
 The SDK does not perform networking, show approval UI, or persist a pairing

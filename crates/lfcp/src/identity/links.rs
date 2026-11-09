@@ -2,6 +2,7 @@
 use crate::{
     base::{from_b64url, to_b64url, PrincipalId, ResourceId},
     principal::PrincipalKeys,
+    wire::control::body::{is_loopback, scheme},
 };
 use std::fmt;
 use zeroize::Zeroizing;
@@ -44,7 +45,7 @@ impl PairingLink {
         ed25519_seed: &[u8; 32],
         x25519_private: &[u8; 32],
     ) -> Result<Self, LinkRejected> {
-        if endpoints.is_empty() || endpoints.iter().any(|e| !endpoint(e)) {
+        if endpoints.is_empty() || endpoints.iter().any(|e| !writable_endpoint(e)) {
             return Err(LinkRejected);
         }
         // The closed, deterministic invite-secret map has exactly this
@@ -80,7 +81,7 @@ impl PairingLink {
             let v = unescape(v)?;
             match k.as_str() {
                 "endpoint" => {
-                    if !endpoint(&v) {
+                    if !received_endpoint(&v) {
                         return Err(LinkRejected);
                     }
                     endpoints.push(v);
@@ -139,13 +140,28 @@ fn secret_keys(bytes: &[u8]) -> Result<PrincipalKeys, LinkRejected> {
     Ok(PrincipalKeys::from_secrets(&ed, *x))
 }
 
-fn endpoint(s: &str) -> bool {
-    s.strip_prefix("wss://").is_some_and(|s| {
-        !s.is_empty()
-            && !s.starts_with('/')
-            && !s.contains(['#', '@'])
-            && !s.chars().any(|c| c.is_whitespace() || c.is_control())
-    })
+/// An endpoint a receiver accepts in a link (§5.2, W §18.2, W §16): the
+/// scheme `ws` or `wss`, compared case-insensitively and followed by `://`,
+/// then a non-empty authority with no user information, fragment,
+/// whitespace or control character.
+fn received_endpoint(s: &str) -> bool {
+    matches!(scheme(s).as_deref(), Some("ws" | "wss"))
+        && s.split_once("://").is_some_and(|(_, s)| {
+            !s.is_empty()
+                && !s.starts_with(['/', '?'])
+                && !s.contains(['#', '@'])
+                && !s.chars().any(|c| c.is_whitespace() || c.is_control())
+        })
+}
+/// An endpoint a writer puts in a link (W §16): `wss`, or `ws` to a
+/// loopback address.
+fn writable_endpoint(s: &str) -> bool {
+    received_endpoint(s)
+        && match scheme(s).as_deref() {
+            Some("wss") => true,
+            Some("ws") => is_loopback(s),
+            _ => false,
+        }
 }
 fn escape(s: &str) -> String {
     let mut out = String::new();
@@ -200,4 +216,79 @@ pub fn fingerprint(principal: &PrincipalId) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ED: [u8; 32] = [3; 32];
+    const X: [u8; 32] = [4; 32];
+
+    fn link(endpoint: &str) -> Result<PairingLink, LinkRejected> {
+        PairingLink::new(
+            ResourceId::from_bytes([7; 32]),
+            vec![endpoint.into()],
+            &ED,
+            &X,
+        )
+    }
+
+    /// A writer uses `wss`, or `ws` for a loopback address (W §16).
+    #[test]
+    fn new_accepts_wss_and_loopback_ws_only() {
+        for ok in [
+            "wss://sync.example",
+            "WSS://sync.example/ws",
+            "ws://127.0.0.1:8787",
+            "ws://127.9.0.1",
+            "ws://localhost:8787/ws",
+            "WS://[::1]:8787",
+        ] {
+            assert!(link(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "ws://sync.example",
+            "ws://10.0.0.1:8787",
+            "https://sync.example",
+            "wss:sync.example",
+            "wss://",
+            "wss:///path",
+            "wss://user@sync.example",
+            "sync.example",
+        ] {
+            assert_eq!(link(bad).err(), Some(LinkRejected), "{bad}");
+        }
+    }
+
+    /// A receiver accepts `ws` or `wss` in any case, followed by `://` and
+    /// an authority (§5.2, W §18.2, W §16); it does not apply the writer's
+    /// loopback rule.
+    #[test]
+    fn parse_applies_the_receiver_check() {
+        let canonical = link("wss://sync.example").unwrap().encode().to_string();
+        let with = |endpoint: &str| {
+            canonical.replace(
+                "endpoint=wss%3A%2F%2Fsync.example",
+                &format!("endpoint={}", escape(endpoint)),
+            )
+        };
+        for ok in [
+            "ws://127.0.0.1:8787",
+            "WSS://sync.example",
+            "Ws://sync.example",
+            "ws://sync.example",
+        ] {
+            let parsed = PairingLink::parse(&with(ok)).unwrap();
+            assert_eq!(parsed.endpoints, [ok]);
+        }
+        for bad in [
+            "https://sync.example",
+            "wss:sync.example",
+            "wss://",
+            "wss://?x",
+        ] {
+            assert!(PairingLink::parse(&with(bad)).is_err(), "{bad}");
+        }
+    }
 }

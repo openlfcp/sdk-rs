@@ -676,7 +676,7 @@ fn url_field(body: &Value, key: u64) -> Result<String, Error> {
 
 /// The lower-cased RFC 3986 scheme of `url`, if it has one followed by
 /// `://`.
-fn scheme(url: &str) -> Option<String> {
+pub(crate) fn scheme(url: &str) -> Option<String> {
     let (scheme, rest) = url.split_once(':')?;
     let valid = scheme.starts_with(|c: char| c.is_ascii_alphabetic())
         && scheme
@@ -687,7 +687,7 @@ fn scheme(url: &str) -> Option<String> {
 
 /// Whether the host of a `scheme://authority/...` URL is a loopback
 /// address: `localhost`, an IPv4 address in 127.0.0.0/8, or `[::1]`.
-fn is_loopback(url: &str) -> bool {
+pub(crate) fn is_loopback(url: &str) -> bool {
     let Some((_, rest)) = url.split_once("://") else {
         return false;
     };
