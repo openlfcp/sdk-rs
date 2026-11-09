@@ -148,21 +148,30 @@ fn secret_keys(bytes: &[u8]) -> Result<PrincipalKeys, LinkRejected> {
 
 /// An endpoint a receiver accepts in a link (§5.2, W §18.2, W §16): the
 /// scheme `ws` or `wss`, compared case-insensitively and followed by `://`,
-/// then a non-empty authority with no user information, fragment,
-/// whitespace or control character.
+/// then a non-empty authority, with no fragment, whitespace or control
+/// character. An `@` is allowed: W §16 has no rule on user information, and
+/// in the path or query it is an ordinary character.
 fn received_endpoint(s: &str) -> bool {
     matches!(scheme(s).as_deref(), Some("ws" | "wss"))
         && s.split_once("://").is_some_and(|(_, s)| {
             !s.is_empty()
                 && !s.starts_with(['/', '?'])
-                && !s.contains(['#', '@'])
+                && !s.contains('#')
                 && !s.chars().any(|c| c.is_whitespace() || c.is_control())
         })
 }
+/// The authority of a `scheme://authority/...` URL: up to the first `/`,
+/// `?` or `#`.
+fn authority(s: &str) -> &str {
+    let rest = s.split_once("://").map_or("", |(_, r)| r);
+    rest.split(['/', '?', '#']).next().unwrap_or("")
+}
 /// An endpoint a writer puts in a link (W §16): `wss`, or `ws` to a
-/// loopback address.
+/// loopback address, with no user information in its authority (an `@` in
+/// the path or query is kept).
 fn writable_endpoint(s: &str) -> bool {
     received_endpoint(s)
+        && !authority(s).contains('@')
         && match scheme(s).as_deref() {
             Some("wss") => true,
             Some("ws") => is_loopback(s),
@@ -261,10 +270,42 @@ mod tests {
             "wss://",
             "wss:///path",
             "wss://user@sync.example",
+            "wss://user@sync.example/users/@alice",
+            "ws://user@127.0.0.1:8787",
             "sync.example",
         ] {
             assert_eq!(link(bad).err(), Some(LinkRejected), "{bad}");
         }
+    }
+
+    /// An `@` after the authority is a path or query character, not user
+    /// information: written and parsed (review 417-418 F2). User information
+    /// in the authority is refused by the writer only; W §16 gives a
+    /// receiver no rule on it, as sdk-ts's checkReceivedUrl.
+    #[test]
+    fn an_at_sign_outside_the_authority_is_kept() {
+        for ok in [
+            "wss://sync.example/users/@alice",
+            "wss://sync.example?user=a@b",
+            "wss://sync.example/a@b?c=@d",
+        ] {
+            let written = link(ok).unwrap();
+            let parsed = PairingLink::parse(&written.encode()).unwrap();
+            assert_eq!(parsed.endpoints, [ok], "{ok}");
+        }
+        let canonical = link("wss://sync.example").unwrap().encode().to_string();
+        let with = |endpoint: &str| {
+            canonical.replace(
+                "endpoint=wss%3A%2F%2Fsync.example",
+                &format!("endpoint={}", escape(endpoint)),
+            )
+        };
+        let userinfo = "wss://user@sync.example";
+        assert_eq!(link(userinfo).err(), Some(LinkRejected));
+        assert_eq!(
+            PairingLink::parse(&with(userinfo)).unwrap().endpoints,
+            [userinfo]
+        );
     }
 
     /// A receiver accepts `ws` or `wss` in any case, followed by `://` and
