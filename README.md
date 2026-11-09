@@ -85,7 +85,7 @@ for MVP 0.1: every LFCP-TEST-VECTORS-01 case is decided in scope.
 
 MVP 0.4 identity support includes Device Certificates, device authority and
 revocation, and the optional `identity` document profile. The identity suites
-cover all 424 Wire and 301 profile cases (one Wire and one profile case are N/A).
+cover all 424 Wire and 303 profile cases (one Wire and one profile case are N/A).
 The 28 flow fixtures execute protocol steps and local phase/ledger simulations,
 with explicit N/A entries for missing client UI, reconciliation (sdk-rs has none,
 by design), feasibility planning, durable storage, legacy validators and server
@@ -142,7 +142,7 @@ builds on the stable Rust toolchain; no older minimum version is promised.
 `spec.lock` pins the specification this SDK implements:
 
 ```json
-{ "repository": "openlfcp/spec", "tag": null, "commit": "d5cb6852844bd91a39e9ac66e1ab2a9c23474e19" }
+{ "repository": "openlfcp/spec", "tag": null, "commit": "1dc648b7693bf031b7fdfaa945477489d2ace4c1" }
 ```
 
 This is a development pin of the `mvp-0.4-baseline.5` candidate (task
