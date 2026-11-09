@@ -7,7 +7,12 @@ use support::spec::Spec;
 #[test]
 fn wire_vectors_load_at_the_locked_commit() {
     let spec = Spec::open();
-    assert_eq!(spec.lock().tag.as_deref(), Some("mvp-0.4-baseline.4"));
+    // A development pin of the mvp-0.4-baseline.5 candidate until that tag
+    // exists; then the tag is pinned with the same commit.
+    assert!(matches!(
+        spec.lock().tag.as_deref(),
+        None | Some("mvp-0.4-baseline.5")
+    ));
 
     let vectors = spec.read_json("test-vectors/lfcp-wire-01/LFCP-TEST-VECTORS-01.json");
     assert_eq!(vectors["format"], "lfcp-vector-format/1");

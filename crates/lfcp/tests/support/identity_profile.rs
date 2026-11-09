@@ -196,6 +196,28 @@ impl Profile {
                     accepted(vec![decoded.device.to_hex()], J::Null)
                 } else if i.get("binding_head").is_some() {
                     self.check_link(c)
+                } else if let Some(endpoint) = i.get("endpoint") {
+                    // §5.2, W §18.2 and §16: the receiver's endpoint check.
+                    let endpoint = s(endpoint);
+                    match PairingLink::parse(s(&i["uri"])) {
+                        Ok(link) => {
+                            assert_eq!(link.endpoints, [endpoint], "{id}");
+                            accepted(vec![], J::Null)
+                        }
+                        Err(_) => {
+                            let scheme = endpoint.split_once(':').map(|(s, _)| s);
+                            let mut result = refused("PAIRING_LINK_REJECTED", None);
+                            result["detail"] = json!(if scheme
+                                .is_some_and(|s| s.eq_ignore_ascii_case("ws")
+                                    || s.eq_ignore_ascii_case("wss"))
+                            {
+                                "endpoint: no authority after the scheme"
+                            } else {
+                                "endpoint: the scheme is not ws or wss"
+                            });
+                            result
+                        }
+                    }
                 } else if i["parser"] == "join" {
                     json!({"outcome":"N/A","accepted_ids":[],"post_state":null,"not_applicable":"IDENTITY-PROFILE-01 §5.2 / LFCP-WIRE-01 §18.2: sdk-rs has no invitation-URI parser; rejecting pair links in that parser cannot be exercised."})
                 } else {
@@ -592,6 +614,7 @@ pub fn plain(p: &Plain) -> J {
         Plain::Bool(b) => json!(b),
         Plain::Uint(n) => json!(n),
         Plain::Int(n) => json!(n),
+        Plain::F64(n) => json!(n),
         Plain::Str(s) | Plain::Text(s) => json!(s),
         Plain::List(l) => J::Array(l.iter().map(plain).collect()),
         Plain::Map(m) => J::Object(m.iter().map(|(k, v)| (k.clone(), plain(v))).collect()),

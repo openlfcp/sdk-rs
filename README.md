@@ -13,7 +13,7 @@ test vectors in `openlfcp/spec`, not ported from `sdk-ts`.
 ## Scope
 
 sdk-rs implements the OpenLFCP MVP 0.1 subset of LFCP-WIRE-01
-plus the MVP 0.4 identity extensions at `mvp-0.4-baseline.4`, not every
+plus the MVP 0.4 identity extensions at the `mvp-0.4-baseline.5` candidate, not every
 deferred WIRE-01 feature; it has a pairing URI codec but no invitation URI codec yet. See
 `.github: docs/release/deferred-wire-01-features.md` (in [openlfcp/.github](https://github.com/openlfcp/.github)). It does not claim
 full LFCP-WIRE-01 conformance.
@@ -85,7 +85,7 @@ for MVP 0.1: every LFCP-TEST-VECTORS-01 case is decided in scope.
 
 MVP 0.4 identity support includes Device Certificates, device authority and
 revocation, and the optional `identity` document profile. The identity suites
-cover all 424 Wire and 271 profile cases (one Wire and one profile case are N/A).
+cover all 424 Wire and 300 profile cases (one Wire and one profile case are N/A).
 The 28 flow fixtures execute protocol steps and local phase/ledger simulations,
 with explicit N/A entries for missing client UI, reconciliation (sdk-rs has none,
 by design), feasibility planning, durable storage, legacy validators and server
@@ -142,8 +142,18 @@ builds on the stable Rust toolchain; no older minimum version is promised.
 `spec.lock` pins the specification this SDK implements:
 
 ```json
-{ "repository": "openlfcp/spec", "tag": "mvp-0.4-baseline.4", "commit": "9bea71420071bf4253448041750e6be1f61e5c17" }
+{ "repository": "openlfcp/spec", "tag": null, "commit": "44fa12df5e7cb880ee43605758c335d99665f021" }
 ```
+
+This is a development pin of the `mvp-0.4-baseline.5` candidate (task
+LFCP-04-417): `tag` becomes `mvp-0.4-baseline.5`, with the same commit, once
+that tag exists. Until then CI, which checks out the spec at `tag`, cannot run
+it. The candidate states the positions of admission rule AI3 (decision I27):
+only an entry, a named field, a `missing_keys` entry and an element of
+`endpoints`, `scope` or `missing_keys[X]` are type-checked, and a list element
+admits only a string, boolean or uint. It adds the profile cases of those
+positions and pairing-link endpoint cases (W §18.2, §16). No published value
+changes.
 
 `mvp-0.4-baseline.4` corrects the defects of review LFCP-04-415 with no Wire
 rule change: reconciliation propagates only the revocations relevant in a
