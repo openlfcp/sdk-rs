@@ -59,6 +59,34 @@ impl Objects {
             .is_some_and(|o| matches!(o.kind, ObjType::Map))
     }
 
+    /// The kind of `obj`: the root is a map; `None` if it is not indexed.
+    pub(super) fn kind(&self, obj: &ObjectId, added: &Self) -> Option<ObjType> {
+        match obj {
+            ObjectId::Root => Some(ObjType::Map),
+            ObjectId::Id(id) => self.get(id, added).map(|o| o.kind),
+        }
+    }
+
+    /// The path of `obj` from the root: a map key, or `None` for a list
+    /// element (unlike [`Self::path`], never confused with a map key).
+    pub(super) fn segments<'a>(
+        &'a self,
+        mut obj: &'a ObjectId,
+        added: &'a Self,
+    ) -> Option<Vec<Option<String>>> {
+        let mut path = Vec::new();
+        while let ObjectId::Id(id) = obj {
+            let created = self.get(id, added)?;
+            path.push(match &created.key {
+                Key::Map(key) => Some(key.to_string()),
+                Key::Seq(_) => None,
+            });
+            obj = &created.parent;
+        }
+        path.reverse();
+        Some(path)
+    }
+
     pub(super) fn path<'a>(
         &'a self,
         mut obj: &'a ObjectId,

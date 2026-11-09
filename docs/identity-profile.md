@@ -28,6 +28,13 @@ every operation on
 Both rules use object-creation history, including objects created earlier in the
 same change and hidden, replaced or deleted objects. AI5 reports
 `UNAUTHORIZED_WRITER` at the same priority as AI4, before `INVALID_FIELD_TYPE`.
+AI3 (decision I27) type-checks only the positions IDENTITY-PROFILE-01 §2.1
+defines, located by object-creation history: an entry, a named field of an
+entry map, a key of `devices[k].missing_keys`, and an element of a list held in
+`endpoints`, `scope` or `missing_keys[X]`. A list element admits only a string,
+boolean or uint; the other positions also a map or a list. Values of
+`extensions[ns]`, unknown fields and anything below a map or list held where a
+scalar or list is defined are not checked; state validation judges the field.
 Deleting a device entry, or replacing its map without writing `missing_keys`,
 does not violate AI5.
 

@@ -371,35 +371,21 @@ fn structural(
         if matches!(op.action, OpType::Make(ObjType::Text)) {
             bad_type = true;
         }
-        let defined = p.len() <= 2 && CONTAINERS.contains(&root)
-            || p.get(2).is_some_and(|field| match root {
-                "roster" => ["profile", "endpoints", "coordinator", "name", "archived"]
-                    .contains(&field.as_str()),
-                "devices" => [
-                    "label",
-                    "kind",
-                    "platform",
-                    "added_at",
-                    "revoked",
-                    "missing_keys",
-                ]
-                .contains(&field.as_str()),
-                "requests" => [
-                    "descriptor",
-                    "pairing",
-                    "label",
-                    "kind",
-                    "scope",
-                    "platform",
-                    "requested_at",
-                ]
-                .contains(&field.as_str()),
-                _ => false,
-            });
-        if defined
-            && matches!(&op.action,OpType::Put(v) if !matches!(v,ScalarValue::Str(_)|ScalarValue::Uint(_)|ScalarValue::Boolean(_)))
-        {
-            bad_type = true;
+        // AI3 (§3, decision I27): only the positions §2.1 defines are
+        // type-checked. A list element admits a scalar of §2.1; an entry, a
+        // named field and a hint entry also a map or a list.
+        if let Some(position) = ai3_position(objects, added, &op) {
+            let scalar = matches!(
+                &op.action,
+                OpType::Put(ScalarValue::Str(_) | ScalarValue::Uint(_) | ScalarValue::Boolean(_))
+            );
+            let container = matches!(op.action, OpType::Make(ObjType::Map | ObjType::List));
+            if !matches!(op.action, OpType::Delete)
+                && !scalar
+                && !(container && position != Position::Element)
+            {
+                bad_type = true;
+            }
         }
         if root == "devices"
             && p.get(2).is_some_and(|k| k == "missing_keys")
@@ -467,5 +453,70 @@ fn structural(
         Some(D::InvalidFieldType)
     } else {
         None
+    }
+}
+
+/// A position §2.1 defines (IDENTITY-PROFILE-01 §3 AI3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Position {
+    /// `roster[k]`, `devices[k]`, `requests[k]`.
+    Entry,
+    /// A field §2.1 names, in a map held as an entry.
+    Field,
+    /// `devices[k].missing_keys[X]`, in a map held as `missing_keys`.
+    Hint,
+    /// An element of a list held in `endpoints`, `scope` or `missing_keys[X]`.
+    Element,
+}
+
+/// The defined position `op` writes, located by the creating operations of
+/// the causal history and of the change, or `None` if AI3 does not check it:
+/// `extensions[ns]`, unknown fields, unknown root keys and anything below a
+/// map or list held where §2.1 defines a scalar or a list.
+fn ai3_position(
+    objects: &Objects,
+    added: &Objects,
+    op: &automerge::legacy::Op,
+) -> Option<Position> {
+    let mut p = objects.segments(&op.obj, added)?;
+    let in_list = matches!(objects.kind(&op.obj, added)?, ObjType::List | ObjType::Text);
+    p.push(match &op.key {
+        Key::Map(k) if !in_list => Some(k.to_string()),
+        _ => None,
+    });
+    let s = |i: usize| p.get(i).and_then(Option::as_deref);
+    let fields: &[&str] = match s(0)? {
+        "roster" => &["profile", "endpoints", "coordinator", "name", "archived"],
+        "devices" => &[
+            "label",
+            "kind",
+            "platform",
+            "added_at",
+            "revoked",
+            "missing_keys",
+        ],
+        "requests" => &[
+            "descriptor",
+            "pairing",
+            "label",
+            "kind",
+            "scope",
+            "platform",
+            "requested_at",
+        ],
+        _ => return None,
+    };
+    let list_field = matches!(
+        (s(0), s(2)),
+        (Some("roster"), Some("endpoints")) | (Some("requests"), Some("scope"))
+    );
+    let hint = s(0) == Some("devices") && s(2) == Some("missing_keys");
+    match (p.len(), in_list) {
+        (2, false) => Some(Position::Entry),
+        (3, false) if s(2).is_some_and(|f| fields.contains(&f)) => Some(Position::Field),
+        (4, false) if hint => Some(Position::Hint),
+        (4, true) if list_field => Some(Position::Element),
+        (5, true) if hint && s(3).is_some() => Some(Position::Element),
+        _ => None,
     }
 }
