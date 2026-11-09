@@ -56,7 +56,7 @@ been removed; every replica uses the same admission rules. The corpus's
 checks its conflict union, while `receive_snapshot` refuses its historical
 foreign hints. State inspection does not establish admission.
 
-`PairingLink` parses only `lfcp://pair/`, recomputes the Principal from its secret,
+`PairingLink` parses only `lfcp://pair/` (scheme and host in any case, §5.2), recomputes the Principal from its secret,
 and rejects a mismatched `device`. An endpoint is checked as a receiver checks
 it (W §16): `ws` or `wss` in any case, followed by `://` and an authority, so a
 link to a loopback server (`ws://127.0.0.1:8787`) parses. `PairingLink::new`

@@ -63,10 +63,16 @@ impl PairingLink {
             secret,
         })
     }
-    /// Parse only `lfcp://pair/`, including strict percent encoding and secret
+    /// Parse only `lfcp://pair/`, the scheme and host in any case (§5.2,
+    /// RFC 3986 §3.1, §3.2.2), including strict percent encoding and secret
     /// descriptor matching. No input text is included in failures.
     pub fn parse(uri: &str) -> Result<Self, LinkRejected> {
-        let rest = uri.strip_prefix("lfcp://pair/").ok_or(LinkRejected)?;
+        const PREFIX: &str = "lfcp://pair/";
+        let rest = uri
+            .get(..PREFIX.len())
+            .filter(|p| p.eq_ignore_ascii_case(PREFIX))
+            .map(|_| &uri[PREFIX.len()..])
+            .ok_or(LinkRejected)?;
         let (public, fragment) = rest.split_once('#').ok_or(LinkRejected)?;
         let encoded = fragment.strip_prefix("secret=").ok_or(LinkRejected)?;
         let secret = Zeroizing::new(from_b64url(encoded).map_err(|_| LinkRejected)?);
@@ -290,5 +296,27 @@ mod tests {
         ] {
             assert!(PairingLink::parse(&with(bad)).is_err(), "{bad}");
         }
+    }
+
+    /// The scheme `lfcp` and the host `pair` are case-insensitive (§5.2);
+    /// the path, query and fragment are not touched.
+    #[test]
+    fn parse_matches_the_prefix_in_any_case() {
+        let canonical = link("wss://sync.example").unwrap().encode().to_string();
+        let rest = canonical.strip_prefix("lfcp://pair/").unwrap();
+        for prefix in ["LFCP://PAIR/", "Lfcp://Pair/", "lfcp://PAIR/"] {
+            assert!(
+                PairingLink::parse(&format!("{prefix}{rest}")).is_ok(),
+                "{prefix}"
+            );
+        }
+        for prefix in ["lfcp://join/", "lfcp:/pair/", "lfcp://pairs/", "lfcp://pai"] {
+            assert!(
+                PairingLink::parse(&format!("{prefix}{rest}")).is_err(),
+                "{prefix}"
+            );
+        }
+        assert!(PairingLink::parse("lfcp://pai").is_err());
+        assert!(PairingLink::parse("ébcdefghijkl").is_err());
     }
 }
