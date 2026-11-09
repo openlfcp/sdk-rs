@@ -85,7 +85,7 @@ for MVP 0.1: every LFCP-TEST-VECTORS-01 case is decided in scope.
 
 MVP 0.4 identity support includes Device Certificates, device authority and
 revocation, and the optional `identity` document profile. The identity suites
-cover all 424 Wire and 300 profile cases (one Wire and one profile case are N/A).
+cover all 424 Wire and 301 profile cases (one Wire and one profile case are N/A).
 The 28 flow fixtures execute protocol steps and local phase/ledger simulations,
 with explicit N/A entries for missing client UI, reconciliation (sdk-rs has none,
 by design), feasibility planning, durable storage, legacy validators and server
@@ -142,7 +142,7 @@ builds on the stable Rust toolchain; no older minimum version is promised.
 `spec.lock` pins the specification this SDK implements:
 
 ```json
-{ "repository": "openlfcp/spec", "tag": null, "commit": "44fa12df5e7cb880ee43605758c335d99665f021" }
+{ "repository": "openlfcp/spec", "tag": null, "commit": "d5cb6852844bd91a39e9ac66e1ab2a9c23474e19" }
 ```
 
 This is a development pin of the `mvp-0.4-baseline.5` candidate (task
@@ -152,8 +152,9 @@ it. The candidate states the positions of admission rule AI3 (decision I27):
 only an entry, a named field, a `missing_keys` entry and an element of
 `endpoints`, `scope` or `missing_keys[X]` are type-checked, and a list element
 admits only a string, boolean or uint. It adds the profile cases of those
-positions and pairing-link endpoint cases (W §18.2, §16). No published value
-changes.
+positions and pairing-link endpoint cases (W §18.2, §16), and matches the
+pairing-link prefix `lfcp://pair/` case-insensitively (decision I32). No
+published value changes.
 
 `mvp-0.4-baseline.4` corrects the defects of review LFCP-04-415 with no Wire
 rule change: reconciliation propagates only the revocations relevant in a

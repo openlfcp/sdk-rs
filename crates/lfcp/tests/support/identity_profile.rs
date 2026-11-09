@@ -196,6 +196,13 @@ impl Profile {
                     accepted(vec![decoded.device.to_hex()], J::Null)
                 } else if i.get("binding_head").is_some() {
                     self.check_link(c)
+                } else if let Some(prefix) = i.get("uri_prefix") {
+                    // §5.2: the scheme and host of the prefix in any case.
+                    let uri = s(&i["uri"]);
+                    assert!(uri.starts_with(s(prefix)), "{id}");
+                    let link = PairingLink::parse(uri).unwrap();
+                    assert_eq!(link.identity.to_b64url(), uri[s(prefix).len()..][..43]);
+                    accepted(vec![], J::Null)
                 } else if let Some(endpoint) = i.get("endpoint") {
                     // §5.2, W §18.2 and §16: the receiver's endpoint check.
                     let endpoint = s(endpoint);
